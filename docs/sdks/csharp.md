@@ -691,6 +691,18 @@ guidance, and Git/curl examples.
 - `ReadyTimeoutSeconds` controls readiness waits. For `ConnectAsync` / `ResumeAsync`, endpoint discovery and health checks share this timeout. Blocking custom code can delay timeout reporting.
 - The SDK does not automatically retry failed API requests; implement retries in caller code where appropriate.
 
+### Redirects
+
+SDK HTTP, SSE, and lifecycle-metrics clients follow up to 50 redirects. When the
+scheme, host, or port changes, they strip `OPEN-SANDBOX-*`, `OPENSANDBOX-*`,
+`X-EXECD-ACCESS-TOKEN`, and `X-API-Key` headers (case-insensitive). These headers
+remain removed if a later hop returns to the original origin. Same-origin hops
+retain them, and unrelated custom headers are unchanged.
+
+As with .NET's normal redirect handling, `Authorization` is cleared on every hop;
+explicit `Cookie` headers retain .NET's existing behavior. HTTPS-to-HTTP redirects
+are not followed. Request bodies are not buffered to make uploads replayable.
+
 ### 7. Resource Cleanup
 
 Both `Sandbox` and `SandboxManager` implement `IAsyncDisposable`. Use `await using` or call `DisposeAsync()` when done.
