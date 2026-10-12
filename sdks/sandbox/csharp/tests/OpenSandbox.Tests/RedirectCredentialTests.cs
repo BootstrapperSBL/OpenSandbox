@@ -36,7 +36,9 @@ public class RedirectCredentialTests
     [InlineData(false, true, false)]
     [InlineData(true, true, false)]
     [InlineData(false, false, true)]
+    [InlineData(true, false, true)]
     [InlineData(false, true, true)]
+    [InlineData(true, true, true)]
     public async Task Redirect_StripsProtectedHeadersOnlyWhenOriginChanges(bool sse, bool crossOrigin, bool sync)
     {
         await using var target = new LoopbackServer(_ => Ok);
@@ -63,9 +65,11 @@ public class RedirectCredentialTests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Redirect_LeavingAndReturningToOrigin_DoesNotRestoreCredentials(bool sse)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Redirect_LeavingAndReturningToOrigin_DoesNotRestoreCredentials(bool sse, bool sync)
     {
         string? sourceUrl = null;
         await using var target = new LoopbackServer(_ => Redirect(sourceUrl + "/returned"));
@@ -77,7 +81,7 @@ public class RedirectCredentialTests
         using var request = Request(source.Url + "/start");
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
 
-        using var response = await client.SendAsync(request, timeout.Token);
+        using var response = sync ? client.Send(request, timeout.Token) : await client.SendAsync(request, timeout.Token);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var sent = await source.Captured;
