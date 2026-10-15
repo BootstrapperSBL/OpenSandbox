@@ -310,23 +310,40 @@ class DockerSnapshotRuntime:
         )
 
     def _reject_gvisor_filestore_only_diff(self, container, *, sandbox_id: str) -> None:
-        """Fail closed when the only visible diff is gVisor's opaque filestore."""
+        """Fail closed when the only visible diff is gVisor's opaque filestore.
+
+        If the filesystem diff cannot be inspected at all, abort rather than
+        proceeding to ``docker commit`` — the same fail-closed spirit as the
+        gVisor overlay preflight. A denied/timed-out diff endpoint must not
+        allow an incomplete snapshot to be published as READY.
+        """
         try:
             if hasattr(container, "diff"):
                 diff_entries = container.diff()
             else:
                 api = getattr(self._docker_client, "api", None)
                 if api is None or not hasattr(api, "diff"):
-                    return
+                    raise SnapshotRuntimeUnsupportedError(
+                        f"Cannot inspect filesystem diff before snapshotting sandbox "
+                        f"{sandbox_id}: Docker diff API is unavailable. Refusing to "
+                        f"commit a potentially incomplete gVisor snapshot."
+                    )
                 container_id = getattr(container, "id", None) or getattr(container, "short_id", None)
                 if not container_id:
-                    return
+                    raise SnapshotRuntimeUnsupportedError(
+                        f"Cannot inspect filesystem diff before snapshotting sandbox "
+                        f"{sandbox_id}: container id is missing. Refusing to commit a "
+                        f"potentially incomplete gVisor snapshot."
+                    )
                 diff_entries = api.diff(container_id)
+        except SnapshotRuntimeUnsupportedError:
+            raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                f"Could not inspect filesystem diff before snapshotting sandbox {sandbox_id}: {exc}"
-            )
-            return
+            raise SnapshotRuntimeUnsupportedError(
+                f"Cannot inspect filesystem diff before snapshotting sandbox "
+                f"{sandbox_id}: {exc}. Refusing to commit a potentially incomplete "
+                f"gVisor snapshot."
+            ) from exc
 
         if not _is_gvisor_filestore_only_diff(diff_entries):
             return

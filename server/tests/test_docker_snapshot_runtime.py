@@ -28,7 +28,7 @@ from opensandbox_server.services.snapshot_runtime import (
 )
 
 
-def _container(*, runtime: str | None = None, diff=None, commit=None):
+def _container(*, runtime: str | None = None, diff=None, commit=None, diff_error=None):
     attrs = {"HostConfig": {}}
     if runtime is not None:
         attrs["HostConfig"]["Runtime"] = runtime
@@ -41,8 +41,16 @@ def _container(*, runtime: str | None = None, diff=None, commit=None):
         commit=commit or default_commit,
         id="ctr-1",
     )
-    if diff is not None:
+    if diff_error is not None:
+        def _raise_diff():
+            raise diff_error
+
+        container.diff = _raise_diff
+    elif diff is not None:
         container.diff = lambda: diff
+    else:
+        # Default empty diff: safety check runs and allows ordinary runtimes.
+        container.diff = lambda: []
     return container
 
 
@@ -339,3 +347,55 @@ def test_create_snapshot_still_commits_when_diff_has_real_paths() -> None:
     assert commits == [("opensandbox-snapshots", "snap-ok")]
     assert status is not None
     assert status.state == SnapshotState.READY
+
+def test_create_snapshot_aborts_when_diff_inspection_fails() -> None:
+    commits: list[tuple[str, str]] = []
+
+    def commit(*, repository: str, tag: str) -> None:
+        commits.append((repository, tag))
+
+    container = _container(
+        runtime="runc",
+        diff_error=RuntimeError("diff endpoint denied"),
+        commit=commit,
+    )
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+    status = runtime.create_snapshot("snap-diff-fail", "sbx-001")
+
+    assert commits == []
+    assert status is not None
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_unsupported"
+    assert "filesystem diff" in (status.message or "")
+    assert "diff endpoint denied" in (status.message or "")
+
+
+def test_create_snapshot_aborts_when_diff_api_unavailable() -> None:
+    commits: list[tuple[str, str]] = []
+
+    def commit(*, repository: str, tag: str) -> None:
+        commits.append((repository, tag))
+
+    # No container.diff and no api.diff → safety check cannot run.
+    container = SimpleNamespace(
+        attrs={"HostConfig": {"Runtime": "runc"}},
+        commit=commit,
+        id="ctr-1",
+    )
+    docker_client = _docker_client(
+        containers=[container],
+        runtimes={"runc": {"path": "runc"}},
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+    status = runtime.create_snapshot("snap-no-diff-api", "sbx-001")
+
+    assert commits == []
+    assert status is not None
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_unsupported"
+    assert "diff API is unavailable" in (status.message or "")
+
