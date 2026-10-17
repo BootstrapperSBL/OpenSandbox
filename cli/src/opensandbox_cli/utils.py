@@ -54,10 +54,10 @@ def parse_duration(value: str) -> timedelta:
             f"Invalid duration '{value}'. Use format like 10m, 1h30m, 90s."
         )
 
-    hours = int(m.group("hours") or 0)
-    minutes = int(m.group("minutes") or 0)
-    seconds = int(m.group("seconds") or 0)
     try:
+        hours = int(m.group("hours") or 0)
+        minutes = int(m.group("minutes") or 0)
+        seconds = int(m.group("seconds") or 0)
         return timedelta(hours=hours, minutes=minutes, seconds=seconds)
     except (OverflowError, ValueError) as exc:
         raise click.BadParameter(f"Duration '{value}' is out of range") from exc

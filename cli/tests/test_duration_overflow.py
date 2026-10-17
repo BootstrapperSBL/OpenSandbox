@@ -16,7 +16,10 @@ import click
 import pytest
 from opensandbox_cli.utils import parse_duration
 
-@pytest.mark.parametrize("value", ["9999999999999999999999999999", "99999999999999999999h", "²"])
+@pytest.mark.parametrize(
+    "value",
+    ["9999999999999999999999999999", "99999999999999999999h", "²", "9" * 5000 + "h"],
+)
 def test_out_of_range_is_a_cli_validation_error(value: str) -> None:
     with pytest.raises(click.BadParameter, match="out of range"):
         parse_duration(value)
