@@ -28,6 +28,18 @@ import (
 // the tenant API key in this header; direct-mode requests must not carry it.
 const serverProxyAuthHeader = "OPEN-SANDBOX-API-KEY"
 
+// hasHeaderFold reports whether headers already carries name under any HTTP
+// casing. Header names are case-insensitive, and endpoint-provided headers may
+// use any casing, so a plain map lookup would add a second, conflicting entry.
+func hasHeaderFold(headers map[string]string, name string) bool {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // SandboxCreateOptions configures sandbox creation.
 type SandboxCreateOptions struct {
 	// Image is the container image URI (required).
@@ -648,7 +660,7 @@ func (s *Sandbox) resolveExecd(ctx context.Context) error {
 		// unknown headers to the backend, so that would send the tenant key
 		// into the untrusted sandbox (and still leave proxied requests
 		// unauthenticated).
-		if _, ok := headers[serverProxyAuthHeader]; !ok {
+		if !hasHeaderFold(headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
 				headers[serverProxyAuthHeader] = apiKey
 			}
@@ -685,7 +697,7 @@ func (s *Sandbox) resolveEgress(ctx context.Context) error {
 		// Same server-proxy auth contract as resolveExecd: the tenant key goes
 		// in OPEN-SANDBOX-API-KEY, never in the egress auth header, which the
 		// proxy forwards into the sandbox.
-		if _, ok := headers[serverProxyAuthHeader]; !ok {
+		if !hasHeaderFold(headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
 				headers[serverProxyAuthHeader] = apiKey
 			}

@@ -43,6 +43,17 @@ func (c *capturedHeaders) first(t *testing.T) http.Header {
 	return c.values[0]
 }
 
+// countHeaderFold counts entries whose name matches name under any HTTP casing.
+func countHeaderFold(headers map[string]string, name string) int {
+	count := 0
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			count++
+		}
+	}
+	return count
+}
+
 // serverProxyFixture publishes proxyURL from a fake lifecycle server so the
 // SDK resolves every data-plane endpoint through it.
 func serverProxyFixture(
@@ -192,4 +203,50 @@ func TestResolveEgressProxyModeDoesNotSmuggleTenantKey(t *testing.T) {
 	require.Equal(t, "", headers.Get("OPENSANDBOX-EGRESS-AUTH"),
 		"the tenant API key must never be sent to the egress sidecar as its auth token")
 	require.Equal(t, "tenant-key-1", headers.Get("OPEN-SANDBOX-API-KEY"))
+}
+
+// TestResolveExecdProxyModeKeepsEndpointProxyKeyCasing covers an endpoint that
+// already supplies the proxy auth header under a non-canonical casing: the
+// endpoint value must win and the SDK must not add a second, conflicting entry.
+func TestResolveExecdProxyModeKeepsEndpointProxyKeyCasing(t *testing.T) {
+	var proxyHeaders capturedHeaders
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHeaders.record(r)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+
+	sb := serverProxyFixture(t, proxy.URL, map[string]string{
+		"open-sandbox-api-key": "endpoint-key",
+	}, true)
+
+	require.NoErrorf(t, sb.resolveExecd(context.Background()), "resolveExecd")
+	require.NoErrorf(t, sb.execd.Ping(context.Background()), "Ping")
+
+	require.Equal(t, 1, countHeaderFold(sb.execd.client.headers, "OPEN-SANDBOX-API-KEY"),
+		"an endpoint-provided proxy key must not be duplicated by the fallback")
+	require.Equal(t, "endpoint-key", proxyHeaders.first(t).Get("OPEN-SANDBOX-API-KEY"))
+}
+
+// TestResolveEgressProxyModeKeepsEndpointProxyKeyCasing is the egress twin of
+// the execd casing test.
+func TestResolveEgressProxyModeKeepsEndpointProxyKeyCasing(t *testing.T) {
+	var proxyHeaders capturedHeaders
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHeaders.record(r)
+		jsonResponse(w, http.StatusOK, PolicyStatusResponse{Status: "ok"})
+	}))
+	defer proxy.Close()
+
+	sb := serverProxyFixture(t, proxy.URL, map[string]string{
+		"open-sandbox-api-key": "endpoint-key",
+	}, true)
+
+	require.NoErrorf(t, sb.resolveEgress(context.Background()), "resolveEgress")
+	_, err := sb.egress.GetPolicy(context.Background())
+	require.NoErrorf(t, err, "GetPolicy")
+
+	require.Equal(t, 1, countHeaderFold(sb.egress.headers, "OPEN-SANDBOX-API-KEY"),
+		"an endpoint-provided proxy key must not be duplicated by the fallback")
+	require.Equal(t, "endpoint-key", proxyHeaders.first(t).Get("OPEN-SANDBOX-API-KEY"))
 }
