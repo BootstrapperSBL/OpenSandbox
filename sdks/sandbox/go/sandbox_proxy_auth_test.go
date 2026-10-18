@@ -250,3 +250,67 @@ func TestResolveEgressProxyModeKeepsEndpointProxyKeyCasing(t *testing.T) {
 		"an endpoint-provided proxy key must not be duplicated by the fallback")
 	require.Equal(t, "endpoint-key", proxyHeaders.first(t).Get("OPEN-SANDBOX-API-KEY"))
 }
+
+// TestResolveExecdProxyModeKeepsConfigProxyKey covers a caller that supplies
+// the proxy auth header through ConnectionConfig.Headers. That map is applied
+// to the same request as the endpoint headers, so the fallback must not add a
+// second, differently-cased entry: the two would collapse onto one wire header
+// and the winner would depend on map iteration order.
+func TestResolveExecdProxyModeKeepsConfigProxyKey(t *testing.T) {
+	for _, headerName := range []string{
+		"OPEN-SANDBOX-API-KEY",
+		"Open-Sandbox-Api-Key",
+		"open-sandbox-api-key",
+	} {
+		t.Run(headerName, func(t *testing.T) {
+			var proxyHeaders capturedHeaders
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				proxyHeaders.record(r)
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer proxy.Close()
+
+			sb := serverProxyFixture(t, proxy.URL, nil, true)
+			sb.config.Headers = map[string]string{headerName: "config-key"}
+
+			require.NoErrorf(t, sb.resolveExecd(context.Background()), "resolveExecd")
+			require.NoErrorf(t, sb.execd.Ping(context.Background()), "Ping")
+
+			require.Equal(t, 1, countHeaderFold(sb.execd.client.headers, serverProxyAuthHeader),
+				"a config-supplied proxy key must not be duplicated by the fallback")
+			require.Equal(t, "config-key", proxyHeaders.first(t).Get(serverProxyAuthHeader),
+				"the caller's configured proxy key must not be replaced by the tenant key")
+		})
+	}
+}
+
+// TestResolveEgressProxyModeKeepsConfigProxyKey is the egress twin of the
+// config-headers casing test.
+func TestResolveEgressProxyModeKeepsConfigProxyKey(t *testing.T) {
+	for _, headerName := range []string{
+		"OPEN-SANDBOX-API-KEY",
+		"Open-Sandbox-Api-Key",
+		"open-sandbox-api-key",
+	} {
+		t.Run(headerName, func(t *testing.T) {
+			var proxyHeaders capturedHeaders
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				proxyHeaders.record(r)
+				jsonResponse(w, http.StatusOK, PolicyStatusResponse{Status: "ok"})
+			}))
+			defer proxy.Close()
+
+			sb := serverProxyFixture(t, proxy.URL, nil, true)
+			sb.config.Headers = map[string]string{headerName: "config-key"}
+
+			require.NoErrorf(t, sb.resolveEgress(context.Background()), "resolveEgress")
+			_, err := sb.egress.GetPolicy(context.Background())
+			require.NoErrorf(t, err, "GetPolicy")
+
+			require.Equal(t, 1, countHeaderFold(sb.egress.headers, serverProxyAuthHeader),
+				"a config-supplied proxy key must not be duplicated by the fallback")
+			require.Equal(t, "config-key", proxyHeaders.first(t).Get(serverProxyAuthHeader),
+				"the caller's configured proxy key must not be replaced by the tenant key")
+		})
+	}
+}

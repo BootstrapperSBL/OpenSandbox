@@ -660,7 +660,13 @@ func (s *Sandbox) resolveExecd(ctx context.Context) error {
 		// unknown headers to the backend, so that would send the tenant key
 		// into the untrusted sandbox (and still leave proxied requests
 		// unauthenticated).
-		if !hasHeaderFold(headers, serverProxyAuthHeader) {
+		//
+		// A caller-supplied key wins, whether it arrives in the endpoint
+		// headers or in ConnectionConfig.Headers. Both maps are merged into the
+		// request headers, so adding the fallback under a second casing would
+		// leave the effective value to map iteration order.
+		if !hasHeaderFold(headers, serverProxyAuthHeader) &&
+			!hasHeaderFold(s.config.Headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
 				headers[serverProxyAuthHeader] = apiKey
 			}
@@ -696,8 +702,11 @@ func (s *Sandbox) resolveEgress(ctx context.Context) error {
 	if s.config.UseServerProxy {
 		// Same server-proxy auth contract as resolveExecd: the tenant key goes
 		// in OPEN-SANDBOX-API-KEY, never in the egress auth header, which the
-		// proxy forwards into the sandbox.
-		if !hasHeaderFold(headers, serverProxyAuthHeader) {
+		// proxy forwards into the sandbox. Caller-supplied keys in the endpoint
+		// headers or ConnectionConfig.Headers are preserved for the same reason
+		// as there.
+		if !hasHeaderFold(headers, serverProxyAuthHeader) &&
+			!hasHeaderFold(s.config.Headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
 				headers[serverProxyAuthHeader] = apiKey
 			}
