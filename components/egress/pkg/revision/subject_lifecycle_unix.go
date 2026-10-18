@@ -73,6 +73,12 @@ type pendingSubjectLifecycle struct {
 // session. Never reconstruct it with an already-used control generation/token.
 // It serializes lifecycle I/O and retains at most one frozen command. Revision
 // Coordinators operate independently and do not consume lifecycle sequences.
+//
+// Register, Unload and Reconcile callers must supply contexts with deadlines:
+// the HTTP client has no implicit timeout. The mutex is held across network I/O,
+// and waiting for it is not context-aware. Concurrent calls, including Pending,
+// therefore wait for the in-flight operation to finish; each operation's caller
+// is responsible for bounding that operation with its own deadline.
 type SubjectLifecycleClient struct {
 	mu      sync.Mutex
 	ipc     *subjectIPCClient
@@ -99,6 +105,7 @@ func NewSubjectLifecycleClient(socketPath, sessionToken, controlGeneration strin
 // Register creates known/uninstalled state; it does not install an empty snapshot.
 // ErrTransportRejected accompanies a confirmed failure receipt. ErrIndeterminate
 // requires Reconcile before any later lifecycle command can be allocated.
+// The caller must supply a context with a deadline; see SubjectLifecycleClient.
 func (c *SubjectLifecycleClient) Register(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
 	return c.command(ctx, "register", target)
 }
@@ -106,12 +113,14 @@ func (c *SubjectLifecycleClient) Register(ctx context.Context, target SubjectTar
 // Unload closes exactly this installation owner. A confirmed subject_failed
 // receipt retires its sequence but leaves the remote owner fenced; another
 // explicit Unload may retry closure with a new sequence.
+// The caller must supply a context with a deadline; see SubjectLifecycleClient.
 func (c *SubjectLifecycleClient) Unload(ctx context.Context, target SubjectTarget) (LifecycleReceipt, error) {
 	return c.command(ctx, "unload", target)
 }
 
 // Pending reports whether an earlier command still needs exact reconciliation.
 // Register and Unload cannot replace it, even with the same target/operation.
+// Pending waits for any in-flight lifecycle call; it is not a nonblocking probe.
 func (c *SubjectLifecycleClient) Pending() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -151,6 +160,7 @@ func (c *SubjectLifecycleClient) command(ctx context.Context, operation string, 
 // At most one exact retry follows status showing the preceding sequence. An
 // unresolved result retains pending and requires a later call with a new context;
 // repeated authentication, framing, and configuration errors do not busy-loop.
+// The caller must supply a context with a deadline; see SubjectLifecycleClient.
 func (c *SubjectLifecycleClient) Reconcile(ctx context.Context) (*LifecycleReceipt, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

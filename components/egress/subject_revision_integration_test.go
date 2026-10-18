@@ -223,6 +223,15 @@ func TestSubjectRevisionRealIPCIsolationAndReplay(t *testing.T) {
 	require.Equal(t, &rb, child.inspect(t, b).Revision)
 	_, err = lifecycle.Unload(ctx, a)
 	require.NoError(t, err)
+	// Replay while the key is absent: a replacement generation must not mask
+	// a missing lifecycle high-water check by rejecting this as a conflict.
+	raw, err := json.Marshal(map[string]any{"controlGeneration": "subject-test-control", "lifecycleSequence": 1, "target": a})
+	require.NoError(t, err)
+	status, rejection := child.response(t, "/v2/subjects/register", raw, child.token, false)
+	require.Equal(t, 409, status)
+	require.JSONEq(t, `{"error":"stale_lifecycle_sequence"}`, string(rejection))
+	_, err = ta.Readback(ctx)
+	require.Error(t, err)
 	replacement := revision.SubjectTarget{SubjectKey: a.SubjectKey, SubjectGeneration: "generation-a-new"}
 	_, err = lifecycle.Register(ctx, replacement)
 	require.NoError(t, err)
@@ -236,7 +245,7 @@ func TestSubjectRevisionRealIPCIsolationAndReplay(t *testing.T) {
 	}
 	_, err = ta.Readback(ctx)
 	require.Error(t, err)
-	raw, _ := json.Marshal(map[string]any{"controlGeneration": "subject-test-control", "lifecycleSequence": 1, "target": a})
+	raw, _ = json.Marshal(map[string]any{"controlGeneration": "subject-test-control", "lifecycleSequence": 1, "target": a})
 	require.Equal(t, 409, child.post(t, "/v2/subjects/register", raw, child.token, false))
 	raw, _ = json.Marshal(map[string]any{"controlGeneration": "subject-test-control", "lifecycleSequence": 4, "target": a})
 	require.Equal(t, 409, child.post(t, "/v2/subjects/unload", raw, child.token, false))
@@ -299,12 +308,13 @@ func TestSubjectRevisionRealIPCLostRepliesAndRejection(t *testing.T) {
 	require.Nil(t, afterAbort.Revision)
 	require.Equal(t, &rb, child.inspect(t, b).Revision)
 	require.True(t, child.exchange(t, map[string]any{"command": "fault", "operation": "commit"}).Ready)
-	_, err = ca.Apply(ctx, 1, 0, pa)
-	if err != nil {
-		require.ErrorIs(t, err, revision.ErrIndeterminate)
-		_, err = ca.Reconcile(ctx)
-		require.NoError(t, err)
-	}
+	candidate, err := ca.Apply(ctx, 1, 0, pa)
+	// The child committed but deliberately sent no HTTP reply. Apply must
+	// retain uncertainty until explicit readback reconciliation confirms it.
+	require.ErrorIs(t, err, revision.ErrIndeterminate)
+	confirmed, err := ca.Reconcile(ctx)
+	require.NoError(t, err)
+	require.Equal(t, &candidate, confirmed)
 	active, err = ta.Readback(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, active)
@@ -314,8 +324,14 @@ func TestSubjectRevisionRealIPCLostRepliesAndRejection(t *testing.T) {
 	request, _ := json.Marshal(map[string]any{"controlGeneration": "subject-test-control", "target": a})
 	require.Equal(t, 401, child.post(t, "/v2/revisions/active", request, strings.Repeat("x", 43), false))
 	require.Equal(t, 401, child.post(t, "/v2/revisions/active", request, child.token, true))
-	require.Equal(t, 400, child.post(t, "/v2/revisions/active", []byte(`{"controlGeneration":"subject-test-control","target":{},"target":{}}`), child.token, false))
-	require.Equal(t, 400, child.post(t, "/v2/revisions/active", []byte(`{"controlGeneration":"subject-test-control","target":{},"extra":true}`), child.token, false))
+	// Keep the target valid so only duplicate/extra-field strictness can reject.
+	targetJSON, err := json.Marshal(a)
+	require.NoError(t, err)
+	duplicateTarget := []byte(`{"controlGeneration":"subject-test-control","target":` + string(targetJSON) + `,"target":` + string(targetJSON) + `}`)
+	require.Equal(t, 400, child.post(t, "/v2/revisions/active", duplicateTarget, child.token, false))
+	extraField, err := json.Marshal(map[string]any{"controlGeneration": "subject-test-control", "target": a, "extra": true})
+	require.NoError(t, err)
+	require.Equal(t, 400, child.post(t, "/v2/revisions/active", extraField, child.token, false))
 	wrongControl, _ := json.Marshal(map[string]any{"controlGeneration": "other", "target": a})
 	require.Equal(t, 409, child.post(t, "/v2/revisions/active", wrongControl, child.token, false))
 	require.Equal(t, 413, child.post(t, "/v2/subjects/register", bytes.Repeat([]byte(" "), 8193), child.token, false))
@@ -324,8 +340,11 @@ func TestSubjectRevisionRealIPCLostRepliesAndRejection(t *testing.T) {
 	require.Equal(t, 409, child.post(t, "/v2/revisions/commit", raw, child.token, false))
 	// Exact bytes and validator are independently necessary, even with a valid
 	// outer target and fresh revision epoch.
-	bad := subjectIdentity(a, active.DecisionEpoch+1, 2, []byte(`{}`))
-	_, err = ta.Prepare(ctx, bad, []byte(`{}`))
+	// Valid schema and digest, but payload vault revision 3 disagrees with
+	// envelope revision 2. Only snapshot validation should reject this case.
+	schemaMismatchPayload := subjectPayload(t, false, 3)
+	bad := subjectIdentity(a, active.DecisionEpoch+1, 2, schemaMismatchPayload)
+	_, err = ta.Prepare(ctx, bad, schemaMismatchPayload)
 	require.Error(t, err)
 	mismatch := subjectIdentity(a, active.DecisionEpoch+1, 2, subjectPayload(t, false, 2))
 	mismatch.Digest = strings.Repeat("0", 64)
