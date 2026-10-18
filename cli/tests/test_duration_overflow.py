@@ -14,6 +14,7 @@
 
 import click
 import pytest
+
 from opensandbox_cli.utils import parse_duration
 
 @pytest.mark.parametrize(
