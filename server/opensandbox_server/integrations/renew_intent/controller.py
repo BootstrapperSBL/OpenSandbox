@@ -29,7 +29,6 @@ from opensandbox_server.integrations.renew_intent.logutil import (
     RENEW_EVENT_FAILED,
     RENEW_EVENT_SUCCEEDED,
     RENEW_SOURCE_REDIS_QUEUE,
-    RENEW_SOURCE_SERVER_PROXY,
     renew_bundle,
 )
 from opensandbox_server.tenants.context import reset_resolved_sandbox_ns, set_observed_namespace
@@ -134,10 +133,6 @@ class AccessRenewController:
         )
         logger.info(f"renew_intent {line}", extra=ex)
         return True
-
-    def attempt_renew_sync(self, sandbox_id: str, *, source: str = RENEW_SOURCE_SERVER_PROXY) -> bool:
-        """Run gates + renew (sync)."""
-        return self._try_renew_sync(sandbox_id, source=source)
 
     async def renew_after_gates(
         self, sandbox_id: str, *, source: str, namespace: Optional[str] = None

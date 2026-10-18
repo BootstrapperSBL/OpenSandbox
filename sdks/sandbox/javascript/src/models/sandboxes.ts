@@ -718,7 +718,8 @@ export interface Endpoint extends Record<string, unknown> {
 export enum SandboxOrigin {
   /**
    * Runs on a fsb golden-image template (no sandbox-side egress sidecar;
-   * egress policy goes through the lifecycle control plane).
+   * egress policy and the Credential Vault go through the lifecycle
+   * control plane).
    */
   TEMPLATE = "template",
   /**

@@ -174,9 +174,7 @@ The lifecycle endpoint API returns the reachable address for a service port insi
 - A Kubernetes ingress gateway endpoint.
 - A server-proxied URL under `/sandboxes/{sandboxId}/proxy/{port}` when `use_server_proxy=true`.
 
-Header-routed ingress endpoints include `OpenSandbox-Ingress-To` in their endpoint metadata.
-When the endpoint is rewritten to a server-proxied URL, the server removes only this
-ingress routing header and preserves other required endpoint headers.
+Header-routed ingress endpoints include `OpenSandbox-Ingress-To` in their endpoint metadata. When the endpoint is rewritten to a server-proxied URL, the server removes only this ingress routing header and preserves other required endpoint headers.
 
 The server proxy supports HTTP and WebSocket traffic and is also integrated with optional renew-on-access behavior. For HTTP responses, it strips hop-by-hop headers and the backend `Server` header while preserving an origin `Date`; the server adds a current `Date` only when the response does not already contain one. A root-relative `Location` value that starts with a single `/` is rebased under the same sandbox proxy route, while absolute URLs, network-path references (`//host/path`), and ordinary path-relative values are forwarded unchanged.
 
@@ -200,9 +198,7 @@ Core responsibilities:
 - Attach an egress sidecar when `networkPolicy` is requested and Docker networking is compatible.
 - Create Docker-backed persistent snapshots as local images and restore sandboxes from those snapshot images.
 
-Docker pause/resume uses container-level pause/resume. For sandboxes with an egress sidecar,
-pause freezes the sandbox container before the sidecar, while resume unfreezes the sidecar
-before the sandbox container. Docker snapshots are exposed through the public snapshot API.
+Docker pause/resume uses container-level pause/resume. For sandboxes with an egress sidecar, pause freezes the sandbox container before the sidecar, while resume unfreezes the sidecar before the sandbox container. Docker snapshots are exposed through the public snapshot API.
 
 ### 4.2 Kubernetes Runtime
 

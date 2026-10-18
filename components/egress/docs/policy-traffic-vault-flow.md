@@ -1,28 +1,14 @@
 # Egress Policy, Traffic Flow, and Credential Vault (Fast Sandbox Profile)
 
-This document shows how a sandbox's outbound network policy, its traffic flow,
-and the credential vault work in the **fast-sandbox profile**: one egress
-control plane serving N sandboxes that share one host/network domain
-(fast-sandbox Fastlet Pod). Each sandbox is a **subject** with its own policy,
-kernel rules, and credentials.
+This document shows how a sandbox's outbound network policy, its traffic flow, and the credential vault work in the **fast-sandbox profile**: one egress control plane serving N sandboxes that share one host/network domain (fast-sandbox Fastlet Pod). Each sandbox is a **subject** with its own policy, kernel rules, and credentials.
 
-The sidecar profile differs (single policy, `hook output`, iptables DNS
-REDIRECT on 15353); only the fast-sandbox model is drawn here.
+The sidecar profile differs (single policy, `hook output`, iptables DNS REDIRECT on 15353); only the fast-sandbox model is drawn here.
 
 ## 1. Subject lifecycle: fastlet action protocol → deny-first → active
 
-The Fastlet is the sole lifecycle dispatcher (Sandbox Actions Handler
-protocol, `sandbox.fast.io/actions/v1`). The egress Handler implements
-`GET /_fastlet/v1/actions/status` (process incarnation probe) and
-`POST /_fastlet/v1/actions` (`SET_BINDING` / `LIFECYCLE_HOOK` /
-`REMOVE_BINDING`). The binding input **is the policy** (declarative, carried
-by the Sandbox CRD `actionBindings`); the attachment block carries the
-network identity (source IP, gateway, veth, private CIDR). There is no
-file-driven observation source.
+The Fastlet is the sole lifecycle dispatcher (Sandbox Actions Handler protocol, `sandbox.fast.io/actions/v1`). The egress Handler implements `GET /_fastlet/v1/actions/status` (process incarnation probe) and `POST /_fastlet/v1/actions` (`SET_BINDING` / `LIFECYCLE_HOOK` / `REMOVE_BINDING`). The binding input **is the policy** (declarative, carried by the Sandbox CRD `actionBindings`); the attachment block carries the network identity (source IP, gateway, veth, private CIDR). There is no file-driven observation source.
 
-A subject is fail-closed from the moment `SET_BINDING` registers it until its
-`sandbox.data-plane-ready` Hook succeeds: registration installs deny-first
-rules immediately, the policy is held pending, and DNS keeps denying.
+A subject is fail-closed from the moment `SET_BINDING` registers it until its `sandbox.data-plane-ready` Hook succeeds: registration installs deny-first rules immediately, the policy is held pending, and DNS keeps denying.
 
 ```mermaid
 stateDiagram-v2
@@ -36,28 +22,13 @@ stateDiagram-v2
     denying --> absent: REMOVE_BINDING
 ```
 
-Recovery after egress restart: `ApplyReset` wipes the table, the Handler
-serves a new `instanceId`, the Fastlet detects it and replays the latest
-`SET_BINDING` followed by the already-reached Hooks (every live subject
-re-enters `denying` through the same registration path), and the egress-held
-vault state is recovered from the egress-local vault file at registration
-(no server re-push).
+Recovery after egress restart: `ApplyReset` wipes the table, the Handler serves a new `instanceId`, the Fastlet detects it and replays the latest `SET_BINDING` followed by the already-reached Hooks (every live subject re-enters `denying` through the same registration path), and the egress-held vault state is recovered from the egress-local vault file at registration (no server re-push).
 
 ## 2. Control plane: policy and credential delivery
 
-The egress listener binds the Pod netns loopback only. It serves the action
-endpoints (Fastlet) and `/healthz` — there is no sandbox-reachable control
-surface and no proxy-route surface (the earlier fastlet-proxy channel was
-superseded: identity validation moved from a proxy-injected header into the
-FastPath control plane).
+The egress listener binds the Pod netns loopback only. It serves the action endpoints (Fastlet) and `/healthz` — there is no sandbox-reachable control surface and no proxy-route surface (the earlier fastlet-proxy channel was superseded: identity validation moved from a proxy-injected header into the FastPath control plane).
 
-Two concerns, two carriers: policy rides `SET_BINDING` (the CRD binding is
-the complete desired value; updates arrive as new bindings). The credential
-vault is egress-held and rides the FastPath handler-relay
-(`InvokeHandlerAction`): the server pushes complete vault revisions to the
-relay-only vault surface (`/vault/{sandboxUid}`) and gets a synchronous,
-egress-validated ack. Vault state lives in egress memory plus an
-egress-local per-subject file (OSEP-0022).
+Two concerns, two carriers: policy rides `SET_BINDING` (the CRD binding is the complete desired value; updates arrive as new bindings). The credential vault is egress-held and rides the FastPath handler-relay (`InvokeHandlerAction`): the server pushes complete vault revisions to the relay-only vault surface (`/vault/{sandboxUid}`) and gets a synchronous, egress-validated ack. Vault state lives in egress memory plus an egress-local per-subject file (OSEP-0022).
 
 ```mermaid
 sequenceDiagram
@@ -89,24 +60,7 @@ sequenceDiagram
 
 ## 3. Data plane: outbound traffic flow
 
-The authoritative enforcement layer is the Pod netns `forward` hook
-(`table opensandbox-fast-sandbox`, master chain policy **accept** with an
-unmarked-drop tail — the forward path never issues an explicit accept,
-because on the fast-sandbox Firecracker bridge topology
-(`bridge-nf-call-iptables=1`) an accept verdict returns the frame to the
-bridge L2 path and drops it before postrouting). Allowed destinations are
-marked in per-subject `hook prerouting` chains (`meta mark set 0x2` for
-allow/dyn set members, unconditional for default-allow policies); per-subject
-dispatch by `ip saddr` (the source IP is the only dispatch key — an iifname
-match would never fire on the bridge topology, where the IP hooks see
-skb->dev = the bridge) leads to subject chains whose deny sets drop explicitly,
-and the unmarked-drop tail denies everything else (unregistered sources,
-deny-first subjects). Intercepted MITM traffic is delivered locally (DNAT)
-and enforced by the dedicated INPUT chain on the conntrack original
-destination. DNS-learned leases are kept alive by the per-subject connection
-refresh loop (Pod netns conntrack, bucketed by source IP, one batched
-transaction per tick); only TCP sessions are renewed — UDP/QUIC (HTTP/3)
-relies on DNS lease TTLs.
+The authoritative enforcement layer is the Pod netns `forward` hook (`table opensandbox-fast-sandbox`, master chain policy **accept** with an unmarked-drop tail — the forward path never issues an explicit accept, because on the fast-sandbox Firecracker bridge topology (`bridge-nf-call-iptables=1`) an accept verdict returns the frame to the bridge L2 path and drops it before postrouting). Allowed destinations are marked in per-subject `hook prerouting` chains (`meta mark set 0x2` for allow/dyn set members, unconditional for default-allow policies); per-subject dispatch by `ip saddr` (the source IP is the only dispatch key — an iifname match would never fire on the bridge topology, where the IP hooks see skb->dev = the bridge) leads to subject chains whose deny sets drop explicitly, and the unmarked-drop tail denies everything else (unregistered sources, deny-first subjects). Intercepted MITM traffic is delivered locally (DNAT) and enforced by the dedicated INPUT chain on the conntrack original destination. DNS-learned leases are kept alive by the per-subject connection refresh loop (Pod netns conntrack, bucketed by source IP, one batched transaction per tick); only TCP sessions are renewed — UDP/QUIC (HTTP/3) relies on DNS lease TTLs.
 
 ```mermaid
 flowchart LR
@@ -138,32 +92,9 @@ flowchart LR
 
 ## 4. Credential vault
 
-Vault revisions are pushed over the FastPath handler-relay and held
-**egress-side** per subject (memory plus an egress-local file, OSEP-0022 —
-no Secret volume, nothing in the CRD).
-The shared mitmdump instance selects the subject's vault by the client's
-source IP (transparent REDIRECT/DNAT preserves it). It keeps an immutable
-snapshot per subject and conditionally checks the private Unix-socket endpoint
-for every new flow with its opaque `ETag`. An unchanged tag returns `304`
-without rendering or transferring credential material; a changed tag returns
-`200`, the full snapshot, its public revision, and a replacement `ETag`. The
-tag changes even when delete-then-create resets the public revision to `1`, so
-recreation cannot accidentally validate a pre-delete snapshot. Consequently, the
-first flow after a successful create, patch, or delete acknowledgement observes
-that mutation without a timer or cache-expiry sleep. See
-[fast-sandbox-mitm-data-plane](../../../docs/components/egress-fast-sandbox-mitm-data-plane.md).
+Vault revisions are pushed over the FastPath handler-relay and held **egress-side** per subject (memory plus an egress-local file, OSEP-0022 — no Secret volume, nothing in the CRD). The shared mitmdump instance selects the subject's vault by the client's source IP (transparent REDIRECT/DNAT preserves it). It keeps an immutable snapshot per subject and conditionally checks the private Unix-socket endpoint for every new flow with its opaque `ETag`. An unchanged tag returns `304` without rendering or transferring credential material; a changed tag returns `200`, the full snapshot, its public revision, and a replacement `ETag`. The tag changes even when delete-then-create resets the public revision to `1`, so recreation cannot accidentally validate a pre-delete snapshot. Consequently, the first flow after a successful create, patch, or delete acknowledgement observes that mutation without a timer or cache-expiry sleep. See [fast-sandbox-mitm-data-plane](../../../docs/components/egress-fast-sandbox-mitm-data-plane.md).
 
-`404` has one explicit meaning for the addon: there is no active vault for the
-selected subject, so any older cached snapshot is removed and the flow remains
-ordinary non-credentialed egress. Transport timeout/refusal, `5xx`, malformed
-JSON/schema, an invalid `ETag`, or a non-advancing tag after a conditional
-request are lookup failures, not "no vault". Those failures discard the
-unconfirmed cached plaintext snapshot and fail closed for **all intercepted
-traffic**, including hosts that would not match any credential binding. The
-addon returns a local `503` when the request body is safely buffered, or kills
-a streamed/unknown-length flow before it can reach upstream. Operators should
-therefore treat the private credential-proxy socket as a hard availability
-dependency whenever transparent interception is enabled.
+`404` has one explicit meaning for the addon: there is no active vault for the selected subject, so any older cached snapshot is removed and the flow remains ordinary non-credentialed egress. Transport timeout/refusal, `5xx`, malformed JSON/schema, an invalid `ETag`, or a non-advancing tag after a conditional request are lookup failures, not "no vault". Those failures discard the unconfirmed cached plaintext snapshot and fail closed for **all intercepted traffic**, including hosts that would not match any credential binding. The addon returns a local `503` when the request body is safely buffered, or kills a streamed/unknown-length flow before it can reach upstream. Operators should therefore treat the private credential-proxy socket as a hard availability dependency whenever transparent interception is enabled.
 
 ```mermaid
 sequenceDiagram

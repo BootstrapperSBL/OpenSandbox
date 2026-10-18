@@ -20,6 +20,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
 from starlette.types import Message
@@ -33,6 +34,8 @@ from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_INGRESS_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_SECURE_ACCESS_HEADER
+from opensandbox_server.tenants.context import get_current_tenant
+from opensandbox_server.tenants.models import TenantEntry
 
 
 class _FakeStreamingResponse:
@@ -1332,6 +1335,94 @@ def test_proxy_rejects_websocket_upgrade_for_post_and_mixed_case_header(
     assert response.json()["message"] == "Websocket upgrade is not supported yet"
 
 
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def test_proxy_resolves_endpoint_off_the_event_loop(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    # get_endpoint does blocking Docker/Kubernetes I/O; running it on the event
+    # loop would stall every other request while it waits.
+    on_loop: list[bool] = []
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            on_loop.append(_on_event_loop())
+            raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "gone"})
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.get("/v1/sandboxes/sbx-123/proxy/44772/healthz", headers=auth_headers)
+
+    assert response.status_code == 404
+    assert on_loop == [False]
+
+
+def test_proxy_websocket_resolves_endpoint_off_the_event_loop(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    on_loop: list[bool] = []
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            on_loop.append(_on_event_loop())
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    monkeypatch.setattr(proxy_api.websockets, "connect", _FakeWebSocketConnector(_FakeBackendWebSocket()))
+
+    with client.websocket_connect(
+        "/v1/sandboxes/sbx-123/proxy/44772/ws", headers=auth_headers
+    ) as websocket:
+        assert websocket.receive_text() == "backend-ready"
+
+    assert on_loop == [False]
+
+
+def test_proxy_websocket_endpoint_lookup_sees_the_tenant(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    # The lookup runs in a worker thread; it must still see the tenant that
+    # authentication set, or it would resolve in the wrong namespace.
+    tenant = TenantEntry(name="team-a", namespace="ns-a", api_keys=("key-a",))
+
+    class Provider:
+        @staticmethod
+        def lookup(api_key: str) -> TenantEntry | None:
+            return tenant if api_key == "key-a" else None
+
+    seen: list[TenantEntry | None] = []
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            seen.append(get_current_tenant())
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(client.app.state, "tenant_provider", Provider(), raising=False)
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    monkeypatch.setattr(proxy_api.websockets, "connect", _FakeWebSocketConnector(_FakeBackendWebSocket()))
+
+    with client.websocket_connect(
+        "/v1/sandboxes/sbx-123/proxy/44772/ws", headers={SANDBOX_API_KEY_HEADER: "key-a"}
+    ) as websocket:
+        assert websocket.receive_text() == "backend-ready"
+
+    assert seen == [tenant]
+
+
 @pytest.mark.parametrize("configured_resolve_internal", [True, False])
 def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
     client: TestClient,
@@ -1667,6 +1758,54 @@ def test_networkpolicy_route_forwards_egress_auth_header(
     assert fake_client.built is not None
     assert fake_client.built["url"] == "http://10.57.1.91:18080/policy"
     # Ensure caller-supplied header was completely replaced and does not duplicate
+    egress_headers = [
+        (k, v)
+        for k, v in fake_client.built["headers"].items()
+        if k.lower() == OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()
+    ]
+    assert len(egress_headers) == 1
+    assert egress_headers[0][1] == "injected-egress-token"
+
+
+def test_credential_vault_route_forwards_egress_auth_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """The server-routed credential vault proxies the sidecar surface with the
+    endpoint-resolved egress-auth token (internal=True), replacing any
+    caller-supplied value."""
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            assert port == 18080
+            return Endpoint(
+                endpoint="10.57.1.91:18080",
+                headers={OPEN_SANDBOX_EGRESS_AUTH_HEADER: "injected-egress-token"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"revision":1}'],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/credential-vault",
+        headers={
+            **auth_headers,
+            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(): "caller-fake-token",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault"
     egress_headers = [
         (k, v)
         for k, v in fake_client.built["headers"].items()
