@@ -57,11 +57,7 @@ Layers 1 and 2 decide *whether* a connection may happen; the transparent MITM la
 ::: warning Internal OSEP-0023 revision runtime
 `OPENSANDBOX_EGRESS_EXPERIMENTAL_REVISION_RUNTIME=true` is a development-only sidecar gate (default off) for the OSEP-0023 revision protocol. It adds no public configuration surface or supported `interceptionMode`, and does not enable Fast Sandbox.
 
-The internal sidecar experiment covers bound HTTPS/443 HTTP/1.1 traffic and
-experimental HTTP/2 admission and bounded-drain wiring on the fixed-dependency
-direct/lazy path. Configured chained upstream proxies remain rejected for live
-HTTP/2. Long-held responses can still cause Go retries to time out; full client
-migration and Linux acceptance remain follow-up work. Key properties:
+The internal sidecar experiment covers bound HTTPS/443 HTTP/1.1 traffic and experimental HTTP/2 admission and bounded-drain wiring on the fixed-dependency direct/lazy path. Configured chained upstream proxies remain rejected for live HTTP/2. Long-held responses can still cause Go retries to time out; full client migration and Linux acceptance remain follow-up work. Key properties:
 
 - Admission is per connection and per request, from an immutable snapshot installed over an authenticated channel; unknown or mismatched state denies — the mode never falls back to decrypt-all.
 - Any uncertain outcome (unconfirmed mutation, session cleanup failure, unexpected child exit) latches a sticky recovery-required state: readiness drops, nft writes quiesce, and an independent quarantine table is installed for the process lifetime. Restarting the sidecar is not a verified recovery — destroy and recreate the sandbox instead.
