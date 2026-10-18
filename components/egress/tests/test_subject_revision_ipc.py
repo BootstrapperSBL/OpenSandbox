@@ -288,7 +288,8 @@ class SubjectWorkerTest(unittest.TestCase):
             if stop:
                 server._stopping.set()
             server.process_request(request, None)
-            self.assertGreaterEqual(time.monotonic() - started, 0.02)
+            if not stop:
+                self.assertGreaterEqual(time.monotonic() - started, 0.02)
             server.shutdown_request.assert_called_once_with(request)
             self.assertEqual(server._workers, set())
             server._permits.release()
@@ -336,6 +337,7 @@ class SubjectServerLifecycleTest(unittest.TestCase):
         server = object.__new__(ipc.Server)
         server._owner, server._closed, server._thread = owner, False, None
         server._lock = threading.Lock()
+        server._path_cleaned = False
         server._path, server._socket_identity = "/tmp/private/sock", (1, 2)
         server._server = SimpleNamespace(_stopping=threading.Event(), server_close=mock.Mock(), stop_workers=mock.Mock())
         metadata = SimpleNamespace(st_dev=1, st_ino=2)
@@ -353,6 +355,76 @@ class SubjectServerLifecycleTest(unittest.TestCase):
         self.assertEqual(owner._entries, {})
         server._server.server_close.assert_called_once()
         server._server.stop_workers.assert_called_once()
+
+    def test_path_cleanup_retries_errors_without_deleting_replacement(self):
+        for operation in ("lstat", "unlink"):
+            for replaced in (False, True):
+                with self.subTest(operation=operation, replaced=replaced):
+                    server = object.__new__(ipc.Server)
+                    server._owner = mock.Mock()
+                    server._closed, server._path_cleaned, server._thread = False, False, None
+                    server._lock = threading.Lock()
+                    server._path, server._socket_identity = "/tmp/private/sock", (1, 2)
+                    server._server = SimpleNamespace(_stopping=threading.Event(), server_close=mock.Mock(), stop_workers=mock.Mock())
+                    original = SimpleNamespace(st_dev=1, st_ino=2)
+                    replacement = SimpleNamespace(st_dev=1, st_ino=3) if replaced else original
+                    with mock.patch.object(ipc.os, "lstat") as lstat, mock.patch.object(ipc.os, "unlink") as unlink:
+                        lstat.side_effect = [OSError("first failure"), replacement] if operation == "lstat" else [original, replacement]
+                        unlink.side_effect = [OSError("first failure"), None] if operation == "unlink" else None
+                        with self.assertRaises(ipc.ServerError):
+                            server.close()
+                        server.close()
+                        calls = unlink.call_count
+                        self.assertEqual(calls, (operation == "unlink") + (not replaced))
+                        server.close()
+                        self.assertEqual(unlink.call_count, calls)
+                        self.assertEqual(lstat.call_count, 2)
+                    server._server.server_close.assert_called_once()
+                    server._server.stop_workers.assert_called_once()
+
+    def test_concurrent_close_interrupts_saturated_accept_before_joining_workers(self):
+        listener = SubjectWorkerTest().server(timeout=threading.TIMEOUT_MAX)
+        released, entered = threading.Event(), threading.Event()
+        connection = mock.Mock()
+        connection.shutdown.side_effect = lambda _how: released.set()
+        listener.finish_request = lambda *_args: released.wait(3)
+        listener.process_request(connection, None)
+        original = listener._permits.acquire
+        def acquire(*args, **kwargs):
+            entered.set()
+            return original(*args, **kwargs)
+        listener._permits.acquire = acquire
+        accept = threading.Thread(target=listener.process_request, args=(object(), None), daemon=True)
+        accept.start()
+        self.assertTrue(entered.wait(1))
+        listener.shutdown = lambda: accept.join(2)
+        listener.server_close = mock.Mock()
+        server = object.__new__(ipc.Server)
+        server._server, server._owner, server._thread = listener, mock.Mock(), accept
+        server._closed, server._path_cleaned = False, False
+        server._lock = threading.Lock()
+        server._path, server._socket_identity = "/tmp/private/sock", (1, 2)
+        errors = []
+        def close():
+            try:
+                server.close()
+            except Exception as exc:
+                errors.append(exc)
+        with mock.patch.object(ipc.os, "lstat", side_effect=FileNotFoundError):
+            closers = [threading.Thread(target=close, daemon=True) for _ in range(2)]
+            for thread in closers:
+                thread.start()
+            for thread in closers:
+                thread.join(1)
+                self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.assertFalse(accept.is_alive())
+        self.assertTrue(released.is_set())
+        self.assertFalse(listener._workers)
+        self.assertFalse(listener._connections)
+        listener.server_close.assert_called_once()
+        self.assertTrue(original(blocking=False))
+        self.assertFalse(original(blocking=False))
 
 
 class SubjectSocketTest(unittest.TestCase):
@@ -394,6 +466,52 @@ class SubjectSocketTest(unittest.TestCase):
         self.assertEqual(self.owner.lifecycle_status(CONTROL)['lastSequence'], 2)
         self.server.close()
         self.assertFalse(os.path.lexists(self.path))
+
+    def test_real_high_timeout_saturated_concurrent_close(self):
+        self.server._server.request_timeout = 3600
+        waiting = threading.Event()
+        original = self.server._server._permits.acquire
+        def acquire(*args, **kwargs):
+            if len(self.server._server._workers) == 2:
+                waiting.set()
+            return original(*args, **kwargs)
+        self.server._server._permits.acquire = acquire
+        connections = []
+        for _ in range(3):
+            connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.addCleanup(connection.close)
+            connections.append(connection)
+            connection.connect(self.path)
+            connection.sendall(b'POST /v2/subjects/register HTTP/1.1\r\n')
+        self.assertTrue(waiting.wait(2))
+        errors = []
+        def close():
+            try:
+                self.server.close()
+            except Exception as exc:
+                errors.append(exc)
+        closers = [threading.Thread(target=close, daemon=True) for _ in range(2)]
+        for thread in closers:
+            thread.start()
+        try:
+            for thread in closers:
+                thread.join(2)
+            stuck = any(thread.is_alive() for thread in closers)
+        finally:
+            # A shutdown regression must fail promptly, not leave cleanup
+            # waiting for the deliberately long connection timeout.
+            for connection in connections:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            for thread in closers:
+                thread.join(2)
+        self.assertFalse(stuck)
+        self.assertFalse(errors)
+        self.assertFalse(os.path.lexists(self.path))
+        self.assertFalse(self.server._server._workers)
+        self.assertFalse(self.server._server._connections)
 
     def test_real_reply_loss_recovers_published_record(self):
         original = ipc._Handler._reply

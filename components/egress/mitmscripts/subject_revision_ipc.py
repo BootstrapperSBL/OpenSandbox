@@ -31,6 +31,7 @@ import socketserver
 import stat
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
@@ -55,8 +56,18 @@ class _UnixServer(socketserver.UnixStreamServer):
         super().__init__(path, handler)
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
-        # This waits in the sole accept loop, before creating a thread or queue.
-        if not self._permits.acquire(timeout=self.request_timeout):
+        # The sole accept-loop wait is bounded by the request deadline but
+        # interruptible on shutdown, even with a very large request timeout.
+        deadline = time.monotonic() + self.request_timeout
+        acquired = False
+        while not self._stopping.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            acquired = self._permits.acquire(timeout=min(remaining, 0.05))
+            if acquired:
+                break
+        if not acquired:
             self.shutdown_request(request)
             return
         if self._stopping.is_set():
@@ -290,6 +301,7 @@ class Server:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._closed = False
+        self._path_cleaned = False
 
     def start(self) -> None:
         with self._lock:
@@ -304,33 +316,31 @@ class Server:
             self._thread = thread
 
     def close(self) -> None:
+        # Serialize complete shutdown and cleanup retries. _closed fences start;
+        # it does not imply that receiver or filesystem cleanup succeeded.
         with self._lock:
-            if self._closed:
-                # Reattempt any receiver close which failed on the first call.
+            if not self._closed:
+                self._closed = True
+                self._server._stopping.set()
+                thread = self._thread
+                if thread is not None and thread.is_alive():
+                    self._server.shutdown()
+                self._server.server_close()
+                self._server.stop_workers()
+            failed = False
+            try:
+                self._owner.close()
+            except SubjectError:
+                failed = True
+            if not self._path_cleaned:
                 try:
-                    self._owner.close()
-                except SubjectError:
-                    raise ServerError("subject IPC cleanup failed") from None
-                return
-            self._closed = True
-            thread = self._thread
-        self._server._stopping.set()
-        if thread is not None and thread.is_alive():
-            self._server.shutdown()
-        self._server.server_close()
-        self._server.stop_workers()
-        failed = False
-        try:
-            self._owner.close()
-        except SubjectError:
-            failed = True
-        try:
-            current = os.lstat(self._path)
-            if (current.st_dev, current.st_ino) == self._socket_identity:
-                os.unlink(self._path)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            failed = True
-        if failed:
-            raise ServerError("subject IPC cleanup failed")
+                    current = os.lstat(self._path)
+                    if (current.st_dev, current.st_ino) == self._socket_identity:
+                        os.unlink(self._path)
+                    self._path_cleaned = True
+                except FileNotFoundError:
+                    self._path_cleaned = True
+                except OSError:
+                    failed = True
+            if failed:
+                raise ServerError("subject IPC cleanup failed")
