@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -145,5 +146,11 @@ class DockerMetadataStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         # A temporary name of its own per write: two writers never race on one.
         tmp = path.with_name(f"{path.stem}.{uuid4().hex}.tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)
+        try:
+            tmp.write_text(json.dumps(data))
+            tmp.replace(path)
+        except OSError:
+            # Nothing reuses this name, so a failed write removes its own file.
+            with suppress(OSError):
+                tmp.unlink()
+            raise
