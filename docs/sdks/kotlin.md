@@ -411,7 +411,12 @@ Read current sandbox resource usage with `sandbox.getMetrics()`. This is separat
 
 `SandboxPool` provides four acquire policies and staged warmup controls. Use `InMemoryPoolStateStore` in one process, or the optional `com.alibaba.opensandbox:sandbox-pool-redis` module with a caller-managed Jedis client for distributed deployments. See [Client Pool](/guides/client-pool) for configuration, examples, cleanup, and namespace retirement.
 
-Set `ConnectionConfig.builder().enableTracing(true)` to emit [pool warmup traces](/sdks/observability#pool-warmup-tracing). The JVM SDK also adds trace IDs to SLF4J MDC. For remote logs/events, use `SandboxManager.getDiagnosticLogs` / `getDiagnosticEvents`; see [Diagnostics](/api/#diagnostics). Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
+Set `ConnectionConfig.builder().enableTracing(true)` to emit [pool warmup traces](/sdks/observability#pool-warmup-tracing).
+The JVM SDK also adds trace IDs to SLF4J MDC. For remote logs/events, use
+`SandboxManager.getDiagnosticContext`, `getDiagnosticLogs`, and
+`getDiagnosticEvents`. These methods also exist on `Sandbox`;
+see [SDK diagnostics](/sdks/#diagnostics).
+Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots and metadata
 

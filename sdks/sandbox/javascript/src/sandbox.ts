@@ -27,6 +27,9 @@ import type { SandboxFiles } from "./services/filesystem.js";
 import type { CredentialVault, Egress } from "./services/egress.js";
 import { createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 import type { AdapterFactory } from "./factory/adapterFactory.js";
+import type { Diagnostics } from "./services/diagnostics.js";
+import type { DiagnosticContext, DiagnosticContent } from "./models/diagnostics.js";
+import { requireDiagnostics } from "./adapters/diagnosticsAdapter.js";
 
 import type { Sandboxes } from "./services/sandboxes.js";
 import type { ExecdCommands } from "./services/execdCommands.js";
@@ -462,6 +465,7 @@ export class Sandbox {
       execdBaseUrl: string;
       egress: Egress;
       ownsTransport: boolean;
+      diagnostics?: Diagnostics;
     }
   >();
 
@@ -484,6 +488,7 @@ export class Sandbox {
     lifecycleBaseUrl: string;
     execdBaseUrl: string;
     sandboxes: Sandboxes;
+    diagnostics?: Diagnostics;
     commands: ExecdCommands;
     files: SandboxFiles;
     health: ExecdHealth;
@@ -507,6 +512,7 @@ export class Sandbox {
       execdBaseUrl: opts.execdBaseUrl,
       egress: opts.egress,
       ownsTransport: opts.ownsTransport,
+      diagnostics: opts.diagnostics,
     });
 
     this.origin = opts.origin ?? SandboxOrigin.UNKNOWN;
@@ -562,11 +568,12 @@ export class Sandbox {
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
       if (connectionConfig !== baseConnectionConfig) {
         await connectionConfig.closeTransport();
@@ -661,6 +668,7 @@ export class Sandbox {
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -771,11 +779,12 @@ export class Sandbox {
     const adapterFactory = opts.adapterFactory ?? createDefaultAdapterFactory();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
       if (connectionConfig !== baseConnectionConfig) {
         await connectionConfig.closeTransport();
@@ -843,6 +852,7 @@ export class Sandbox {
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -927,11 +937,12 @@ export class Sandbox {
     const lifecycleBaseUrl = connectionConfig.getBaseUrl();
 
     let sandboxes: Sandboxes;
+    let diagnostics: Diagnostics | undefined;
     try {
-      sandboxes = adapterFactory.createLifecycleStack({
+      ({ sandboxes, diagnostics } = adapterFactory.createLifecycleStack({
         connectionConfig,
         lifecycleBaseUrl,
-      }).sandboxes;
+      }));
     } catch (err) {
       if (ownsTransport) {
         await connectionConfig.closeTransport();
@@ -981,6 +992,7 @@ export class Sandbox {
         lifecycleBaseUrl,
         execdBaseUrl,
         sandboxes,
+        diagnostics,
         commands,
         files,
         health,
@@ -1012,6 +1024,18 @@ export class Sandbox {
 
   async getInfo(): Promise<SandboxInfo> {
     return await this.sandboxes.getSandbox(this.id);
+  }
+
+  getDiagnosticContext(): Promise<DiagnosticContext> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getContext(this.id);
+  }
+
+  getDiagnosticLogs(scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getLogs(this.id, scope);
+  }
+
+  getDiagnosticEvents(scope: string): Promise<DiagnosticContent> {
+    return requireDiagnostics(Sandbox._priv.get(this)?.diagnostics).getEvents(this.id, scope);
   }
 
   async isHealthy(): Promise<boolean> {

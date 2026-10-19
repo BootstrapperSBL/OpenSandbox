@@ -37,7 +37,7 @@ from opensandbox.internal.readiness import (
     ReadinessBudget,
     validate_polling_interval,
 )
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     CredentialProxyConfig,
@@ -333,6 +333,10 @@ class Sandbox:
             SandboxException: if metrics cannot be retrieved
         """
         return await self._metrics_service.get_metrics(self.id)
+
+    async def get_diagnostic_context(self) -> DiagnosticContext:
+        """Get the sandbox's runtime backend and diagnostic identifiers."""
+        return await self._diagnostics_service.get_context(self.id)
 
     async def get_diagnostic_logs(self, scope: str) -> DiagnosticContent:
         """

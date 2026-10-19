@@ -519,7 +519,13 @@ var config2 = new ConnectionConfig(new ConnectionConfigOptions
 
 ### 2. SDK Logging
 
-The SDK uses `Microsoft.Extensions.Logging` abstractions. `SdkDiagnosticsOptions` configures local logging; it does not retrieve remote sandbox diagnostic logs or events. Use the [CLI or HTTP API](/api/#diagnostics) for those. Client Pool and built-in pool warmup tracing are not currently available in C#. Install `Microsoft.Extensions.Logging.Console` to use `AddConsole()` below.
+The SDK uses `Microsoft.Extensions.Logging` abstractions. `SdkDiagnosticsOptions`
+configures local logging; it does not retrieve remote sandbox diagnostic logs or
+events. For remote diagnostics, use `GetDiagnosticContextAsync`,
+`GetDiagnosticLogsAsync`, and `GetDiagnosticEventsAsync` on `SandboxManager`
+or `Sandbox`; see [SDK diagnostics](/sdks/#diagnostics). Client Pool and
+built-in pool warmup tracing are not currently available in C#.
+Install `Microsoft.Extensions.Logging.Console` to use `AddConsole()` below.
 
 ```csharp
 using Microsoft.Extensions.Logging;

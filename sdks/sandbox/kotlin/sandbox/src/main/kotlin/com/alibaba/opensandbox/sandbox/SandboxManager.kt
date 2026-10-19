@@ -22,6 +22,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SnapshotFailedException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CreateTemplateRequest
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
@@ -109,6 +110,11 @@ class SandboxManager internal constructor(
 
     fun listSandboxInfos(filter: SandboxFilter): PagedSandboxInfos {
         return sandboxService.listSandboxes(filter)
+    }
+
+    /** Gets backend routing context without connecting to execd. */
+    fun getDiagnosticContext(sandboxId: String): DiagnosticContext {
+        return diagnosticsService.getContext(sandboxId)
     }
 
     /**

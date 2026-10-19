@@ -130,7 +130,12 @@ A request to a paused sandbox may arrive while its restore is still in progress.
 
 `SandboxPool` provides in-memory and Redis-backed stores, four acquire policies, and staged warmup controls. The Redis store is exported from `@alibaba-group/opensandbox/pool-redis`. See [Client Pool](/guides/client-pool) for examples, configuration, and namespace retirement.
 
-Set `enableTracing: true` in `ConnectionConfig` to enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing). JavaScript emits phase spans but fewer diagnostic attributes than Python/JVM. Create-latency [telemetry](/sdks/observability#creation-metrics) has a separate opt-out setting. Remote diagnostic logs/events are available through [CLI or HTTP](/api/#diagnostics), not through the JavaScript SDK.
+Set `enableTracing: true` in `ConnectionConfig` to enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing).
+JavaScript emits phase spans but fewer diagnostic attributes than Python/JVM.
+Create-latency [telemetry](/sdks/observability#creation-metrics) has a separate opt-out setting.
+Use `SandboxManager.getDiagnosticContext(sandboxId)` to identify the runtime
+backend without connecting to execd. Both the manager and sandbox expose
+`getDiagnosticLogs` / `getDiagnosticEvents`; see [SDK diagnostics](/sdks/#diagnostics).
 
 ## Usage Examples
 

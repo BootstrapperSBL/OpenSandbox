@@ -100,7 +100,12 @@ Use `destroy()` for create-use-discard workflows. It calls `kill()` before `clos
 
 Use `SandboxPoolSync` for synchronous applications and `SandboxPoolAsync` for asyncio. Both provide in-memory and Redis-backed stores, four acquire policies, and staged warmup controls. See [Client Pool](/guides/client-pool) for examples, configuration, cleanup, and distributed deployment.
 
-Enable `ConnectionConfig(enable_tracing=True)` or `ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/sdks/observability#pool-warmup-tracing). For remote logs/events, use the [Diagnostics](/api/#diagnostics) manager API. Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
+Enable `ConnectionConfig(enable_tracing=True)` or
+`ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/sdks/observability#pool-warmup-tracing).
+For backend context and remote logs/events, use `SandboxManager.get_diagnostic_context`,
+`get_diagnostic_logs`, and `get_diagnostic_events`. These methods also exist on
+`Sandbox`; see [SDK diagnostics](/sdks/#diagnostics).
+Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Lifecycle Hooks
 

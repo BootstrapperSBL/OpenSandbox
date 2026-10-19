@@ -31,6 +31,8 @@ export {
 
 // Factory pattern (stable public interface; does NOT expose OpenAPI generated models).
 export type { AdapterFactory } from "./factory/adapterFactory.js";
+export type { DiagnosticContext, DiagnosticContent } from "./models/diagnostics.js";
+export type { Diagnostics } from "./services/diagnostics.js";
 export { DefaultAdapterFactory, createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 
 export { ConnectionConfig } from "./config/connection.js";
