@@ -27,6 +27,7 @@ from app.k8s_platform import probe_platform_deployment
 from app.k8s_probe import probe_node_agent
 from app.k8s_resources import list_events, list_workloads
 from app.nodeagent_archive import fetch_archive_logs
+from app.query_params import parse_archive_max_bytes, parse_query_int
 from app.routes.proxy_utils import passthrough_json
 from app.routes.admin_proxy import admin_get_sandbox, admin_lifecycle_request
 from app.routes.session_keys import api_key_for_tenant_name, tenant_namespace_for_name
@@ -231,7 +232,7 @@ async def admin_k8s_workloads(
     require_admin_session(payload)
     settings = get_settings()
     qp = request.query_params
-    limit = int(qp.get("limit", 200) or 200)
+    limit = parse_query_int(qp.get("limit"), field="limit", default=200, maximum=500)
     return await list_workloads(
         settings,
         tenant=qp.get("tenant"),
@@ -249,7 +250,7 @@ async def admin_k8s_events(
     require_admin_session(payload)
     settings = get_settings()
     qp = request.query_params
-    limit = int(qp.get("limit", 100) or 100)
+    limit = parse_query_int(qp.get("limit"), field="limit", default=100, maximum=300)
     return await list_events(
         settings,
         tenant=qp.get("tenant"),
@@ -377,10 +378,14 @@ async def admin_sandbox_archive_logs(
     require_admin_session(payload)
     tenant = _require_tenant_query(request)
     namespace = tenant_namespace_for_name(tenant)
-    max_bytes = request.query_params.get("maxBytes")
+    settings = get_settings()
+    max_bytes = parse_archive_max_bytes(
+        request.query_params.get("maxBytes"),
+        cap=settings.bff_nodeagent_archive_max_bytes,
+    )
     return await fetch_archive_logs(
-        get_settings(),
+        settings,
         namespace,
         sandbox_id,
-        max_bytes=int(max_bytes) if max_bytes else None,
+        max_bytes=max_bytes,
     )

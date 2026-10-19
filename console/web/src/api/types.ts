@@ -113,6 +113,7 @@ export interface K8sListResponse<T> {
   totalItems?: number;
   disabled?: boolean;
   message?: string;
+  errorCode?: string;
 }
 
 export interface PoolListResponse {

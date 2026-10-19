@@ -1,20 +1,20 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Alert, Input, Space, Table, Typography } from 'antd';
+import { Alert, Input, Space, Table, Typography, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { adminApi } from '../../api/client';
 import type { K8sEventRow } from '../../api/types';
@@ -22,6 +22,7 @@ import { useAuth } from '../../auth/AuthContext';
 
 export function K8sEventsPage() {
   const { user } = useAuth();
+  const requestSeq = useRef(0);
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<K8sEventRow[]>([]);
   const [disabledMsg, setDisabledMsg] = useState<string | null>(null);
@@ -29,20 +30,29 @@ export function K8sEventsPage() {
 
   const load = async () => {
     if (user?.role !== 'admin') return;
+    const seq = ++requestSeq.current;
     setLoading(true);
     setDisabledMsg(null);
     try {
       const data = await adminApi.k8sEvents({
         sandboxId: sandboxId.trim() || undefined,
       });
+      if (seq !== requestSeq.current) return;
       if (data.disabled) {
         setDisabledMsg(data.message ?? 'K8s API 未启用');
+        setItems([]);
+      } else if (data.errorCode) {
+        setDisabledMsg(data.message ?? 'K8s API 错误');
         setItems([]);
       } else {
         setItems(data.items ?? []);
       }
+    } catch (e) {
+      if (seq !== requestSeq.current) return;
+      message.error(e instanceof Error ? e.message : '加载 K8s 事件失败');
+      setItems([]);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   };
 
@@ -78,7 +88,12 @@ export function K8sEventsPage() {
         />
         <Typography.Link onClick={() => void load()}>刷新</Typography.Link>
       </Space>
-      <Table rowKey={(r, i) => `${r.namespace}-${r.lastTimestamp}-${i}`} loading={loading} columns={columns} dataSource={items} />
+      <Table
+        rowKey={(r) => `${r.namespace}-${r.lastTimestamp}-${r.reason}-${r.involvedObject?.name ?? ''}`}
+        loading={loading}
+        columns={columns}
+        dataSource={items}
+      />
     </div>
   );
 }

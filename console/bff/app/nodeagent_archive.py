@@ -55,13 +55,14 @@ def _read_archive_sync(
     auth = oss2.Auth(settings.bff_nodeagent_oss_access_key_id, settings.bff_nodeagent_oss_access_key_secret)
     bucket = oss2.Bucket(auth, settings.bff_nodeagent_oss_endpoint, settings.bff_nodeagent_oss_bucket)
 
-    log_objects: list[tuple[str, Any]] = []
+    log_objects: list[tuple[str, Any, int]] = []
     marker_objects: list[tuple[str, int, Any]] = []
 
     for obj in oss2.ObjectIterator(bucket, prefix=prefix):
         key = obj.key
         if _LOG_OBJECT_RE.search(key):
-            log_objects.append((key, obj.last_modified))
+            size = int(getattr(obj, "size", 0) or 0)
+            log_objects.append((key, obj.last_modified, size))
         marker_match = _MARKER_RE.search(key)
         if marker_match:
             marker_objects.append((key, int(marker_match.group(1)), obj.last_modified))
@@ -76,7 +77,7 @@ def _read_archive_sync(
         )
 
     log_objects.sort(key=lambda x: x[1], reverse=True)
-    chosen_key = log_objects[0][0]
+    chosen_key, _, object_size = log_objects[0]
 
     marker_status: str | None = None
     marker_warnings: list[str] = []
@@ -89,20 +90,33 @@ def _read_archive_sync(
             marker_status = str(marker_doc.get("status") or "")
             if marker_doc.get("warnings"):
                 marker_warnings = [str(w) for w in marker_doc["warnings"]]
+        except oss2.exceptions.NoSuchKey:
+            marker_status = "unknown"
         except Exception:
             marker_status = "unknown"
 
-    obj = bucket.get_object(chosen_key)
-    data = obj.read()
+    effective_max = max(1, max_bytes)
     truncated = False
-    if len(data) > max_bytes:
-        data = data[-max_bytes:]
-        truncated = True
-
     try:
-        content = data.decode("utf-8", errors="replace")
-    except Exception:
-        content = data.decode("latin-1", errors="replace")
+        if object_size and object_size > effective_max:
+            start = object_size - effective_max
+            data = bucket.get_object(chosen_key, byte_range=(start, object_size - 1)).read()
+            truncated = True
+        else:
+            data = bucket.get_object(chosen_key).read()
+            if len(data) > effective_max:
+                data = data[-effective_max:]
+                truncated = True
+    except oss2.exceptions.NoSuchKey as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "ARCHIVE_NOT_FOUND",
+                "message": f"Log object {chosen_key!r} no longer exists",
+            },
+        ) from exc
+
+    content = data.decode("utf-8", errors="replace")
 
     warnings: list[str] = [
         "Source: node-agent durable store (OSS). Live tail still uses Lifecycle diagnostics.",
@@ -152,7 +166,11 @@ async def fetch_archive_logs(
             },
         )
 
-    limit = max_bytes if max_bytes is not None else settings.bff_nodeagent_archive_max_bytes
+    cap = max(1, settings.bff_nodeagent_archive_max_bytes)
+    if max_bytes is None:
+        limit = cap
+    else:
+        limit = max(1, min(max_bytes, cap))
     import asyncio
 
     return await asyncio.to_thread(

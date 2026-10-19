@@ -17,6 +17,9 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
+from kubernetes.client.exceptions import ApiException
+from kubernetes.config.config_exception import ConfigException
+
 from app.config import Settings
 from app.k8s_client import load_core_v1
 from app.tenants import load_tenants
@@ -113,6 +116,72 @@ def _list_workloads_sync(
     return rows
 
 
+def _k8s_list_error(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, ConfigException):
+        return {
+            "items": [],
+            "message": str(exc),
+            "errorCode": "K8S_CONFIG",
+        }
+    if isinstance(exc, ApiException):
+        body = exc.body if isinstance(exc.body, str) else str(exc.body or exc.reason or exc)
+        return {
+            "items": [],
+            "message": body,
+            "errorCode": "K8S_API_ERROR",
+        }
+    return {
+        "items": [],
+        "message": str(exc),
+        "errorCode": "K8S_ERROR",
+    }
+
+
+def _event_sort_key(ev: Any) -> Any:
+    return ev.last_timestamp or ev.event_time or ev.metadata.creation_timestamp
+
+
+def _list_namespace_events(v1: Any, namespace: str, *, page_size: int, max_pages: int) -> list[Any]:
+    collected: list[Any] = []
+    continue_token: str | None = None
+    for _ in range(max_pages):
+        resp = v1.list_namespaced_event(
+            namespace=namespace,
+            limit=page_size,
+            _continue=continue_token,
+        )
+        collected.extend(resp.items)
+        continue_token = resp.metadata._continue
+        if not continue_token:
+            break
+    collected.sort(key=_event_sort_key, reverse=True)
+    return collected
+
+
+def _pod_names_for_sandbox(v1: Any, namespace: str, sandbox_id: str) -> set[str]:
+    names = set(pod_name_candidates_for_sandbox(sandbox_id))
+    try:
+        pods = v1.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f"{SANDBOX_ID_LABEL}={sandbox_id}",
+        )
+        for pod in pods.items:
+            if pod.metadata.name:
+                names.add(pod.metadata.name)
+    except ApiException:
+        raise
+    except Exception:
+        pass
+    return names
+
+
+def _event_matches_sandbox(ev: Any, pod_names: set[str]) -> bool:
+    obj = ev.involved_object
+    if not obj or obj.kind != "Pod" or not obj.name:
+        return False
+    return obj.name in pod_names
+
+
 def _event_row(ev: Any, tenant: str, namespace: str) -> dict[str, Any]:
     obj = ev.involved_object
     return {
@@ -141,26 +210,18 @@ def _list_events_sync(
 ) -> list[dict[str, Any]]:
     v1 = load_core_v1()
     rows: list[dict[str, Any]] = []
+    page_size = min(max(limit, 50), 300)
+    max_pages = 8
     for tenant_name, namespace in _target_namespaces(settings, tenant_filter):
         if namespace_filter and namespace != namespace_filter:
             continue
-        field_selector = None
+        pod_names: set[str] | None = None
         if sandbox_id:
-            # Events don't index by sandbox label; filter client-side on pod name prefix if needed
-            pass
-        events = v1.list_namespaced_event(namespace=namespace, field_selector=field_selector, limit=limit)
-        for ev in sorted(events.items, key=lambda e: e.last_timestamp or e.event_time or e.metadata.creation_timestamp, reverse=True):
-            if sandbox_id:
-                obj = ev.involved_object
-                if obj and obj.kind == "Pod":
-                    try:
-                        pod = v1.read_namespaced_pod(name=obj.name, namespace=namespace)
-                        if (pod.metadata.labels or {}).get(SANDBOX_ID_LABEL) != sandbox_id:
-                            continue
-                    except Exception:
-                        continue
-                else:
-                    continue
+            pod_names = _pod_names_for_sandbox(v1, namespace, sandbox_id)
+        events = _list_namespace_events(v1, namespace, page_size=page_size, max_pages=max_pages)
+        for ev in events:
+            if pod_names is not None and not _event_matches_sandbox(ev, pod_names):
+                continue
             rows.append(_event_row(ev, tenant_name, namespace))
             if len(rows) >= limit:
                 return rows
@@ -181,14 +242,20 @@ async def list_workloads(
             "disabled": True,
             "message": "Set BFF_K8S_PROBE_ENABLED=true and configure RBAC",
         }
-    items = await asyncio.to_thread(
-        _list_workloads_sync,
-        settings,
-        tenant_filter=tenant,
-        namespace_filter=namespace,
-        sandbox_id=sandbox_id,
-        limit=min(limit, 500),
-    )
+    capped = min(limit, 500)
+    try:
+        items = await asyncio.to_thread(
+            _list_workloads_sync,
+            settings,
+            tenant_filter=tenant,
+            namespace_filter=namespace,
+            sandbox_id=sandbox_id,
+            limit=capped,
+        )
+    except (ConfigException, ApiException, RuntimeError) as exc:
+        return {**_k8s_list_error(exc), "totalItems": 0}
+    except Exception as exc:
+        return {**_k8s_list_error(exc), "totalItems": 0}
     return {"items": items, "totalItems": len(items)}
 
 
@@ -206,12 +273,18 @@ async def list_events(
             "disabled": True,
             "message": "Set BFF_K8S_PROBE_ENABLED=true and configure RBAC",
         }
-    items = await asyncio.to_thread(
-        _list_events_sync,
-        settings,
-        tenant_filter=tenant,
-        namespace_filter=namespace,
-        sandbox_id=sandbox_id,
-        limit=min(limit, 300),
-    )
+    capped = min(limit, 300)
+    try:
+        items = await asyncio.to_thread(
+            _list_events_sync,
+            settings,
+            tenant_filter=tenant,
+            namespace_filter=namespace,
+            sandbox_id=sandbox_id,
+            limit=capped,
+        )
+    except (ConfigException, ApiException, RuntimeError) as exc:
+        return {**_k8s_list_error(exc), "totalItems": 0}
+    except Exception as exc:
+        return {**_k8s_list_error(exc), "totalItems": 0}
     return {"items": items, "totalItems": len(items)}

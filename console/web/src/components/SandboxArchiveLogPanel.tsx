@@ -1,11 +1,11 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -13,9 +13,9 @@
 // limitations under the License.
 
 import { Alert, Button, Space, Typography, message } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { adminApi, sandboxApi } from '../api/client';
+import { ApiError, adminApi, sandboxApi } from '../api/client';
 import type { DiagnosticContentResponse } from '../api/types';
 import { useAuth } from '../auth/AuthContext';
 import { SandboxColoredLogViewer } from './SandboxColoredLogViewer';
@@ -27,6 +27,11 @@ type Props = {
   maxHeight?: number;
 };
 
+const ARCHIVE_DISABLED_CODES = new Set([
+  'NODEAGENT_ARCHIVE_DISABLED',
+  'NODEAGENT_OSS_NOT_CONFIGURED',
+]);
+
 export function SandboxArchiveLogPanel({
   sandboxId,
   tenant,
@@ -34,6 +39,8 @@ export function SandboxArchiveLogPanel({
   maxHeight = 420,
 }: Props) {
   const { user } = useAuth();
+  const requestSeq = useRef(0);
+  const [contentVersion, setContentVersion] = useState(0);
   const [data, setData] = useState<DiagnosticContentResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [disabledNote, setDisabledNote] = useState<string | null>(null);
@@ -44,6 +51,7 @@ export function SandboxArchiveLogPanel({
       message.warning('Admin 查看归档日志需指定 tenant');
       return;
     }
+    const seq = ++requestSeq.current;
     setLoading(true);
     setDisabledNote(null);
     try {
@@ -51,23 +59,25 @@ export function SandboxArchiveLogPanel({
         user?.role === 'admin' && tenant
           ? await adminApi.archiveLogs(sandboxId.trim(), tenant)
           : await sandboxApi.archiveLogs(sandboxId.trim());
+      if (seq !== requestSeq.current) return;
       setData(result);
+      setContentVersion((v) => v + 1);
     } catch (e) {
+      if (seq !== requestSeq.current) return;
       setData(null);
-      const msg = e instanceof Error ? e.message : '加载归档失败';
-      if (msg.includes('NODEAGENT') || msg.includes('DISABLED') || msg.includes('OSS')) {
-        setDisabledNote(msg);
+      if (e instanceof ApiError && ARCHIVE_DISABLED_CODES.has(e.code)) {
+        setDisabledNote(e.message);
       } else {
-        message.error(msg);
+        message.error(e instanceof Error ? e.message : '加载归档失败');
       }
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [sandboxId, tenant, user?.role]);
 
   useEffect(() => {
     if (autoLoad && sandboxId) void fetchArchive();
-  }, [autoLoad, sandboxId, fetchArchive]);
+  }, [autoLoad, sandboxId, tenant, fetchArchive]);
 
   if (disabledNote) {
     return (
@@ -82,6 +92,11 @@ export function SandboxArchiveLogPanel({
               需在集群启用 node-agent 且 BFF 配置 OSS 只读凭证（file sink 无法被 BFF 统一读取）。当前仍可使用「实时日志」Tab。
             </Typography.Paragraph>
           </>
+        }
+        action={
+          <Button size="small" onClick={() => void fetchArchive()}>
+            重试
+          </Button>
         }
       />
     );
@@ -99,8 +114,8 @@ export function SandboxArchiveLogPanel({
           </Typography.Text>
         )}
       </Space>
-      {data?.warnings?.map((w) => (
-        <Alert key={w} type="info" showIcon message={w} style={{ marginBottom: 8 }} />
+      {data?.warnings?.map((w, i) => (
+        <Alert key={`${i}-${w.slice(0, 40)}`} type="info" showIcon message={w} style={{ marginBottom: 8 }} />
       ))}
       {data?.truncated && (
         <Alert
@@ -117,7 +132,7 @@ export function SandboxArchiveLogPanel({
         <SandboxColoredLogViewer
           content={data.content}
           maxHeight={maxHeight}
-          contentKey={`archive-${data.content.length}-${loading ? 'loading' : 'idle'}`}
+          contentKey={`archive-${contentVersion}`}
         />
       )}
     </div>

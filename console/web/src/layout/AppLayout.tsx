@@ -55,8 +55,12 @@ export function AppLayout() {
       children: [
         { key: '/platform/health', label: '组件健康' },
         { key: '/platform/version', label: '版本' },
-        { key: '/platform/k8s/workloads', label: 'K8s 工作负载' },
-        { key: '/platform/k8s/events', label: 'K8s 事件' },
+        ...(isAdmin
+          ? [
+              { key: '/platform/k8s/workloads', label: 'K8s 工作负载' },
+              { key: '/platform/k8s/events', label: 'K8s 事件' },
+            ]
+          : []),
       ],
     },
   ];
