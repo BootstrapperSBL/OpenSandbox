@@ -1676,6 +1676,126 @@ pause_resume_verify() {
 	wait_for "pause/resume sandbox deleted" 120 verify_sandbox_gone
 }
 
+# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay) --------
+
+# Status-code-returning variant of server_api for negative-path assertions
+# (curl -f hides the status).
+server_api_status() { # method path [json-body]
+	local method="$1" path="$2" body="${3:-}" out
+	if [[ -n "$body" ]]; then
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-H "Content-Type: application/json" -d "$body" -w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	else
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	fi
+	printf '%s' "${out##*$'\n'}"
+}
+
+# The vault stage's sandbox must ride the subject-scoped egress log markers
+# (export/import/registration), so every log assertion goes through this.
+vault_log_contains() { # <fixed-substring>
+	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null \
+		| grep -qF "$1"
+}
+
+vault_revision_is() { # <expected-revision>
+	local out
+	out="$(server_api GET "/sandboxes/$VERIFY_ID/credential-vault" 2>/dev/null)" || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.revision // empty')" == "$1" ]]
+}
+
+vault_lifecycle_verify() {
+	local created vault_body ack rev sandbox_uid
+	log "verify (vault): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+	# The policy rides the create (the vault validates its bindings against
+	# it, and a create WITHOUT a policy produces no egress binding at all —
+	# the subject would never register).
+	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "ext.test"}]}' \
+		> "$GEN_DIR/vault-policy.json"
+	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+		--metadata origin=fast-sandbox-env-vault \
+		--network-policy-file "$GEN_DIR/vault-policy.json" \
+		--skip-health-check -o json 2>/dev/null)" \
+		|| fail "vault verify: sandbox create failed"
+	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
+	wait_for "vault sandbox Running" 150 sandbox_running
+	sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$VERIFY_ID" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$sandbox_uid" ]] || fail "vault verify: sandbox CR carried no uid"
+	# The subject must be registered (deny-first -> active) before the vault
+	# POST; otherwise the relay 404s (create -> ready -> set vault).
+	wait_for "vault subject registered on egress" 120 \
+		vault_log_contains "subject s-$sandbox_uid: SET_BINDING applied (state=active)"
+
+	# 1) create-only: 201 ack carries the egress-validated revision; a
+	#    duplicate POST is 409 (atomic across server replicas).
+	vault_body="$(jq -n '{credentials: [{name: "tok", source: {type: "inline", value: "sekrit-vault-e2e"}}], bindings: [{name: "ext", match: {hosts: ["ext.test"]}, auth: {type: "apiKey", name: "X-Api-Key", credential: "tok"}}]}')"
+	ack="$(server_api POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body")" \
+		|| fail "vault verify: POST credential-vault failed"
+	rev="$(printf '%s' "$ack" | jq -r '.revision // empty')"
+	[[ "$rev" =~ ^[0-9]+$ ]] || fail "vault verify: create ack carried no revision: $(printf '%s' "$ack" | head -c 200)"
+	pass "vault created over the relay (ack revision $rev)"
+	if server_api POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body" >/dev/null 2>&1; then
+		fail "vault verify: duplicate POST succeeded (create-only must 409)"
+	fi
+	[[ "$(server_api_status POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body")" == "409" ]] \
+		|| fail "vault verify: duplicate POST was not 409"
+	pass "duplicate POST rejected (create-only 409)"
+
+	# 2) pause/resume carries the REAL vault: the egress copies the vault
+	#    file into the checkpoint bundle (export) and re-imports it on
+	#    restore; the relay GET still reports the same revision.
+	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 || fail "vault verify: pause failed"
+	wait_for "vault sandbox Paused (checkpoint durable)" 240 sandbox_paused
+	wait_for "vault exported into the checkpoint bundle" 120 \
+		vault_log_contains "subject s-$sandbox_uid: vault exported to snapshot bundle"
+	pass "pause exported the vault bundle (subject sealed)"
+	osb_api sandbox resume "$VERIFY_ID" --skip-health-check >/dev/null 2>&1 || fail "vault verify: resume failed"
+	wait_for "vault sandbox Running (restored)" 240 sandbox_running
+	wait_for "vault re-imported from the bundle" 120 \
+		vault_log_contains "subject s-$sandbox_uid: vault imported from snapshot bundle"
+	wait_for "vault revision preserved across pause/resume" 120 vault_revision_is "$rev"
+	pass "vault survived pause/resume (revision $rev preserved)"
+
+	# 3) egress-restart recovery: crash the worker (the supervisor restarts
+	#    it with a fresh instanceId); the fastlet replays SET_BINDING and the
+	#    vault file reloads by incarnation. The GET succeeding with the same
+	#    revision proves the whole chain (relay up, replay done, file loaded).
+	local pod restarted=0
+	for pod in $(pool_pods); do
+		if kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- sh -c 'command -v pkill >/dev/null' 2>/dev/null; then
+			kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- pkill -f '/opt/opensandbox-egress/egress' >/dev/null 2>&1 || true
+			restarted=1
+		else
+			log "verify (vault): egress restart skipped on ${pod##*/} (pkill unavailable)"
+		fi
+	done
+	if [[ "$restarted" == 1 ]]; then
+		wait_for "pool egress containers back up" 180 egress_containers_ready
+		wait_for "vault reloaded after egress restart" 240 vault_revision_is "$rev"
+		pass "vault reloaded after egress restart (revision $rev preserved)"
+	fi
+
+	# 4) delete + re-create: DELETE is terminal, GET 404s, a fresh POST is a
+	#    new vault at revision 1.
+	server_api DELETE "/sandboxes/$VERIFY_ID/credential-vault" >/dev/null \
+		|| fail "vault verify: DELETE failed"
+	[[ "$(server_api_status GET "/sandboxes/$VERIFY_ID/credential-vault")" == "404" ]] \
+		|| fail "vault verify: GET after DELETE was not 404"
+	pass "vault deleted (GET 404)"
+	ack="$(server_api POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body")" \
+		|| fail "vault verify: re-create after DELETE failed"
+	rev="$(printf '%s' "$ack" | jq -r '.revision // empty')"
+	[[ "$rev" == "1" ]] || fail "vault verify: fresh vault revision is $rev, expected 1"
+	pass "vault re-created (fresh revision $rev)"
+
+	osb_api sandbox kill "$VERIFY_ID" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill failed; remove $VERIFY_ID manually"
+	wait_for "vault sandbox deleted" 120 verify_sandbox_gone
+}
+
+
+
 # --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile) --------------
 
 # Poll the gateway until /ping returns 200 (marked 503s tolerated; the
@@ -2235,6 +2355,7 @@ case "$ACTION" in
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
 		run_stage "end-to-end verify (CLI create -> gateway -> execd /ping)" opensandbox_verify
 		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
+		run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 		run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
 		run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
 		trap - ERR
