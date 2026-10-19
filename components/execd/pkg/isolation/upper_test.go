@@ -215,15 +215,16 @@ func TestUpperManager_RecordedReclaimFailureRetainedForGC(t *testing.T) {
 	}
 }
 
-func TestUpperManager_UsageSkipsMissingUpper(t *testing.T) {
+func TestUpperManager_UsageSkipsMissingReleasedUpper(t *testing.T) {
 	mgr := newTestUpperManager(t)
 
 	id, upper, _, err := mgr.Allocate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a partially removed residue entry: the tracked upper dir is
+	// Simulate a partially removed residue entry: the released upper dir is
 	// gone from disk but still registered.
+	mgr.Release(id)
 	if err := os.RemoveAll(filepath.Dir(upper)); err != nil {
 		t.Fatal(err)
 	}
@@ -241,6 +242,22 @@ func TestUpperManager_UsageSkipsMissingUpper(t *testing.T) {
 	mgr.mu.Unlock()
 	if !tracked {
 		t.Fatal("entry should stay tracked for a GC retry")
+	}
+}
+
+func TestUpperManager_UsageRejectsMissingInUseUpper(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	_, upper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(upper); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mgr.Usage(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Usage() error = %v, want missing in-use upper error", err)
 	}
 }
 
