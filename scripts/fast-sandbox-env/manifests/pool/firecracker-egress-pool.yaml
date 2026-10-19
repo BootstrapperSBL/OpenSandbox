@@ -51,9 +51,17 @@ spec:
         env:
         - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
           value: /run/fast-sandbox/firecracker/runtime.sock
+        # Vault bundle handoff (OSEP-0022): the export/import envelope carries
+        # a file PATH and the egress Handler resolves it in its own mount
+        # namespace, so the bundle moves through this hostPath directory
+        # shared with the egress container (mounted there too, below).
+        - name: FAST_SANDBOX_EGRESS_BUNDLE_DIR
+          value: /var/lib/fast-sandbox/bundles
         volumeMounts:
         - name: agent-socket
           mountPath: /run/fast-sandbox/firecracker
+        - name: checkpoint-bundles
+          mountPath: /var/lib/fast-sandbox/bundles
       - name: egress
         image: "@EGRESS_IMAGE@"
         # IfNotPresent: the environment kind-loads the image into the
@@ -81,6 +89,10 @@ spec:
         volumeMounts:
         - name: egress-vault
           mountPath: /var/lib/opensandbox-egress
+        # The other side of the vault bundle handoff: reads exports written
+        # by the fastlet driver and writes imports for it (both root).
+        - name: checkpoint-bundles
+          mountPath: /var/lib/fast-sandbox/bundles
           # Plaintext v1 posture: the vault volume joins the credential
           # trust surface. Swap to `medium: Memory` (tmpfs) to keep the
           # per-subject vault files off node disk.
@@ -111,6 +123,14 @@ spec:
       # medium: Memory would keep the plaintext v1 files off node disk.
       - name: egress-vault
         emptyDir: {}
+      # Vault bundle handoff between the fastlet driver and the egress
+      # container (OSEP-0022): a shared node directory so the envelope's
+      # file PATH resolves in both mount namespaces. DirectoryOrCreate
+      # keeps the 0755 root-owned mode the atomic machinery trusts.
+      - name: checkpoint-bundles
+        hostPath:
+          path: /var/lib/fast-sandbox/bundles
+          type: DirectoryOrCreate
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
       # P2P topology: spread the poolMin fastlets one per node so each
