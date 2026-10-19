@@ -72,6 +72,7 @@ from opensandbox_server.api.schema import (
     CreateSandboxRequest,
     CredentialProxyConfig,
     Host,
+    IdlePolicy,
     ImageSpec,
     LifecycleHook,
     ListSandboxesRequest,
@@ -2497,19 +2498,68 @@ def test_build_env_injects_execd_run_as_init_when_enabled():
 
     assert "EXECD_INIT=1" in environment
 
-def test_build_labels_stores_extensions_json():
+def test_build_labels_stores_renewal_policy_from_lifecycle():
     service = DockerSandboxService(config=_app_config())
     request = CreateSandboxRequest(
         image=ImageSpec(uri="python:3.11"),
         resourceLimits=ResourceLimits(root={}),
         env={},
         entrypoint=["python"],
-        extensions={"access.renew.extend.seconds": "3600"},
+        lifecycle=SandboxLifecycle(renewalPolicy={"extendSeconds": 3600}),
     )
 
-    labels, _ = service._build_labels_and_env("sandbox-ext", request, None)
+    labels, _ = service._build_labels_and_env("sandbox-renew", request, None)
 
     assert labels[ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY] == "3600"
+
+
+def test_docker_create_accepts_renewal_policy_only_lifecycle():
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        entrypoint=["python"],
+        lifecycle=SandboxLifecycle(renewalPolicy={"extendSeconds": 3600}),
+    )
+
+    labels, _ = service._build_labels_and_env("sandbox-renew-only", request, None)
+
+    assert labels[ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY] == "3600"
+
+
+def test_docker_create_rejects_lifecycle_hooks():
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        entrypoint=["python"],
+        lifecycle=SandboxLifecycle(preStart=LifecycleHook(command=["true"])),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(service.create_sandbox(request))
+    assert exc.value.status_code == 400
+    assert "hooks" in exc.value.detail["message"]
+
+
+def test_docker_create_rejects_idle_policy():
+    service = DockerSandboxService(config=_app_config())
+    request = CreateSandboxRequest(
+        image=ImageSpec(uri="python:3.11"),
+        resourceLimits=ResourceLimits(root={}),
+        env={},
+        entrypoint=["python"],
+        lifecycle=SandboxLifecycle(
+            idlePolicy=IdlePolicy(idleTimeoutSeconds=300, onIdle="pause")
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(service.create_sandbox(request))
+    assert exc.value.status_code == 400
+    assert "idlePolicy" in exc.value.detail["message"]
 
 
 def test_build_labels_stores_opensandbox_extensions():
@@ -2522,7 +2572,6 @@ def test_build_labels_stores_opensandbox_extensions():
         extensions={
             "opensandbox.extensions.pool-ref": "my-pool",
             "opensandbox.extensions.custom": "value",
-            "access.renew.extend.seconds": "1800",
         },
     )
 
@@ -2530,7 +2579,6 @@ def test_build_labels_stores_opensandbox_extensions():
 
     assert labels["opensandbox.io/extensions.pool-ref"] == "my-pool"
     assert labels["opensandbox.io/extensions.custom"] == "value"
-    assert "opensandbox.io/extensions.access.renew.extend.seconds" not in labels
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")

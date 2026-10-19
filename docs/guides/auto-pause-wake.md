@@ -189,7 +189,7 @@ Exhaustion raises `SandboxWakeTimeoutException`.
 
 ## Composition with other features
 
-- **Renew-on-access ([OSEP-0009](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0009-auto-renew-sandbox-on-ingress-access.md))** is independent — one request can feed both. Recommended: enable both, so active sandboxes keep extending their expiry while idle ones get reclaimed.
+- **Renew-on-access ([OSEP-0009](https://github.com/opensandbox-group/OpenSandbox/blob/main/oseps/0009-auto-renew-sandbox-on-ingress-access.md))** is independent — one request can feed both (see [Renew-on-Access](/guides/renew-on-access)). Recommended: enable both, so active sandboxes keep extending their expiry while idle ones get reclaimed.
 - **Expiry is absolute**: pausing neither stops nor extends `expires_at`. A paused sandbox whose expiry passes becomes `Terminated`; wake then fails fast with `404`.
 - **Manual pause/resume** keeps working. Wake treats manually and automatically paused sandboxes identically (unless `wakeOnAccess: false`).
 

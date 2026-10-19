@@ -50,7 +50,9 @@ from opensandbox.models.sandboxes import (
     Host,
     NetworkPolicy,
     NetworkRule,
+    RenewalPolicy,
     SandboxImageSpec,
+    SandboxLifecycle,
     Volume,
 )
 from pydantic import ValidationError
@@ -70,9 +72,6 @@ from tests.base_e2e_test import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Keep in sync with server ``opensandbox_server/extensions/keys.py``
-ACCESS_RENEW_EXTEND_SECONDS_KEY = "access.renew.extend.seconds"
 
 
 def _now_ms() -> int:
@@ -679,7 +678,9 @@ class TestSandboxE2E:
             connection_config=cfg,
             timeout=sandbox_ttl,
             ready_timeout=timedelta(seconds=90),
-            extensions={ACCESS_RENEW_EXTEND_SECONDS_KEY: "300"},
+            lifecycle=SandboxLifecycle(
+                renewal_policy=RenewalPolicy(extend_seconds=300)
+            ),
             network_policy=NetworkPolicy(
                 defaultAction="deny",
                 egress=[NetworkRule(action="allow", target="pypi.org")],

@@ -270,6 +270,7 @@ class SandboxModelConverter:
                 lifecycle.pre_start is not None
                 or lifecycle.periodic
                 or lifecycle.idle_policy is not None
+                or lifecycle.renewal_policy is not None
             ):
                 lifecycle_payload = lifecycle.model_dump(
                     by_alias=True, exclude_none=True

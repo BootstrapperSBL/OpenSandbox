@@ -373,6 +373,90 @@ func TestCreateSandbox_RejectsInvalidIdlePolicy(t *testing.T) {
 	require.Equal(t, "IdleTimeoutSeconds", argErr.Field)
 }
 
+func TestRenewalPolicyValidation(t *testing.T) {
+	cases := []struct {
+		name    string
+		policy  *RenewalPolicy
+		wantErr string
+	}{
+		{"nil ok", nil, ""},
+		{"below range", &RenewalPolicy{ExtendSeconds: 299}, "ExtendSeconds"},
+		{"above range", &RenewalPolicy{ExtendSeconds: 86401}, "ExtendSeconds"},
+		{"min boundary", &RenewalPolicy{ExtendSeconds: 300}, ""},
+		{"max boundary", &RenewalPolicy{ExtendSeconds: 86400}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.policy.Validate()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCreateSandbox_ForwardsRenewalPolicyWire(t *testing.T) {
+	var received *SandboxLifecycle
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sandboxes":
+			var request CreateSandboxRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			received = request.Lifecycle
+			jsonResponse(w, http.StatusCreated, SandboxInfo{
+				ID:        "sbx-renew",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes/sbx-renew":
+			jsonResponse(w, http.StatusOK, SandboxInfo{
+				ID:        "sbx-renew",
+				Status:    SandboxStatus{State: StateRunning},
+				CreatedAt: time.Now().UTC(),
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/endpoints/"):
+			jsonResponse(w, http.StatusOK, Endpoint{Endpoint: srv.URL})
+		default:
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+
+	_, err := CreateSandbox(context.Background(), ConnectionConfig{
+		Domain:         srv.URL,
+		DisableMetrics: true,
+	}, SandboxCreateOptions{
+		Image:           "python:3.12",
+		SkipHealthCheck: true,
+		Lifecycle: &SandboxLifecycle{
+			RenewalPolicy: &RenewalPolicy{ExtendSeconds: 3600},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, received)
+	require.NotNil(t, received.RenewalPolicy)
+	require.Equal(t, 3600, received.RenewalPolicy.ExtendSeconds)
+}
+
+func TestCreateSandbox_RejectsInvalidRenewalPolicy(t *testing.T) {
+	_, err := CreateSandbox(context.Background(), ConnectionConfig{
+		Domain:         "http://127.0.0.1:1",
+		DisableMetrics: true,
+	}, SandboxCreateOptions{
+		Image:           "python:3.12",
+		SkipHealthCheck: true,
+		Lifecycle:       &SandboxLifecycle{RenewalPolicy: &RenewalPolicy{ExtendSeconds: 299}},
+	})
+	require.Error(t, err)
+	var argErr *InvalidArgumentError
+	require.ErrorAs(t, err, &argErr)
+	require.Equal(t, "ExtendSeconds", argErr.Field)
+}
+
 func TestCreateSandboxFromTemplate_ForwardsIdlePolicy(t *testing.T) {
 	var received *CreateSandboxRequest
 	var srv *httptest.Server

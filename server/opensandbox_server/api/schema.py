@@ -30,6 +30,8 @@ from opensandbox_server.constants import (
     IDLE_TIMEOUT_MIN_SECONDS,
     PROBE_TIMEOUT_MAX_SECONDS,
     PROBE_TIMEOUT_MIN_SECONDS,
+    RENEW_EXTEND_MAX_SECONDS,
+    RENEW_EXTEND_MIN_SECONDS,
 )
 from opensandbox_server.constants import OPENSANDBOX_LIFECYCLE
 
@@ -618,9 +620,33 @@ class IdlePolicy(BaseModel):
         extra = "forbid"
 
 
+class RenewalPolicy(BaseModel):
+    """Renew-on-access behavior (OSEP-0009): observed access moves the
+    expiration to ``max(now + extendSeconds, current)``. Control-plane
+    policy; supersedes the deprecated ``access.renew.extend.seconds``
+    extensions key.
+    """
+
+    extend_seconds: int = Field(
+        ...,
+        alias="extendSeconds",
+        ge=RENEW_EXTEND_MIN_SECONDS,
+        le=RENEW_EXTEND_MAX_SECONDS,
+        description=(
+            "Extension window X in seconds for each access-driven renewal: "
+            "the expiration is moved to max(now + X, current expiresAt)."
+        ),
+    )
+
+    class Config:
+        populate_by_name = True
+        extra = "forbid"
+
+
 class SandboxLifecycle(BaseModel):
     """Extensible lifecycle configuration: hooks run in the guest via execd;
-    ``idlePolicy`` is control-plane state (OSEP-0024) and never reaches it.
+    ``idlePolicy`` (OSEP-0024) and ``renewalPolicy`` (OSEP-0009) are
+    control-plane state and never reach it.
     """
 
     pre_start: Optional[LifecycleHook] = Field(None, alias="preStart")
@@ -629,6 +655,14 @@ class SandboxLifecycle(BaseModel):
         None,
         alias="idlePolicy",
         description="Auto-pause and wake-on-access behavior (fast-sandbox backend only).",
+    )
+    renewal_policy: Optional[RenewalPolicy] = Field(
+        None,
+        alias="renewalPolicy",
+        description=(
+            "Renew-on-access behavior (OSEP-0009); control-plane state. "
+            "Supersedes the deprecated access.renew.extend.seconds extensions key."
+        ),
     )
 
     @property

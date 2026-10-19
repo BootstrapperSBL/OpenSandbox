@@ -1069,7 +1069,9 @@ class KubernetesSandboxService(K8sDiagnosticsMixin, SandboxService, ExtensionSer
             tenant = get_current_tenant()
             if tenant is not None:
                 context.labels[SANDBOX_TENANT_LABEL] = tenant.name
-            apply_access_renew_extend_seconds_to_mapping(context.annotations, request.extensions)
+            apply_access_renew_extend_seconds_to_mapping(
+                context.annotations, request.extensions, lifecycle=request.lifecycle
+            )
             apply_extensions_to_mapping(context.annotations, request.extensions)
 
             ensure_volumes_valid(

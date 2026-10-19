@@ -122,6 +122,21 @@ const sandbox = await Sandbox.create({
 
 `activeProbe` lets the application veto a pause while real work runs without producing ingress traffic: declare an endpoint answering `{"active": bool, "message"?: string}` and the server polls it when the sandbox is otherwise idle; a busy answer resets the idle clock.
 
+### Renewal policy (renew-on-access)
+
+`lifecycle.renewalPolicy.extendSeconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + extendSeconds, current expiresAt)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` — see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu:24.04",
+  timeoutSeconds: 3600,
+  lifecycle: {
+    renewalPolicy: { extendSeconds: 3600 },
+  },
+});
+```
+
 ### Wake retry
 
 A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` header; the transport recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK throws `SandboxWakeTimeoutException` (carrying `attempts` and `waitedMs`) while the server-side resume continues in the background. Bare `503` responses follow the existing rules untouched. Tune it on the connection config: `wakeRetryEnabled` (default true), `wakeMaxAttempts` (5), `wakeOverallDeadlineSeconds` (60, `null` for unbounded). The SSE transport is wrapped too, so `commands.run()` wakes a paused sandbox like any other request (an established stream is never re-dispatched — only the marked 503 connect replays); the upload transport stays bare because upload bodies are streams and cannot be replayed.

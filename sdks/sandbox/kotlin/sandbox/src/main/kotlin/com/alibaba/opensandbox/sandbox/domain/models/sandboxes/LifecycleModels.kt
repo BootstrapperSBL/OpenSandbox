@@ -268,14 +268,53 @@ class IdlePolicy private constructor(
     }
 }
 
+/**
+ * Renew-on-access behavior (OSEP-0009): observed access moves the expiration
+ * to `max(now + extendSeconds, current)`. Control-plane policy; supersedes
+ * the deprecated `extensions["access.renew.extend.seconds"]` key.
+ */
+class RenewalPolicy private constructor(
+    val extendSeconds: Int,
+) {
+    companion object {
+        const val MIN_EXTEND_SECONDS = 300
+        const val MAX_EXTEND_SECONDS = 86400
+
+        @JvmStatic
+        fun builder(): Builder = Builder()
+    }
+
+    class Builder {
+        private var extendSeconds: Int? = null
+
+        fun extendSeconds(extendSeconds: Int): Builder {
+            require(extendSeconds in MIN_EXTEND_SECONDS..MAX_EXTEND_SECONDS) {
+                "RenewalPolicy.extendSeconds must be between $MIN_EXTEND_SECONDS and " +
+                    "$MAX_EXTEND_SECONDS, got $extendSeconds"
+            }
+            this.extendSeconds = extendSeconds
+            return this
+        }
+
+        fun build(): RenewalPolicy {
+            val seconds = extendSeconds
+            requireNotNull(seconds) {
+                "RenewalPolicy must set extendSeconds"
+            }
+            return RenewalPolicy(extendSeconds = seconds)
+        }
+    }
+}
+
 /** Optional declarative sandbox lifecycle configuration. */
 class SandboxLifecycle private constructor(
     val preStart: LifecycleHook?,
     val periodic: List<PeriodicLifecycleHook>?,
     val idlePolicy: IdlePolicy?,
+    val renewalPolicy: RenewalPolicy?,
 ) {
     internal val isEmpty: Boolean
-        get() = preStart == null && periodic.isNullOrEmpty() && idlePolicy == null
+        get() = preStart == null && periodic.isNullOrEmpty() && idlePolicy == null && renewalPolicy == null
 
     companion object {
         @JvmStatic
@@ -286,6 +325,7 @@ class SandboxLifecycle private constructor(
         private var preStart: LifecycleHook? = null
         private var periodic: List<PeriodicLifecycleHook>? = null
         private var idlePolicy: IdlePolicy? = null
+        private var renewalPolicy: RenewalPolicy? = null
 
         fun preStart(preStart: LifecycleHook): Builder {
             this.preStart = preStart
@@ -316,11 +356,24 @@ class SandboxLifecycle private constructor(
             return this
         }
 
+        fun renewalPolicy(renewalPolicy: RenewalPolicy): Builder {
+            this.renewalPolicy = renewalPolicy
+            return this
+        }
+
+        fun renewalPolicy(configure: RenewalPolicy.Builder.() -> Unit): Builder {
+            val builder = RenewalPolicy.builder()
+            builder.configure()
+            this.renewalPolicy = builder.build()
+            return this
+        }
+
         fun build(): SandboxLifecycle =
             SandboxLifecycle(
                 preStart = preStart,
                 periodic = periodic?.takeIf { it.isNotEmpty() },
                 idlePolicy = idlePolicy?.takeUnless { it.isEmpty },
+                renewalPolicy = renewalPolicy,
             )
     }
 }

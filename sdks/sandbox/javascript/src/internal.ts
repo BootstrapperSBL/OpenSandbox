@@ -71,3 +71,4 @@ export {
   RETRY_AFTER_CAP_MS,
 } from "./config/wakeRetry.js";
 export { validateIdlePolicy } from "./internal/idlePolicy.js";
+export { validateRenewalPolicy } from "./internal/renewalPolicy.js";

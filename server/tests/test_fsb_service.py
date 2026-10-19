@@ -589,18 +589,12 @@ def test_http_create_rejects_timeout_pool_mismatch_and_unreadable_extension(http
         "/v1/sandboxes",
         json={**base, "resourceLimits": {"cpu": "1", "memory": "512Mi"}},
     )
-    renew_extension = client.post(
-        "/v1/sandboxes",
-        json={**base, "extensions": {"access.renew.extend.seconds": "300"}},
-    )
     fake.pool_has_resources = False
     empty_pool_profile = client.post("/v1/sandboxes", json=base)
 
     assert too_long.status_code == 400
     assert pool_mismatch.status_code == 400
     assert "resourceLimits" in pool_mismatch.json()["detail"]["message"]
-    assert renew_extension.status_code == 400
-    assert "access.renew.extend.seconds" in renew_extension.json()["detail"]["message"]
     assert empty_pool_profile.status_code == 400
     assert (
         "not defined by the selected SandboxPool" in empty_pool_profile.json()["detail"]["message"]

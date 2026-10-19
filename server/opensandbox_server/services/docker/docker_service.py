@@ -582,16 +582,25 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         if request.lifecycle is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "code": SandboxErrorCodes.INVALID_PARAMETER,
-                    "message": (
-                        "lifecycle is not supported by the Docker provider; only the "
-                        "fast-sandbox backend accepts lifecycle.idlePolicy (OSEP-0024)."
-                    ),
-                },
-            )
+            # renewalPolicy (OSEP-0009) is control-plane state, persisted as a
+            # label; hooks and idlePolicy stay unsupported on docker.
+            unsupported: list[str] = []
+            if request.lifecycle.has_hooks:
+                unsupported.append("lifecycle.preStart/periodic hooks")
+            if request.lifecycle.idle_policy is not None:
+                unsupported.append("lifecycle.idlePolicy")
+            if unsupported:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "code": SandboxErrorCodes.INVALID_PARAMETER,
+                        "message": (
+                            f"{', '.join(unsupported)} not supported by the Docker "
+                            "provider; only lifecycle.renewalPolicy (OSEP-0009) is "
+                            "accepted on the lifecycle object."
+                        ),
+                    },
+                )
         if (request.extensions or {}).get("poolRef", "").strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

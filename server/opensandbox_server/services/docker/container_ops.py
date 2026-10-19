@@ -299,7 +299,9 @@ class DockerContainerOpsMixin:
         if request.snapshot_id:
             labels[SANDBOX_SNAPSHOT_ID_LABEL] = request.snapshot_id
 
-        apply_access_renew_extend_seconds_to_mapping(labels, request.extensions)
+        apply_access_renew_extend_seconds_to_mapping(
+            labels, request.extensions, lifecycle=request.lifecycle
+        )
         apply_extensions_to_mapping(labels, request.extensions)
 
         env_dict = {**(self.app_config.docker.sandbox_env or {}), **(request.env or {})}

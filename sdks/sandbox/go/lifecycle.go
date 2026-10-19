@@ -96,6 +96,9 @@ func (c *LifecycleClient) CreateSandbox(ctx context.Context, req CreateSandboxRe
 		if err := req.Lifecycle.IdlePolicy.Validate(); err != nil {
 			return nil, err
 		}
+		if err := req.Lifecycle.RenewalPolicy.Validate(); err != nil {
+			return nil, err
+		}
 	}
 	var resp SandboxInfo
 	if err := c.doRequest(ctx, "POST", "/sandboxes", req, &resp); err != nil {

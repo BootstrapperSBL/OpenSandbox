@@ -57,6 +57,7 @@ import type {
 import { SandboxOrigin } from "./models/sandboxes.js";
 import { ReadinessBudget, validatePollingInterval } from "./internal/readiness.js";
 import { validateIdlePolicy } from "./internal/idlePolicy.js";
+import { validateRenewalPolicy } from "./internal/renewalPolicy.js";
 
 const HOST_PATH_PATTERN = /^([/]|[A-Za-z]:[\\/])/;
 
@@ -534,6 +535,9 @@ export class Sandbox {
     }
     if (opts.lifecycle?.idlePolicy) {
       validateIdlePolicy(opts.lifecycle.idlePolicy);
+    }
+    if (opts.lifecycle?.renewalPolicy) {
+      validateRenewalPolicy(opts.lifecycle.renewalPolicy);
     }
 
     // Validate volumes before allocating transport resources.

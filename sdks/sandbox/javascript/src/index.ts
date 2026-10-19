@@ -67,6 +67,7 @@ export type {
   Host,
   ActivityProbe,
   IdlePolicy,
+  RenewalPolicy,
   InlineCredentialSource,
   LifecycleHook,
   ListSnapshotsParams,

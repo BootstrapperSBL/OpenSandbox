@@ -326,7 +326,7 @@ For FastSandbox routes, ingress asks FastPath to resolve the endpoint and forwar
 
 ### 6.3 Auto-Renew on Access
 
-The optional renew-intent integration extends sandbox TTL when access is observed. It can be triggered by server proxy requests or by ingress gateway events delivered through Redis. Per-sandbox opt-in is controlled by the `extensions["access.renew.extend.seconds"]` create parameter.
+The optional renew-intent integration extends sandbox TTL when access is observed. It can be triggered by server proxy requests or by ingress gateway events delivered through Redis. Per-sandbox opt-in is controlled by the `lifecycle.renewalPolicy` create field (OSEP-0009); the deprecated `extensions["access.renew.extend.seconds"]` key remains supported throughout 1.x.
 
 ## 7. Core Flows
 
