@@ -238,6 +238,10 @@ func TestActionsStatus(t *testing.T) {
 	assert.Equal(t, constants.ActionsAPIVersion, status.APIVersion)
 	assert.True(t, status.Ready)
 	assert.NotEmpty(t, status.InstanceID)
+	// The test server configures no vault persistence: the capability
+	// signal stays false, so the Fastlet skips pause/resume vault transfer.
+	assert.False(t, status.VaultTransfer)
+	assert.NotContains(t, rec.Body.String(), "vaultTransfer", "the capability field stays omitted when false")
 
 	// instanceId is stable for the process incarnation
 	rec = doRequest(t, srv, http.MethodGet, constants.ActionsStatusPath, "")
