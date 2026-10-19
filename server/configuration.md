@@ -167,6 +167,8 @@ The kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side; these fi
 | `fastpath_wait_ready_seconds` | number | `30.0` | Bounded readiness wait for DataPlaneReady after Create. |
 | `fastpath_resource_pool` | string | `"default-pool"` | SandboxPool when `extensions.poolRef` is unset. |
 | `template_s3_publish_secret` | string | `"sandbox-oss-credentials"` | Object-store credentials secret for server-created SandboxTemplates. |
+| `template_mitm_ca_secret` | string \| omitted | `null` | Secret holding the pinned cluster MITM CA certificate (OSEP-0022). When set, server-created SandboxTemplates bake `spec.egressMitmCertificate` from it so guests trust the interception CA from first boot; the referenced entry must carry the certificate only, never the private key. The Secret must exist in each template's namespace (ops-runbook distribution) — a missed copy fails the build observably. Unset keeps templates CA-free. |
+| `template_mitm_ca_secret_key` | string | `"ca.crt"` | Secret entry holding the CA certificate when `template_mitm_ca_secret` is set. |
 
 ---
 

@@ -812,6 +812,28 @@ class KubernetesRuntimeConfig(BaseModel):
             "credentials referenced by server-created SandboxTemplates."
         ),
     )
+    template_mitm_ca_secret: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "Secret holding the pinned cluster MITM CA certificate "
+            "(OSEP-0022). When set, server-created SandboxTemplates bake "
+            "spec.egressMitmCertificate from it so guests trust the "
+            "interception CA from first boot; the referenced entry must "
+            "carry the certificate only, never the private key. The Secret "
+            "must exist in each template's namespace (ops-runbook "
+            "distribution) — a missed copy fails the build observably. "
+            "Unset keeps templates CA-free."
+        ),
+    )
+    template_mitm_ca_secret_key: str = Field(
+        default="ca.crt",
+        min_length=1,
+        description=(
+            "Secret entry holding the CA certificate when "
+            "kubernetes.template_mitm_ca_secret is set."
+        ),
+    )
     workload_provider: Optional[str] = Field(
         default=None,
         description="Workload provider type. If not specified, uses the first registered provider.",
