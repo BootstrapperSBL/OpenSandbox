@@ -164,6 +164,21 @@ IdlePolicy(
 )
 ```
 
+### Renewal policy (renew-on-access)
+
+`SandboxLifecycle.renewal_policy.extend_seconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + extend_seconds, current expires_at)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` — see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0.
+
+```python
+sandbox = await Sandbox.create(
+    "ubuntu:24.04",
+    connection_config=config,
+    timeout_seconds=3600,
+    lifecycle=SandboxLifecycle(
+        renewal_policy=RenewalPolicy(extend_seconds=3600),
+    ),
+)
+```
+
 ### Wake retry
 
 A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the SDK recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK raises `SandboxWakeTimeoutException` (carrying `attempts` and `waited`) while the server-side restore continues in the background. Bare `503` responses follow the existing retry rules untouched. Streaming (SSE) calls bypass wake retry.

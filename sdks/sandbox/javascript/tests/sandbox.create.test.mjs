@@ -720,6 +720,51 @@ test("Sandbox.create forwards lifecycle.idlePolicy", async () => {
   assert.deepEqual(recordedRequests[0].lifecycle, { idlePolicy });
 });
 
+test("Sandbox.create forwards lifecycle.renewalPolicy", async () => {
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+  const renewalPolicy = { extendSeconds: 3600 };
+
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    lifecycle: { renewalPolicy },
+    skipHealthCheck: true,
+  });
+
+  assert.equal(recordedRequests.length, 1);
+  assert.deepEqual(recordedRequests[0].lifecycle, { renewalPolicy });
+});
+
+test("Sandbox.create rejects an invalid renewal policy before allocating transport resources", async () => {
+  for (const extendSeconds of [299, 86401, 3600.5, "3600"]) {
+    await assert.rejects(
+      Sandbox.create({
+        adapterFactory: {
+          createLifecycleStack() {
+            throw new Error("lifecycle stack must not be built for an invalid renewal policy");
+          },
+        },
+        connectionConfig: { domain: "http://127.0.0.1:8080" },
+        image: "python:3.12",
+        lifecycle: { renewalPolicy: { extendSeconds } },
+        skipHealthCheck: true,
+      }),
+      /extendSeconds must be an integer between 300 and 86400/
+    );
+  }
+
+  const { adapterFactory, recordedRequests } = createAdapterFactory();
+  await Sandbox.create({
+    adapterFactory,
+    connectionConfig: { domain: "http://127.0.0.1:8080" },
+    image: "python:3.12",
+    lifecycle: { renewalPolicy: { extendSeconds: 300 } },
+    skipHealthCheck: true,
+  });
+  assert.deepEqual(recordedRequests[0].lifecycle, { renewalPolicy: { extendSeconds: 300 } });
+});
+
 test("Sandbox.create rejects an invalid idle policy before allocating transport resources", async () => {
   // Observe allocation order directly: withTransportIfMissing must never run.
   const guardedConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });

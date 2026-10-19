@@ -92,3 +92,26 @@ def test_create_context_never_transports_idle_policy_to_execd(
     )
 
     assert "idlePolicy" not in json.loads(context.sandbox_env[OPENSANDBOX_LIFECYCLE])
+
+
+def test_create_context_never_transports_renewal_policy_to_execd(
+    k8s_app_config,
+    create_sandbox_request,
+):
+    """renewalPolicy is control-plane state (OSEP-0009); the execd lifecycle
+    env must carry hooks only."""
+    create_sandbox_request.lifecycle = SandboxLifecycle(
+        preStart=LifecycleHook(command=["/opt/hooks/restore.sh"]),
+        renewalPolicy={"extendSeconds": 3600},
+    )
+
+    context = _build_create_workload_context(
+        k8s_app_config,
+        create_sandbox_request,
+        "sandbox-1",
+        datetime.now(timezone.utc),
+        lambda: "egress-token",
+        lambda: "secure-token",
+    )
+
+    assert "renewalPolicy" not in json.loads(context.sandbox_env[OPENSANDBOX_LIFECYCLE])

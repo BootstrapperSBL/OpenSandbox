@@ -26,3 +26,9 @@ IDLE_TIMEOUT_MAX_SECONDS = 86400
 PROBE_TIMEOUT_MIN_SECONDS = 1
 PROBE_TIMEOUT_MAX_SECONDS = 10
 DEFAULT_PROBE_TIMEOUT_SECONDS = 2
+
+# OSEP-0009 renew-on-access bounds, shared by the API schema (pydantic Field
+# bounds) and the extensions validation for the deprecated
+# extensions["access.renew.extend.seconds"] key.
+RENEW_EXTEND_MIN_SECONDS = 300
+RENEW_EXTEND_MAX_SECONDS = 86400

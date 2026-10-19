@@ -230,6 +230,10 @@ export default defineConfig({
               link: "/guides/auto-pause-wake",
             },
             {
+              text: "Renew-on-Access",
+              link: "/guides/renew-on-access",
+            },
+            {
               text: "Kubernetes Resume Benchmark",
               link: "/guides/kubernetes-resume-benchmark",
             },

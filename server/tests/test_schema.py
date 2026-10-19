@@ -31,6 +31,7 @@ from opensandbox_server.api.schema import (
     PeriodicLifecycleHook,
     PlatformSpec,
     PVC,
+    RenewalPolicy,
     ResourceLimits,
     SandboxLifecycle,
     Snapshot,
@@ -176,6 +177,59 @@ class TestSandboxLifecycle:
     def test_lifecycle_rejects_blank_required_values(self, payload, message):
         with pytest.raises(ValidationError, match=message):
             SandboxLifecycle.model_validate(payload)
+
+
+class TestRenewalPolicy:
+    """lifecycle.renewalPolicy (OSEP-0009) supersedes the deprecated
+    extensions["access.renew.extend.seconds"] key."""
+
+    def test_parses_alias(self):
+        lifecycle = SandboxLifecycle.model_validate(
+            {"renewalPolicy": {"extendSeconds": 3600}}
+        )
+        assert lifecycle.renewal_policy is not None
+        assert lifecycle.renewal_policy.extend_seconds == 3600
+
+    def test_serialization_uses_aliases(self):
+        lifecycle = SandboxLifecycle(renewalPolicy={"extendSeconds": 3600})
+        payload = lifecycle.model_dump(by_alias=True, exclude_none=True)
+        assert payload == {"renewalPolicy": {"extendSeconds": 3600}}
+
+    @pytest.mark.parametrize("value", [299, 86401])
+    def test_rejects_out_of_bounds(self, value):
+        with pytest.raises(ValidationError):
+            RenewalPolicy(extendSeconds=value)
+
+    def test_rejects_unknown_fields(self):
+        with pytest.raises(ValidationError):
+            RenewalPolicy.model_validate({"extendSeconds": 3600, "onAccess": "renew"})
+
+    def test_lifecycle_rejects_unknown_fields(self):
+        with pytest.raises(ValidationError):
+            SandboxLifecycle.model_validate({"renewal": {"extendSeconds": 3600}})
+
+    def test_pool_ref_allows_renewal_policy(self):
+        # renewalPolicy is control-plane state, not a hook: it may accompany
+        # extensions.poolRef like idlePolicy.
+        request = CreateSandboxRequest(
+            extensions={"poolRef": "default/pool"},
+            lifecycle=SandboxLifecycle(renewalPolicy={"extendSeconds": 3600}),
+        )
+        assert request.lifecycle is not None
+        assert request.lifecycle.renewal_policy is not None
+
+    def test_template_mode_allows_renewal_policy_at_schema_level(self):
+        # Template mode rejects workload-shaping fields only; the fsb backend
+        # enforces its own renew-on-access rejection after routing.
+        request = CreateSandboxRequest.model_validate(
+            {
+                "templateId": "tpl-1",
+                "timeout": 600,
+                "lifecycle": {"renewalPolicy": {"extendSeconds": 3600}},
+            }
+        )
+        assert request.lifecycle is not None
+        assert request.lifecycle.renewal_policy is not None
 
 
 class TestHost:

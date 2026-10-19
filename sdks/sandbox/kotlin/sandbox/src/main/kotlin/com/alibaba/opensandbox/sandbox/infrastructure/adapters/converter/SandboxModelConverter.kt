@@ -41,6 +41,7 @@ import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSandboxInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PagedSnapshotInfos
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PaginationInfo
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.PlatformSpec
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.RenewalPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxAllocation
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxCreateResponse
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -67,6 +68,7 @@ import com.alibaba.opensandbox.sandbox.api.models.PVC as ApiPVC
 import com.alibaba.opensandbox.sandbox.api.models.PaginationInfo as ApiPaginationInfo
 import com.alibaba.opensandbox.sandbox.api.models.PeriodicLifecycleHook as ApiPeriodicLifecycleHook
 import com.alibaba.opensandbox.sandbox.api.models.PlatformSpec as ApiPlatformSpec
+import com.alibaba.opensandbox.sandbox.api.models.RenewalPolicy as ApiRenewalPolicy
 import com.alibaba.opensandbox.sandbox.api.models.Sandbox as ApiSandbox
 import com.alibaba.opensandbox.sandbox.api.models.SandboxLifecycle as ApiSandboxLifecycle
 import com.alibaba.opensandbox.sandbox.api.models.SandboxStatus as ApiSandboxStatus
@@ -327,7 +329,18 @@ internal object SandboxModelConverter {
                     )
                 },
             idlePolicy = idlePolicy?.toApiIdlePolicy(),
+            renewalPolicy = renewalPolicy?.toApiRenewalPolicy(),
         )
+    }
+
+    /**
+     * Converts Domain RenewalPolicy -> API RenewalPolicy (OSEP-0009).
+     *
+     * Validation happens in the domain model's builder; this mapping only
+     * translates the value.
+     */
+    internal fun RenewalPolicy.toApiRenewalPolicy(): ApiRenewalPolicy {
+        return ApiRenewalPolicy(extendSeconds = extendSeconds)
     }
 
     /**

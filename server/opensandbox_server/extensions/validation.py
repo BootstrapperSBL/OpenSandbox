@@ -14,20 +14,47 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+import logging
+from typing import TYPE_CHECKING, Dict, Optional
 
 from fastapi import HTTPException, status
 
+from opensandbox_server.extensions.codec import access_renew_extend_seconds_from_lifecycle
 from opensandbox_server.extensions.keys import ACCESS_RENEW_EXTEND_SECONDS_KEY
 from opensandbox_server.services.constants import SandboxErrorCodes
 
+if TYPE_CHECKING:
+    from opensandbox_server.api.schema import SandboxLifecycle
+
+logger = logging.getLogger(__name__)
+
 ACCESS_RENEW_EXTEND_SECONDS_MIN = 300  # 5 minutes
 ACCESS_RENEW_EXTEND_SECONDS_MAX = 86400  # 24 hours
+
+_LEGACY_RENEW_KEY_DEPRECATION = (
+    'extensions["%s"] is deprecated: use lifecycle.renewalPolicy.extendSeconds '
+    "instead. The extensions key stays supported throughout 1.x and is "
+    "removed in 2.0."
+)
+
+_access_renew_deprecation_logged = False
+
+
+def _warn_access_renew_deprecation() -> None:
+    """Log the legacy renew-key deprecation once per process."""
+    global _access_renew_deprecation_logged
+    if _access_renew_deprecation_logged:
+        return
+    _access_renew_deprecation_logged = True
+    logger.warning(_LEGACY_RENEW_KEY_DEPRECATION, ACCESS_RENEW_EXTEND_SECONDS_KEY)
 
 
 def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
     """
     If ``access.renew.extend.seconds`` is set, require a base-10 integer in [MIN, MAX] seconds.
+
+    The key is deprecated in favor of ``lifecycle.renewalPolicy.extendSeconds``
+    (supported throughout 1.x, removed in 2.0); use logs a deprecation warning.
 
     Args:
         extensions: Non-empty extension map (may omit this key).
@@ -38,6 +65,7 @@ def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
     key = ACCESS_RENEW_EXTEND_SECONDS_KEY
     if key not in extensions:
         return
+    _warn_access_renew_deprecation()
     raw = extensions[key]
     if raw is None:
         raise HTTPException(
@@ -47,7 +75,7 @@ def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
                 "message": (
                     f'Invalid extensions["{key}"]: expected a string of digits between '
                     f"{ACCESS_RENEW_EXTEND_SECONDS_MIN} and {ACCESS_RENEW_EXTEND_SECONDS_MAX} "
-                    "(5 minutes to 24 hours inclusive)."
+                    "(5 minutes to 24 hours inclusive). Prefer lifecycle.renewalPolicy."
                 ),
             },
         )
@@ -60,7 +88,7 @@ def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
                 "message": (
                     f'Invalid extensions["{key}"]: empty value; omit the key to disable renew-on-access, '
                     f"or use an integer between {ACCESS_RENEW_EXTEND_SECONDS_MIN} and "
-                    f"{ACCESS_RENEW_EXTEND_SECONDS_MAX} seconds."
+                    f"{ACCESS_RENEW_EXTEND_SECONDS_MAX} seconds. Prefer lifecycle.renewalPolicy."
                 ),
             },
         )
@@ -73,7 +101,8 @@ def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
                 "message": (
                     f'Invalid extensions["{key}"]: must be a base-10 integer string '
-                    f"between {ACCESS_RENEW_EXTEND_SECONDS_MIN} and {ACCESS_RENEW_EXTEND_SECONDS_MAX}, got {raw!r}."
+                    f"between {ACCESS_RENEW_EXTEND_SECONDS_MIN} and {ACCESS_RENEW_EXTEND_SECONDS_MAX}, got {raw!r}. "
+                    "Prefer lifecycle.renewalPolicy."
                 ),
             },
         ) from None
@@ -84,7 +113,8 @@ def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
                 "message": (
                     f'Invalid extensions["{key}"]: must be between {ACCESS_RENEW_EXTEND_SECONDS_MIN} and '
-                    f"{ACCESS_RENEW_EXTEND_SECONDS_MAX} seconds (5 minutes to 24 hours inclusive), got {n}."
+                    f"{ACCESS_RENEW_EXTEND_SECONDS_MAX} seconds (5 minutes to 24 hours inclusive), got {n}. "
+                    "Prefer lifecycle.renewalPolicy."
                 ),
             },
         )
@@ -93,6 +123,9 @@ def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
 def validate_extensions(extensions: Optional[Dict[str, str]]) -> None:
     """
     Validate well-known keys in ``extensions`` for sandbox creation.
+
+    The deprecated ``access.renew.extend.seconds`` key (superseded by
+    ``lifecycle.renewalPolicy``) logs a deprecation warning when used.
 
     Args:
         extensions: Optional opaque extension map from the create request.
@@ -104,3 +137,47 @@ def validate_extensions(extensions: Optional[Dict[str, str]]) -> None:
         return
 
     _validate_access_renew_extend_seconds(extensions)
+
+
+def validate_renew_policy_conflict(
+    lifecycle: Optional["SandboxLifecycle"],
+    extensions: Optional[Dict[str, str]],
+) -> None:
+    """
+    Reject conflicting declarations of the renew-on-access policy.
+
+    ``lifecycle.renewalPolicy`` supersedes the deprecated
+    ``extensions["access.renew.extend.seconds"]`` key. Setting both is
+    accepted only when their parsed numeric values match; a mismatch raises
+    400. Format errors in the legacy key remain with ``validate_extensions``.
+
+    Args:
+        lifecycle: Optional lifecycle config from the create request.
+        extensions: Optional opaque extension map from the create request.
+
+    Raises:
+        HTTPException: 400 when both inputs are set with different values.
+    """
+    declared = access_renew_extend_seconds_from_lifecycle(lifecycle)
+    if declared is None or not extensions:
+        return
+    raw = extensions.get(ACCESS_RENEW_EXTEND_SECONDS_KEY)
+    if raw is None or not str(raw).strip():
+        return
+    try:
+        legacy = int(str(raw).strip())
+    except ValueError:
+        return
+    if legacy != declared:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": SandboxErrorCodes.INVALID_PARAMETER,
+                "message": (
+                    "lifecycle.renewalPolicy.extendSeconds and the deprecated "
+                    f'extensions["{ACCESS_RENEW_EXTEND_SECONDS_KEY}"] must match '
+                    f"when both are set (values compared after parsing), got "
+                    f"{declared} and {legacy}; prefer lifecycle.renewalPolicy."
+                ),
+            },
+        )

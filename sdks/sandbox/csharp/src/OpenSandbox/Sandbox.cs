@@ -204,6 +204,7 @@ public sealed class Sandbox : IAsyncDisposable
             throw new InvalidArgumentException("Entrypoint must be omitted when SnapshotId is provided.");
         }
         options.Lifecycle?.IdlePolicy?.Validate();
+        options.Lifecycle?.RenewalPolicy?.Validate();
         ValidateHostPaths(options.Volumes);
         var startupSource = options.Image ?? options.SnapshotId;
 

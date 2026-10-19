@@ -1194,6 +1194,42 @@ public class IdlePolicy
 }
 
 /// <summary>
+/// Renew-on-access behavior declared by the sandbox (OSEP-0009).
+/// <para>
+/// Control-plane policy: when ingress-observed or proxied traffic arrives, the
+/// server moves the expiration to <c>max(now + ExtendSeconds, current)</c>.
+/// Supersedes the deprecated <c>extensions["access.renew.extend.seconds"]</c>
+/// creation key (supported through 1.x, removed in 2.0). Omitting the whole
+/// policy means the sandbox never auto-renews.
+/// </para>
+/// </summary>
+public class RenewalPolicy
+{
+    /// <summary>
+    /// Gets or sets the extension window X in seconds (300-86400) for each
+    /// access-driven renewal: the expiration is moved to
+    /// <c>max(now + X, current expiresAt)</c>.
+    /// </summary>
+    [JsonPropertyName("extendSeconds")]
+    public int ExtendSeconds { get; set; }
+
+    /// <summary>
+    /// Validates the policy against the server's create-time rules so invalid
+    /// policies fail fast client-side.
+    /// </summary>
+    public void Validate()
+    {
+        if (ExtendSeconds is < 300 or > 86400)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ExtendSeconds),
+                ExtendSeconds,
+                "RenewalPolicy.ExtendSeconds must be between 300 and 86400.");
+        }
+    }
+}
+
+/// <summary>
 /// Optional lifecycle configuration applied during sandbox creation.
 /// </summary>
 public class SandboxLifecycle
@@ -1217,6 +1253,14 @@ public class SandboxLifecycle
     /// </summary>
     [JsonPropertyName("idlePolicy")]
     public IdlePolicy? IdlePolicy { get; set; }
+
+    /// <summary>
+    /// Gets or sets the renew-on-access behavior (OSEP-0009). Control-plane
+    /// policy: it never reaches the guest. Supersedes the deprecated
+    /// <c>extensions["access.renew.extend.seconds"]</c> key.
+    /// </summary>
+    [JsonPropertyName("renewalPolicy")]
+    public RenewalPolicy? RenewalPolicy { get; set; }
 }
 
 /// <summary>

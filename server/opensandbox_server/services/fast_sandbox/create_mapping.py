@@ -284,6 +284,13 @@ def _reject_unsupported_fields(request: CreateSandboxRequest) -> None:
                 "lifecycle hooks are not supported by the fsb backend; "
                 "only lifecycle.idlePolicy is accepted (OSEP-0024)",
             )
+        if request.lifecycle.renewal_policy is not None:
+            raise UnsupportedFieldError(
+                "lifecycle.renewalPolicy",
+                "renew-on-access is not supported by the fsb backend; fsb rejects "
+                "the deprecated extensions['access.renew.extend.seconds'] key too "
+                "(OSEP-0009)",
+            )
         # idlePolicy is validated and persisted as a CR annotation by the service.
     # snapshotId is allowed: restore resolution replaced it with the snapshot
     # artifact reference (restore_config.image) before routing reached fsb.

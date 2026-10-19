@@ -309,7 +309,7 @@ Auto-renew sandbox expiration on observed access (lifecycle proxy and/or Redis q
 | `redis.queue_key` | string | `"opensandbox:renew:intent"` | Redis list key. |
 | `redis.consumer_concurrency` | integer | `8` | Concurrent BRPOP workers (≥ 1). |
 
-Per-sandbox enablement uses create request extensions (OSEP-0009).
+Per-sandbox enablement uses `lifecycle.renewalPolicy.extendSeconds` at create time (OSEP-0009). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported throughout 1.x and is removed in 2.0; when both are set, their parsed values must match or creation fails with HTTP 400. See the [Renew-on-Access guide](../docs/guides/renew-on-access.md).
 
 ---
 

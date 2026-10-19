@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, MutableMapping, Optional
+from typing import TYPE_CHECKING, Dict, Mapping, MutableMapping, Optional
 
 from opensandbox_server.extensions.keys import (
     ACCESS_RENEW_EXTEND_SECONDS_KEY,
@@ -23,18 +23,44 @@ from opensandbox_server.extensions.keys import (
     ANNOTATION_METADATA_PREFIX,
 )
 
+if TYPE_CHECKING:
+    from opensandbox_server.api.schema import SandboxLifecycle
+
+
+def access_renew_extend_seconds_from_lifecycle(
+    lifecycle: Optional["SandboxLifecycle"],
+) -> Optional[int]:
+    """Renew-on-access seconds declared via ``lifecycle.renewalPolicy``, or None."""
+    if lifecycle is None:
+        return None
+    policy = lifecycle.renewal_policy
+    if policy is None:
+        return None
+    return int(policy.extend_seconds)
+
 
 def apply_access_renew_extend_seconds_to_mapping(
     mapping: MutableMapping[str, str],
     extensions: Optional[Dict[str, str]],
     *,
+    lifecycle: Optional["SandboxLifecycle"] = None,
     metadata_key: str = ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
 ) -> None:
     """
-    If ``extensions`` include ``access.renew.extend.seconds``, set ``mapping[metadata_key]``.
+    Persist the renew-on-access opt-in onto ``mapping``.
+
+    ``lifecycle.renewalPolicy`` is the structured source (OSEP-0009); the
+    ``extensions["access.renew.extend.seconds"]`` key is the deprecated
+    fallback, supported through 1.x. Conflicting values are rejected at the
+    create endpoint (``validate_renew_policy_conflict``), so when both are
+    set here they agree and the structured value is written.
 
     ``mapping`` may be Kubernetes annotations or Docker container labels.
     """
+    declared = access_renew_extend_seconds_from_lifecycle(lifecycle)
+    if declared is not None:
+        mapping[metadata_key] = str(declared)
+        return
     if not extensions:
         return
     raw = extensions.get(ACCESS_RENEW_EXTEND_SECONDS_KEY)

@@ -386,6 +386,32 @@ class IdlePolicy(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class RenewalPolicy(BaseModel):
+    """
+    Renew-on-access behavior declared by the sandbox (OSEP-0009).
+
+    Control-plane policy: when ingress-observed or proxied traffic arrives,
+    the server moves the expiration to ``max(now + extend_seconds, current)``.
+    Supersedes the deprecated ``extensions["access.renew.extend.seconds"]``
+    creation key (supported through 1.x, removed in 2.0). Omitting
+    ``renewal_policy`` from :class:`SandboxLifecycle` means the sandbox never
+    auto-renews.
+    """
+
+    extend_seconds: int = Field(
+        alias="extendSeconds",
+        ge=300,
+        le=86400,
+        description=(
+            "Extension window X in seconds for each access-driven renewal: "
+            "the expiration is moved to max(now + X, current expiresAt). Must "
+            "be between 300 (5 minutes) and 86400 (24 hours) inclusive."
+        ),
+    )
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+
 class SandboxLifecycle(BaseModel):
     """Optional lifecycle hooks applied when a sandbox is created."""
 
@@ -398,6 +424,15 @@ class SandboxLifecycle(BaseModel):
             "Auto-pause and wake-on-access behavior (OSEP-0024). Control-plane "
             "policy only: it never reaches the guest. Supported only by the "
             "fast-sandbox backend."
+        ),
+    )
+    renewal_policy: RenewalPolicy | None = Field(
+        default=None,
+        alias="renewalPolicy",
+        description=(
+            "Renew-on-access behavior (OSEP-0009). Control-plane policy only: "
+            "it never reaches the guest. Supersedes the deprecated "
+            "extensions['access.renew.extend.seconds'] key."
         ),
     )
 

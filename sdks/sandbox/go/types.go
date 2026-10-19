@@ -186,6 +186,12 @@ const (
 	ProbeTimeoutMinSeconds = 1
 	// ProbeTimeoutMaxSeconds is the largest accepted activity probe timeout.
 	ProbeTimeoutMaxSeconds = 10
+	// RenewExtendMinSeconds is the smallest accepted renew-on-access
+	// extension window (OSEP-0009).
+	RenewExtendMinSeconds = 300
+	// RenewExtendMaxSeconds is the largest accepted renew-on-access
+	// extension window (OSEP-0009).
+	RenewExtendMaxSeconds = 86400
 )
 
 // ActivityProbe is an application-declared activity probe (OSEP-0024).
@@ -297,6 +303,36 @@ func (p *IdlePolicy) Validate() error {
 	return nil
 }
 
+// RenewalPolicy declares the renew-on-access behavior of a sandbox
+// (OSEP-0009).
+//
+// Control-plane policy: when ingress-observed or proxied traffic arrives, the
+// server moves the expiration to max(now + ExtendSeconds, current). Supersedes
+// the deprecated extensions["access.renew.extend.seconds"] creation key
+// (supported through 1.x, removed in 2.0). Omitting the whole policy means the
+// sandbox never auto-renews.
+type RenewalPolicy struct {
+	// ExtendSeconds is the extension window X in seconds (300-86400) for
+	// each access-driven renewal: the expiration is moved to
+	// max(now + X, current expiresAt).
+	ExtendSeconds int `json:"extendSeconds"`
+}
+
+// Validate checks the renewal policy against the server's create-time rules
+// so invalid policies fail fast client-side.
+func (p *RenewalPolicy) Validate() error {
+	if p == nil {
+		return nil
+	}
+	if p.ExtendSeconds < RenewExtendMinSeconds || p.ExtendSeconds > RenewExtendMaxSeconds {
+		return &InvalidArgumentError{
+			Field:   "ExtendSeconds",
+			Message: fmt.Sprintf("must be an integer between %d and %d, got %d", RenewExtendMinSeconds, RenewExtendMaxSeconds, p.ExtendSeconds),
+		}
+	}
+	return nil
+}
+
 // SandboxLifecycle contains optional lifecycle configuration applied during
 // sandbox creation.
 type SandboxLifecycle struct {
@@ -306,6 +342,10 @@ type SandboxLifecycle struct {
 	// Supported only by the fast-sandbox backend; other backends reject the
 	// field. Control-plane policy: it never reaches the guest.
 	IdlePolicy *IdlePolicy `json:"idlePolicy,omitempty"`
+	// RenewalPolicy is the renew-on-access behavior (OSEP-0009).
+	// Control-plane policy: it never reaches the guest. Supersedes the
+	// deprecated extensions["access.renew.extend.seconds"] key.
+	RenewalPolicy *RenewalPolicy `json:"renewalPolicy,omitempty"`
 }
 
 // CreateSandboxRequest is the request body for creating a new sandbox.
