@@ -54,11 +54,6 @@ spec:
         volumeMounts:
         - name: agent-socket
           mountPath: /run/fast-sandbox/firecracker
-        # Pin the snapshot staging area onto the shared node directory so
-        # the egress container (same volume below) resolves the vault
-        # bundle PATH the checkpoint envelope hands it.
-        - name: snapshot-staging
-          mountPath: /var/lib/fast-sandbox/firecracker
       - name: egress
         image: "@EGRESS_IMAGE@"
         # IfNotPresent: the environment kind-loads the image into the
@@ -85,15 +80,19 @@ spec:
           value: /var/lib/opensandbox-egress/vault
         volumeMounts:
         - name: egress-vault
-          mountPath: /var/lib/opensandbox-egress
-        # The other side of the vault bundle handoff (OSEP-0022): the
-        # export/import envelope carries the DRIVER's snapshot staging path,
-        # so the same node directory is mounted here.
-        - name: snapshot-staging
-          mountPath: /var/lib/fast-sandbox/firecracker
           # Plaintext v1 posture: the vault volume joins the credential
           # trust surface. Swap to `medium: Memory` (tmpfs) to keep the
           # per-subject vault files off node disk.
+          mountPath: /var/lib/opensandbox-egress
+        # Vault bundle handoff (OSEP-0022): the export/import envelope
+        # carries the DRIVER's snapshot staging path, which lives under the
+        # runtime state root. Mount the same runtime-injected hostPath
+        # volume the fastlet container gets (the controller adds it for the
+        # first container and merges it into the pod spec), so the Handler
+        # resolves the path in its own mount namespace. Read-write: the
+        # Handler copies exports out and reads imports in.
+        - name: firecracker-state
+          mountPath: /var/lib/fast-sandbox/firecracker
         # Egress installs nft/iptables rules (DNS redirect + per-subject
         # sets) and marks sockets; NET_ADMIN covers nft/iptables/SO_MARK,
         # NET_RAW covers the raw sockets used for DNS response spoofing.
@@ -121,18 +120,6 @@ spec:
       # medium: Memory would keep the plaintext v1 files off node disk.
       - name: egress-vault
         emptyDir: {}
-      # The fastlet driver's whole firecracker state directory, shared with
-      # the egress container (OSEP-0022 vault bundle handoff): the envelope's
-      # file PATH must resolve in the egress mount namespace, and the shared
-      # mount must keep the jailed dump's rename (jail root -> staging) on
-      # one filesystem — hence the state directory as a whole, not just the
-      # snapshots subdirectory. The runtime-agent reads the same node
-      # directory for publish. DirectoryOrCreate keeps the root-owned 0755
-      # mode the atomic policy machinery trusts.
-      - name: snapshot-staging
-        hostPath:
-          path: /var/lib/fast-sandbox/firecracker
-          type: DirectoryOrCreate
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
       # P2P topology: spread the poolMin fastlets one per node so each
