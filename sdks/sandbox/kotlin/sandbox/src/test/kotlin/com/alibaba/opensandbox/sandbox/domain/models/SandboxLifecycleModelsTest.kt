@@ -268,6 +268,35 @@ class SandboxLifecycleModelsTest {
     }
 
     @Test
+    fun `renewal-only lifecycle is not treated as empty`() {
+        val lifecycle =
+            DomainSandboxLifecycle.builder()
+                .renewalPolicy { extendSeconds(3600) }
+                .build()
+
+        val request =
+            SandboxModelConverter.toApiCreateSandboxRequest(
+                spec = SandboxImageSpec.builder().image("python:3.11").build(),
+                entrypoint = listOf("python"),
+                env = emptyMap(),
+                metadata = emptyMap(),
+                timeout = null,
+                resource = emptyMap(),
+                platform = null,
+                networkPolicy = null,
+                credentialProxy = null,
+                secureAccess = false,
+                extensions = emptyMap(),
+                volumes = null,
+                snapshotId = null,
+                lifecycle = lifecycle,
+            )
+
+        // A renewal-only lifecycle must reach the wire, not be dropped as empty.
+        assertEquals(3600, request.lifecycle?.renewalPolicy?.extendSeconds)
+    }
+
+    @Test
     fun `activity probe validation`() {
         assertThrows(IllegalArgumentException::class.java) {
             ActivityProbe.builder().port(0).path("/active").build()

@@ -621,12 +621,10 @@ class IdlePolicy(BaseModel):
 
 
 class RenewalPolicy(BaseModel):
-    """Renew-on-access behavior declared by the sandbox (OSEP-0009).
-
-    Control-plane policy: when ingress-observed or proxied traffic arrives,
-    the server moves the expiration to ``max(now + extendSeconds, current)``.
-    Supersedes the deprecated ``extensions["access.renew.extend.seconds"]``
-    key. Omitting ``renewalPolicy`` means the sandbox never auto-renews.
+    """Renew-on-access behavior (OSEP-0009): observed access moves the
+    expiration to ``max(now + extendSeconds, current)``. Control-plane
+    policy; supersedes the deprecated ``access.renew.extend.seconds``
+    extensions key.
     """
 
     extend_seconds: int = Field(
@@ -662,10 +660,8 @@ class SandboxLifecycle(BaseModel):
         None,
         alias="renewalPolicy",
         description=(
-            "Renew-on-access behavior (OSEP-0009); control-plane state, never "
-            "reaches the guest. Supersedes the deprecated "
-            "extensions['access.renew.extend.seconds'] key (supported through "
-            "1.x, removed in 2.0)."
+            "Renew-on-access behavior (OSEP-0009); control-plane state. "
+            "Supersedes the deprecated access.renew.extend.seconds extensions key."
         ),
     )
 

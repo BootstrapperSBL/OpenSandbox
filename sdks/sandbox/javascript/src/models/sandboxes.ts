@@ -539,18 +539,13 @@ export interface IdlePolicy extends Record<string, unknown> {
 }
 
 /**
- * Renew-on-access behavior declared by the sandbox (OSEP-0009).
- *
- * Control-plane policy: when ingress-observed or proxied traffic arrives, the
- * server moves the expiration to `max(now + extendSeconds, current)`. Supersedes
- * the deprecated `extensions["access.renew.extend.seconds"]` creation key
- * (supported through 1.x, removed in 2.0). Omitting the policy means the sandbox
- * never auto-renews.
+ * Renew-on-access behavior (OSEP-0009): observed access moves the expiration
+ * to `max(now + extendSeconds, current)`. Control-plane policy; supersedes the
+ * deprecated `extensions["access.renew.extend.seconds"]` key.
  */
 export interface RenewalPolicy extends Record<string, unknown> {
   /**
-   * Extension window X in seconds (300-86400) for each access-driven renewal:
-   * the expiration is moved to `max(now + X, current expiresAt)`.
+   * Extension window X in seconds (300-86400) for each access-driven renewal.
    */
   extendSeconds: number;
 }
@@ -574,9 +569,8 @@ export interface SandboxLifecycle extends Record<string, unknown> {
    */
   idlePolicy?: IdlePolicy;
   /**
-   * Renew-on-access behavior (OSEP-0009). Control-plane policy: it never
-   * reaches the guest. Supersedes the deprecated
-   * `extensions["access.renew.extend.seconds"]` key.
+   * Renew-on-access behavior (OSEP-0009). Control-plane policy; supersedes
+   * the deprecated `extensions["access.renew.extend.seconds"]` key.
    */
   renewalPolicy?: RenewalPolicy;
 }

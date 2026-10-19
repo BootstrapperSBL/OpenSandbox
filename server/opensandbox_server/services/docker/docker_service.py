@@ -613,9 +613,8 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
 
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         if request.lifecycle is not None:
-            # lifecycle.renewalPolicy (OSEP-0009) is control-plane state: the
-            # docker backend persists it as a container label and it never
-            # reaches the guest. Hooks and idlePolicy stay unsupported here.
+            # renewalPolicy (OSEP-0009) is control-plane state, persisted as a
+            # label; hooks and idlePolicy stay unsupported on docker.
             unsupported: list[str] = []
             if request.lifecycle.has_hooks:
                 unsupported.append("lifecycle.preStart/periodic hooks")

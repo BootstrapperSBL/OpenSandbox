@@ -2072,6 +2072,7 @@ components:
         Setting the policy has no effect unless the server operator enabled
         the renew-intent integration (`[renew_intent]`). A missing policy
         means the sandbox never auto-renews.
+      required: [extendSeconds]
       properties:
         extendSeconds:
           type: integer

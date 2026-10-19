@@ -269,13 +269,9 @@ class IdlePolicy private constructor(
 }
 
 /**
- * Renew-on-access behavior declared by the sandbox (OSEP-0009).
- *
- * Control-plane policy: when ingress-observed or proxied traffic arrives, the
- * server moves the expiration to `max(now + extendSeconds, current)`. Supersedes
- * the deprecated `extensions["access.renew.extend.seconds"]` creation key
- * (supported through 1.x, removed in 2.0). Omitting the whole policy means the
- * sandbox never auto-renews.
+ * Renew-on-access behavior (OSEP-0009): observed access moves the expiration
+ * to `max(now + extendSeconds, current)`. Control-plane policy; supersedes
+ * the deprecated `extensions["access.renew.extend.seconds"]` key.
  */
 class RenewalPolicy private constructor(
     val extendSeconds: Int,

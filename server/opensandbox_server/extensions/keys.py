@@ -14,13 +14,8 @@
 
 """Well-known CreateSandboxRequest.extensions keys and workload storage keys."""
 
-# Deprecated since lifecycle.renewalPolicy (OSEP-0009) landed: accepted as a
-# fallback throughout 1.x, removed in 2.0. Prefer
-# ``CreateSandboxRequest.lifecycle.renewalPolicy.extendSeconds``.
-# TODO(2.0): remove both constants together with the legacy request-entry
-# support (validation + codec fallback); keep the metadata key — the Docker
-# label / K8s annotation reader must survive so pre-upgrade sandboxes keep
-# renewing. See #2289.
+# Deprecated: superseded by lifecycle.renewalPolicy (OSEP-0009); the request
+# entry ends in 2.0, the metadata key stays. See #2289.
 ACCESS_RENEW_EXTEND_SECONDS_KEY = "access.renew.extend.seconds"
 ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY = "opensandbox.io/access-renew-extend-seconds"
 

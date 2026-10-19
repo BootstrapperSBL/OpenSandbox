@@ -1194,21 +1194,20 @@ public class IdlePolicy
 }
 
 /// <summary>
-/// Renew-on-access behavior declared by the sandbox (OSEP-0009).
+/// Renew-on-access behavior (OSEP-0009): observed access moves the expiration
+/// to <c>max(now + ExtendSeconds, current)</c>. Control-plane policy;
+/// supersedes the deprecated <c>extensions["access.renew.extend.seconds"]</c> key.
 /// <para>
-/// Control-plane policy: when ingress-observed or proxied traffic arrives, the
-/// server moves the expiration to <c>max(now + ExtendSeconds, current)</c>.
-/// Supersedes the deprecated <c>extensions["access.renew.extend.seconds"]</c>
-/// creation key (supported through 1.x, removed in 2.0). Omitting the whole
-/// policy means the sandbox never auto-renews.
+/// Honored by the docker and Kubernetes (pod) backends; the fast-sandbox
+/// backend rejects it with HTTP 400. Fires only when the server enables
+/// <c>[renew_intent]</c>.
 /// </para>
 /// </summary>
 public class RenewalPolicy
 {
     /// <summary>
     /// Gets or sets the extension window X in seconds (300-86400) for each
-    /// access-driven renewal: the expiration is moved to
-    /// <c>max(now + X, current expiresAt)</c>.
+    /// access-driven renewal.
     /// </summary>
     [JsonPropertyName("extendSeconds")]
     public int ExtendSeconds { get; set; }
@@ -1256,7 +1255,7 @@ public class SandboxLifecycle
 
     /// <summary>
     /// Gets or sets the renew-on-access behavior (OSEP-0009). Control-plane
-    /// policy: it never reaches the guest. Supersedes the deprecated
+    /// policy; supersedes the deprecated
     /// <c>extensions["access.renew.extend.seconds"]</c> key.
     /// </summary>
     [JsonPropertyName("renewalPolicy")]

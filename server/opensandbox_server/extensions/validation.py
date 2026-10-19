@@ -19,6 +19,10 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 from fastapi import HTTPException, status
 
+from opensandbox_server.constants import (
+    RENEW_EXTEND_MAX_SECONDS,
+    RENEW_EXTEND_MIN_SECONDS,
+)
 from opensandbox_server.extensions.codec import access_renew_extend_seconds_from_lifecycle
 from opensandbox_server.extensions.keys import ACCESS_RENEW_EXTEND_SECONDS_KEY
 from opensandbox_server.services.constants import SandboxErrorCodes
@@ -28,8 +32,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-ACCESS_RENEW_EXTEND_SECONDS_MIN = 300  # 5 minutes
-ACCESS_RENEW_EXTEND_SECONDS_MAX = 86400  # 24 hours
+# Shared bounds (constants.py) re-exported under the historical names.
+ACCESS_RENEW_EXTEND_SECONDS_MIN = RENEW_EXTEND_MIN_SECONDS
+ACCESS_RENEW_EXTEND_SECONDS_MAX = RENEW_EXTEND_MAX_SECONDS
 
 _LEGACY_RENEW_KEY_DEPRECATION = (
     'extensions["%s"] is deprecated: use lifecycle.renewalPolicy.extendSeconds '
@@ -49,16 +54,11 @@ def _warn_access_renew_deprecation() -> None:
     logger.warning(_LEGACY_RENEW_KEY_DEPRECATION, ACCESS_RENEW_EXTEND_SECONDS_KEY)
 
 
-# TODO(2.0): delete this function and the deprecation-warning helper above
-# with the legacy request-entry removal (#2289). The conflict check's
-# lifecycle-vs-extensions comparison goes with it; create requests carrying
-# the key are rejected as an unknown extension by then.
+# TODO(2.0): remove with the legacy request entry (#2289).
 def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
     """
-    If ``access.renew.extend.seconds`` is set, require a base-10 integer in [MIN, MAX] seconds.
-
-    The key is deprecated in favor of ``lifecycle.renewalPolicy.extendSeconds``
-    (supported throughout 1.x, removed in 2.0); use logs a deprecation warning.
+    Require the deprecated ``access.renew.extend.seconds`` to be an integer
+    in [MIN, MAX] seconds; use logs a deprecation warning.
 
     Args:
         extensions: Non-empty extension map (may omit this key).
@@ -128,9 +128,6 @@ def validate_extensions(extensions: Optional[Dict[str, str]]) -> None:
     """
     Validate well-known keys in ``extensions`` for sandbox creation.
 
-    The deprecated ``access.renew.extend.seconds`` key (superseded by
-    ``lifecycle.renewalPolicy``) logs a deprecation warning when used.
-
     Args:
         extensions: Optional opaque extension map from the create request.
 
@@ -148,12 +145,9 @@ def validate_renew_policy_conflict(
     extensions: Optional[Dict[str, str]],
 ) -> None:
     """
-    Reject conflicting declarations of the renew-on-access policy.
-
-    ``lifecycle.renewalPolicy`` supersedes the deprecated
-    ``extensions["access.renew.extend.seconds"]`` key. Setting both is
-    accepted only when their parsed numeric values match; a mismatch raises
-    400. Format errors in the legacy key remain with ``validate_extensions``.
+    Reject declaring the renew policy via both ``lifecycle.renewalPolicy``
+    and the deprecated extensions key with different parsed values (400);
+    unparseable legacy values stay with ``validate_extensions``.
 
     Args:
         lifecycle: Optional lifecycle config from the create request.
@@ -162,8 +156,7 @@ def validate_renew_policy_conflict(
     Raises:
         HTTPException: 400 when both inputs are set with different values.
 
-    TODO(2.0): delete this transition-window check and its call site in
-    ``api/lifecycle.py`` with the legacy request-entry removal (#2289).
+    TODO(2.0): remove with the legacy request entry (#2289).
     """
     declared = access_renew_extend_seconds_from_lifecycle(lifecycle)
     if declared is None or not extensions:

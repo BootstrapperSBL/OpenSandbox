@@ -304,17 +304,12 @@ func (p *IdlePolicy) Validate() error {
 }
 
 // RenewalPolicy declares the renew-on-access behavior of a sandbox
-// (OSEP-0009).
-//
-// Control-plane policy: when ingress-observed or proxied traffic arrives, the
-// server moves the expiration to max(now + ExtendSeconds, current). Supersedes
-// the deprecated extensions["access.renew.extend.seconds"] creation key
-// (supported through 1.x, removed in 2.0). Omitting the whole policy means the
-// sandbox never auto-renews.
+// (OSEP-0009): observed access moves the expiration to
+// max(now + ExtendSeconds, current). Control-plane policy; supersedes the
+// deprecated extensions["access.renew.extend.seconds"] key.
 type RenewalPolicy struct {
 	// ExtendSeconds is the extension window X in seconds (300-86400) for
-	// each access-driven renewal: the expiration is moved to
-	// max(now + X, current expiresAt).
+	// each access-driven renewal.
 	ExtendSeconds int `json:"extendSeconds"`
 }
 
@@ -343,8 +338,8 @@ type SandboxLifecycle struct {
 	// field. Control-plane policy: it never reaches the guest.
 	IdlePolicy *IdlePolicy `json:"idlePolicy,omitempty"`
 	// RenewalPolicy is the renew-on-access behavior (OSEP-0009).
-	// Control-plane policy: it never reaches the guest. Supersedes the
-	// deprecated extensions["access.renew.extend.seconds"] key.
+	// Control-plane policy; supersedes the deprecated
+	// extensions["access.renew.extend.seconds"] key.
 	RenewalPolicy *RenewalPolicy `json:"renewalPolicy,omitempty"`
 }
 

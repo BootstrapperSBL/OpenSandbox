@@ -12,13 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pytest
+from fastapi import HTTPException
+
 from opensandbox_server.api.schema import SandboxLifecycle
 from opensandbox_server.extensions import (
+    ACCESS_RENEW_EXTEND_SECONDS_KEY,
     ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
     access_renew_extend_seconds_from_lifecycle,
     apply_access_renew_extend_seconds_to_mapping,
     apply_extensions_to_mapping,
     extract_extensions_from_mapping,
+    validate_extensions,
+    validate_renew_policy_conflict,
 )
 
 
@@ -29,9 +35,7 @@ def _lifecycle(extend_seconds: int | None) -> SandboxLifecycle:
 
 
 class TestAccessRenewExtendSecondsFromLifecycle:
-    """lifecycle.renewalPolicy (OSEP-0009) is the structured opt-in; the
-    deprecated extensions["access.renew.extend.seconds"] key has no dedicated
-    test coverage anymore (deprecated, removed in 2.0)."""
+    """lifecycle.renewalPolicy (OSEP-0009) resolution."""
 
     def test_none_lifecycle(self):
         assert access_renew_extend_seconds_from_lifecycle(None) is None
@@ -49,10 +53,114 @@ class TestApplyAccessRenewExtendSecondsWithLifecycle:
         apply_access_renew_extend_seconds_to_mapping(m, None, lifecycle=_lifecycle(3600))
         assert m == {ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY: "3600"}
 
+    def test_lifecycle_preferred_over_legacy_extensions(self):
+        m: dict[str, str] = {}
+        apply_access_renew_extend_seconds_to_mapping(
+            m,
+            {ACCESS_RENEW_EXTEND_SECONDS_KEY: "3600"},
+            lifecycle=_lifecycle(3600),
+        )
+        assert m == {ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY: "3600"}
+
+    def test_legacy_extensions_fallback_without_lifecycle_policy(self):
+        m: dict[str, str] = {}
+        apply_access_renew_extend_seconds_to_mapping(
+            m, {ACCESS_RENEW_EXTEND_SECONDS_KEY: "1800"}, lifecycle=_lifecycle(None)
+        )
+        assert m == {ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY: "1800"}
+
     def test_noop_when_both_absent(self):
         m: dict[str, str] = {"x": "1"}
         apply_access_renew_extend_seconds_to_mapping(m, None, lifecycle=_lifecycle(None))
         assert m == {"x": "1"}
+
+
+class TestRenewPolicyConflict:
+    """Both renewal-policy inputs must agree on the parsed value."""
+
+    def test_no_lifecycle_ok(self):
+        assert (
+            validate_renew_policy_conflict(
+                None, {ACCESS_RENEW_EXTEND_SECONDS_KEY: "3600"}
+            )
+            is None
+        )
+
+    def test_lifecycle_without_policy_ok(self):
+        assert (
+            validate_renew_policy_conflict(
+                _lifecycle(None), {ACCESS_RENEW_EXTEND_SECONDS_KEY: "3600"}
+            )
+            is None
+        )
+
+    def test_extensions_only_ok(self):
+        assert validate_renew_policy_conflict(_lifecycle(3600), None) is None
+        assert validate_renew_policy_conflict(_lifecycle(3600), {"other": "x"}) is None
+
+    def test_equal_values_ok(self):
+        assert (
+            validate_renew_policy_conflict(
+                _lifecycle(3600), {ACCESS_RENEW_EXTEND_SECONDS_KEY: "3600"}
+            )
+            is None
+        )
+
+    def test_equal_values_whitespace_ok(self):
+        assert (
+            validate_renew_policy_conflict(
+                _lifecycle(3600), {ACCESS_RENEW_EXTEND_SECONDS_KEY: "  3600  "}
+            )
+            is None
+        )
+
+    def test_conflicting_values_rejected(self):
+        with pytest.raises(HTTPException) as exc:
+            validate_renew_policy_conflict(
+                _lifecycle(3600), {ACCESS_RENEW_EXTEND_SECONDS_KEY: "1800"}
+            )
+        assert exc.value.status_code == 400
+        assert "renewalPolicy" in exc.value.detail["message"]
+
+    def test_non_integer_legacy_value_defers_to_validate_extensions(self):
+        # Format errors stay with validate_extensions, not the conflict check.
+        assert (
+            validate_renew_policy_conflict(
+                _lifecycle(3600), {ACCESS_RENEW_EXTEND_SECONDS_KEY: "abc"}
+            )
+            is None
+        )
+
+
+class TestLegacyRenewKeyValidationSmoke:
+    """Smoke coverage for the deprecated key (removed in 2.0)."""
+
+    def test_valid_and_invalid_values(self):
+        assert validate_extensions({ACCESS_RENEW_EXTEND_SECONDS_KEY: "  1800  "}) is None
+        with pytest.raises(HTTPException) as exc:
+            validate_extensions({ACCESS_RENEW_EXTEND_SECONDS_KEY: "299"})
+        assert exc.value.status_code == 400
+
+    def test_deprecation_warned_once_per_process(self, monkeypatch):
+        from opensandbox_server.extensions import validation as ext_validation
+
+        messages: list[str] = []
+        monkeypatch.setattr(
+            ext_validation.logger,
+            "warning",
+            lambda msg, *args: messages.append(msg % args if args else msg),
+        )
+
+        ext_validation._access_renew_deprecation_logged = False
+        try:
+            assert validate_extensions({ACCESS_RENEW_EXTEND_SECONDS_KEY: "3600"}) is None
+            assert validate_extensions({ACCESS_RENEW_EXTEND_SECONDS_KEY: "1800"}) is None
+        finally:
+            ext_validation._access_renew_deprecation_logged = False
+
+        assert len(messages) == 1
+        assert ACCESS_RENEW_EXTEND_SECONDS_KEY in messages[0]
+        assert "lifecycle.renewalPolicy" in messages[0]
 
 
 class TestExtensionsToAnnotations:

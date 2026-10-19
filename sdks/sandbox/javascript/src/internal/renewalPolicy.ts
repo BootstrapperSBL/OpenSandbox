@@ -18,10 +18,8 @@ const EXTEND_SECONDS_MIN = 300;
 const EXTEND_SECONDS_MAX = 86400;
 
 /**
- * Validate an OSEP-0009 renewal policy before it is sent to the server.
- *
- * Mirrors the server's create-time validation so invalid policies fail fast
- * client-side: `extendSeconds` must be an integer within 300-86400.
+ * Validate an OSEP-0009 renewal policy client-side, mirroring the server's
+ * create-time rules: `extendSeconds` must be an integer within 300-86400.
  */
 export function validateRenewalPolicy(
   policy: RenewalPolicy,

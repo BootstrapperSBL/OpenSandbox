@@ -75,8 +75,7 @@ def test_create_context_never_transports_idle_policy_to_execd(
     k8s_app_config,
     create_sandbox_request,
 ):
-    """idlePolicy is control-plane state (OSEP-0024); the execd lifecycle env
-    must carry hooks only."""
+    """idlePolicy is control-plane state (OSEP-0024); hooks only on the wire."""
     create_sandbox_request.lifecycle = SandboxLifecycle(
         preStart=LifecycleHook(command=["/opt/hooks/restore.sh"]),
         idlePolicy=IdlePolicy(idleTimeoutSeconds=300, onIdle="pause"),
@@ -98,8 +97,7 @@ def test_create_context_never_transports_renewal_policy_to_execd(
     k8s_app_config,
     create_sandbox_request,
 ):
-    """renewalPolicy is control-plane state (OSEP-0009); the execd lifecycle
-    env must carry hooks only."""
+    """renewalPolicy is control-plane state (OSEP-0009); hooks only on the wire."""
     create_sandbox_request.lifecycle = SandboxLifecycle(
         preStart=LifecycleHook(command=["/opt/hooks/restore.sh"]),
         renewalPolicy={"extendSeconds": 3600},

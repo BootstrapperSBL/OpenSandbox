@@ -333,12 +333,7 @@ internal object SandboxModelConverter {
         )
     }
 
-    /**
-     * Converts Domain RenewalPolicy -> API RenewalPolicy (OSEP-0009).
-     *
-     * Validation happens in the domain model's builder; this mapping only
-     * translates the value.
-     */
+    /** Converts Domain RenewalPolicy -> API RenewalPolicy (OSEP-0009). */
     internal fun RenewalPolicy.toApiRenewalPolicy(): ApiRenewalPolicy {
         return ApiRenewalPolicy(extendSeconds = extendSeconds)
     }

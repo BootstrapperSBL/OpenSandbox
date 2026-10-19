@@ -1474,7 +1474,7 @@ export interface components {
              *     the expiration is moved to `max(now + X, current expiresAt)`.
              *     Must be between 300 (5 minutes) and 86400 (24 hours) inclusive.
              */
-            extendSeconds?: number;
+            extendSeconds: number;
         };
         /**
          * @description Idle behavior declared by the sandbox (OSEP-0024). The policy is

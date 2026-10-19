@@ -21,8 +21,6 @@ from typing import Any, TypeVar
 
 from attrs import define as _attrs_define
 
-from ..types import UNSET, Unset
-
 T = TypeVar("T", bound="RenewalPolicy")
 
 
@@ -39,28 +37,30 @@ class RenewalPolicy:
     means the sandbox never auto-renews.
 
         Attributes:
-            extend_seconds (int | Unset): Extension window X in seconds for each access-driven renewal:
+            extend_seconds (int): Extension window X in seconds for each access-driven renewal:
                 the expiration is moved to `max(now + X, current expiresAt)`.
                 Must be between 300 (5 minutes) and 86400 (24 hours) inclusive.
     """
 
-    extend_seconds: int | Unset = UNSET
+    extend_seconds: int
 
     def to_dict(self) -> dict[str, Any]:
         extend_seconds = self.extend_seconds
 
         field_dict: dict[str, Any] = {}
 
-        field_dict.update({})
-        if extend_seconds is not UNSET:
-            field_dict["extendSeconds"] = extend_seconds
+        field_dict.update(
+            {
+                "extendSeconds": extend_seconds,
+            }
+        )
 
         return field_dict
 
     @classmethod
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
-        extend_seconds = d.pop("extendSeconds", UNSET)
+        extend_seconds = d.pop("extendSeconds")
 
         renewal_policy = cls(
             extend_seconds=extend_seconds,

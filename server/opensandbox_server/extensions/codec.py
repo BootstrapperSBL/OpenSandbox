@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 def access_renew_extend_seconds_from_lifecycle(
     lifecycle: Optional["SandboxLifecycle"],
 ) -> Optional[int]:
-    """Renew-on-access seconds declared via ``lifecycle.renewalPolicy``, or None."""
+    """Renew-on-access seconds from ``lifecycle.renewalPolicy``, or None."""
     if lifecycle is None:
         return None
     policy = lifecycle.renewal_policy
@@ -47,19 +47,12 @@ def apply_access_renew_extend_seconds_to_mapping(
     metadata_key: str = ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
 ) -> None:
     """
-    Persist the renew-on-access opt-in onto ``mapping``.
+    Persist the renew-on-access opt-in onto ``mapping`` (Kubernetes
+    annotations or Docker labels): ``lifecycle.renewalPolicy`` preferred,
+    deprecated extensions key as fallback (values already validated equal).
 
-    ``lifecycle.renewalPolicy`` is the structured source (OSEP-0009); the
-    ``extensions["access.renew.extend.seconds"]`` key is the deprecated
-    fallback, supported through 1.x. Conflicting values are rejected at the
-    create endpoint (``validate_renew_policy_conflict``), so when both are
-    set here they agree and the structured value is written.
-
-    ``mapping`` may be Kubernetes annotations or Docker container labels.
-
-    TODO(2.0): drop the legacy ``extensions`` fallback branch (and the
-    ``extensions`` parameter) with the request-entry removal (#2289); the
-    lifecycle branch and the metadata key stay.
+    TODO(2.0): drop the legacy ``extensions`` fallback with the request
+    entry (#2289); the lifecycle branch and metadata key stay.
     """
     declared = access_renew_extend_seconds_from_lifecycle(lifecycle)
     if declared is not None:
