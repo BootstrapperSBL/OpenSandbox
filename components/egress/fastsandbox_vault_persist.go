@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/alibaba/opensandbox/egress/pkg/credentialvault"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -95,6 +96,15 @@ func newVaultPersistence(dir string) (*vaultPersistence, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("restrict vault directory %s: %w", dir, err)
 	}
+	// Kubelet creates emptyDir roots root-owned and 0777; the per-file atomic
+	// machinery validates every ancestor and rejects group/world-writable
+	// ones ("policy ancestor is not a trusted directory"), so the documented
+	// layout — a volume dedicated to vault state, mounted at the vault
+	// directory's parent — would fail every vault op at runtime. Restrict
+	// that root here, bounded to volumes that hold nothing else.
+	if err := restrictVolumeRoot(dir); err != nil {
+		return nil, err
+	}
 	if err := sweepVaultTempFiles(dir); err != nil {
 		return nil, fmt.Errorf("sweep staged vault leftovers in %s: %w", dir, err)
 	}
@@ -103,6 +113,44 @@ func newVaultPersistence(dir string) (*vaultPersistence, error) {
 		newFile: func(path string) (vaultFileStore, error) { return policy.NewAtomicPolicyFile(path) },
 		files:   make(map[subject.Subject]vaultFileStore),
 	}, nil
+}
+
+// restrictVolumeRoot clears group/world-write bits from the vault volume
+// root (the vault directory's immediate parent) when the volume is dedicated
+// to vault state: kubelet creates emptyDir roots root:root 0777, which the
+// per-file atomic machinery rejects as an untrusted ancestor, so without
+// this every vault op fails at runtime on the documented layout. A parent
+// holding foreign entries is left untouched — a shared-volume layout fixes
+// its permissions in the manifest, and the per-file machinery keeps failing
+// closed and loudly. Already-restrictive parents are a no-op.
+func restrictVolumeRoot(dir string) error {
+	parent := filepath.Dir(dir)
+	info, err := os.Stat(parent)
+	if err != nil {
+		return fmt.Errorf("inspect vault volume root %s: %w", parent, err)
+	}
+	if !info.IsDir() || info.Mode().Perm()&0o022 == 0 {
+		return nil
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != 0 && st.Uid != uint32(os.Geteuid()) {
+		return nil // not ours to restrict
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return fmt.Errorf("list vault volume root %s: %w", parent, err)
+	}
+	base := filepath.Base(dir)
+	for _, entry := range entries {
+		if entry.Name() != base {
+			log.Infof("vault persistence: volume root %s holds foreign entry %q; not restricting (fix permissions in the manifest)", parent, entry.Name())
+			return nil
+		}
+	}
+	if err := os.Chmod(parent, info.Mode().Perm()&^0o022); err != nil {
+		return fmt.Errorf("restrict vault volume root %s: %w", parent, err)
+	}
+	log.Infof("vault persistence: restricted group/world-writable volume root %s (kubelet emptyDir default)", parent)
+	return nil
 }
 
 // sweepVaultTempFiles unlinks staging files a crashed writer left behind

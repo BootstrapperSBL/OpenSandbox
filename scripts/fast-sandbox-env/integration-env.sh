@@ -333,8 +333,10 @@ failure_dump() {
 		# fastlet-proxy, which is where pause/snapshot and policy failures
 		# actually surface.
 		echo "--- fastlet pod logs, every container (tail) ---"
+		# A failure loop (e.g. a per-second pause retry) floods the tail and
+		# buries the pre-incident history, so this keeps a deep window.
 		kubectl logs -n "$RESOURCE_NS" -l app=sandbox-fastlet \
-			--all-containers --prefix --timestamps --tail=300 2>&1 || true
+			--all-containers --prefix --timestamps --tail=800 2>&1 || true
 		echo "--- builder pods + logs (tail) ---"
 		kubectl get pods -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --show-labels 2>&1 || true
 		kubectl logs -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --tail=80 2>&1 || true
