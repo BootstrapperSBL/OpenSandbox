@@ -23,7 +23,10 @@ from opensandbox_server.services.docker.snapshot_runtime import (
     build_snapshot_image_ref,
 )
 from opensandbox_server.services.snapshot_models import SnapshotState
+from requests.exceptions import ReadTimeout
+
 from opensandbox_server.services.snapshot_runtime import (
+    SnapshotRuntimePreflightError,
     SnapshotRuntimeUnsupportedError,
 )
 
@@ -294,6 +297,23 @@ def test_preflight_uses_default_runtime_when_hostconfig_runtime_empty() -> None:
 
     with pytest.raises(SnapshotRuntimeUnsupportedError, match="overlay2=none"):
         runtime.preflight_create_snapshot("sbx-001")
+
+
+def test_preflight_maps_list_timeout_to_preflight_error() -> None:
+    """containers.list ReadTimeout must become SnapshotRuntimePreflightError (not raw 500)."""
+
+    def list_timeout(**kwargs):
+        raise ReadTimeout("Docker daemon timed out")
+
+    docker_client = SimpleNamespace(
+        containers=SimpleNamespace(list=list_timeout),
+        info=lambda: {"Runtimes": {}},
+        api=SimpleNamespace(timeout=60),
+    )
+    runtime = DockerSnapshotRuntime(docker_client)
+
+    with pytest.raises(SnapshotRuntimePreflightError, match="timed out"):
+        runtime.preflight_create_snapshot("sbx-timeout")
 
 
 def test_create_snapshot_rejects_gvisor_filestore_only_diff() -> None:

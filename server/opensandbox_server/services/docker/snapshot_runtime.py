@@ -133,7 +133,7 @@ class DockerSnapshotRuntime:
         del namespace  # Docker snapshots are labeled by sandbox id only.
         try:
             container = self._get_container_by_sandbox_id(sandbox_id)
-        except RuntimeError as exc:
+        except (RuntimeError, ReadTimeout, ConnectTimeout, TimeoutError) as exc:
             raise SnapshotRuntimePreflightError(str(exc)) from exc
 
         try:
