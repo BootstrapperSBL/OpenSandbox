@@ -113,3 +113,25 @@ def test_create_context_never_transports_renewal_policy_to_execd(
     )
 
     assert "renewalPolicy" not in json.loads(context.sandbox_env[OPENSANDBOX_LIFECYCLE])
+
+
+def test_create_context_skips_lifecycle_env_for_policy_only_lifecycle(
+    k8s_app_config,
+    create_sandbox_request,
+):
+    """A renewal-only lifecycle must not inject OPENSANDBOX_LIFECYCLE: an
+    empty payload would overwrite hooks persisted in the image/snapshot."""
+    create_sandbox_request.lifecycle = SandboxLifecycle(
+        renewalPolicy={"extendSeconds": 3600},
+    )
+
+    context = _build_create_workload_context(
+        k8s_app_config,
+        create_sandbox_request,
+        "sandbox-1",
+        datetime.now(timezone.utc),
+        lambda: "egress-token",
+        lambda: "secure-token",
+    )
+
+    assert OPENSANDBOX_LIFECYCLE not in context.sandbox_env

@@ -95,8 +95,10 @@ def _build_create_workload_context(
         resource_requests = request.resource_requests.root
 
     sandbox_env, egress_env = split_egress_env(request.env)
-    if request.lifecycle is not None:
-        # idlePolicy/renewalPolicy are control-plane state; never reach execd.
+    if request.lifecycle is not None and request.lifecycle.has_hooks:
+        # Transport hooks only. idlePolicy/renewalPolicy are control-plane
+        # state; an empty payload would still overwrite hooks persisted in
+        # the image/snapshot, so policy-only lifecycles inject nothing.
         sandbox_env[OPENSANDBOX_LIFECYCLE] = request.lifecycle.model_dump_json(
             by_alias=True,
             exclude_none=True,
