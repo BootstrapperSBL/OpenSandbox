@@ -62,10 +62,25 @@ class DockerDiagnosticsMixin:
 
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
         container = self._get_container_by_sandbox_id(sandbox_id)
-        sandbox = self._container_to_sandbox(container, sandbox_id)
+        # Container lookup already provides inspect data. Do not construct a full
+        # Sandbox here: that also inspects the image, which may no longer exist.
+        container_state = container.attrs.get("State", {})
+        status_value = (container_state.get("Status") or container.status or "").lower()
+        if container_state.get("Running") and not container_state.get("Paused"):
+            state = "Running"
+        elif container_state.get("Paused"):
+            state = "Paused"
+        elif container_state.get("Restarting"):
+            state = "Running"
+        elif status_value in {"created", "starting"}:
+            state = "Pending"
+        elif status_value in {"exited", "dead"}:
+            state = "Terminated" if container_state.get("ExitCode") == 0 else "Failed"
+        else:
+            state = "Unknown"
         return DiagnosticContext(
             sandbox_id=sandbox_id,
-            state=sandbox.status.state,
+            state=state,
             backend_type="docker",
             backend_identifiers={"containerId": container.id, "containerName": container.name},
         )

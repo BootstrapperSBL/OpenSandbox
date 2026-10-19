@@ -20,8 +20,10 @@ import type { CreateLifecycleClientOptions } from "./lifecycleClient.js";
 export type DiagnosticClient = Client<paths>;
 
 export function createDiagnosticClient(opts: CreateLifecycleClientOptions): DiagnosticClient {
-  const headers = { Accept: "application/json", ...opts.headers };
-  if (opts.apiKey) Object.assign(headers, { "OPEN-SANDBOX-API-KEY": opts.apiKey });
+  const headers: Record<string, string> = { Accept: "application/json", ...opts.headers };
+  if (opts.apiKey && !headers["OPEN-SANDBOX-API-KEY"]) {
+    headers["OPEN-SANDBOX-API-KEY"] = opts.apiKey;
+  }
   const createClientFn =
     (createClient as unknown as { default?: typeof createClient }).default ?? createClient;
   return createClientFn<paths>({ baseUrl: opts.baseUrl, headers, fetch: opts.fetch });

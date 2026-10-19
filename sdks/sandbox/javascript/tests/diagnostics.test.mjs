@@ -18,9 +18,10 @@ import { Sandbox, SandboxManager, ConnectionConfig, SandboxApiException } from "
 
 const context = { sandboxId: "sbx-1", backendType: "kubernetes", backendIdentifiers: { namespace: "tenant-ns" } };
 
-function mockConfig(handler) {
+function mockConfig(handler, options = {}) {
   const config = new ConnectionConfig({
     domain: "localhost:8080", protocol: "http", apiKey: "key", headers: { "x-custom": "custom" },
+    ...options,
   });
   Object.defineProperty(config, "fetch", { value: handler });
   config.withTransportIfMissing = () => config;
@@ -58,6 +59,32 @@ test("manager diagnostics uses lifecycle transport and preserves descriptor meta
     assert.equal(calls.length, 3); // No execd connection or download of contentUrl.
   } finally { await manager.close(); }
 });
+
+for (const source of ["config", "environment"]) {
+  test(`diagnostics preserves explicit auth header over ${source} API key`, async () => {
+    const previousKey = process.env.OPEN_SANDBOX_API_KEY;
+    process.env.OPEN_SANDBOX_API_KEY = "environment-key";
+    const calls = [];
+    const manager = SandboxManager.create({ connectionConfig: mockConfig(async (req) => {
+      calls.push(req);
+      assert.equal(req.headers.get("OPEN-SANDBOX-API-KEY"), "explicit-header-key");
+      if (new URL(req.url).pathname.endsWith("/context")) return Response.json(context);
+      return Response.json({ code: "NOT_FOUND", message: "Not found" }, { status: 404 });
+    }, {
+      apiKey: source === "config" ? "config-key" : undefined,
+      headers: { "OPEN-SANDBOX-API-KEY": "explicit-header-key" },
+    }) });
+    try {
+      await assert.rejects(manager.getSandboxInfo("sbx-1"), SandboxApiException);
+      assert.deepEqual(await manager.getDiagnosticContext("sbx-1"), context);
+      assert.equal(calls.length, 2);
+    } finally {
+      await manager.close();
+      if (previousKey === undefined) delete process.env.OPEN_SANDBOX_API_KEY;
+      else process.env.OPEN_SANDBOX_API_KEY = previousKey;
+    }
+  });
+}
 
 test("sandbox diagnostics delegates through the injected lifecycle stack", async () => {
   const calls = [];

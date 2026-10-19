@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, PropertyMock
 
 import pytest
 from fastapi import HTTPException
@@ -84,21 +84,37 @@ def test_context_route_preserves_backend_errors(client, auth_headers, monkeypatc
     assert response.status_code == status
 
 
-def test_docker_context_uses_owned_container():
+@pytest.mark.parametrize(
+    "container_state,expected_state",
+    [
+        ({"Status": "running", "Running": True}, "Running"),
+        ({"Status": "paused", "Running": True, "Paused": True}, "Paused"),
+        ({"Status": "restarting", "Restarting": True}, "Running"),
+        ({"Status": "created"}, "Pending"),
+        ({"Status": "starting"}, "Pending"),
+        ({"Status": "exited", "ExitCode": 0}, "Terminated"),
+        ({"Status": "dead", "ExitCode": 1}, "Failed"),
+        ({"Status": "exited"}, "Failed"),
+        ({"Status": "removing"}, "Unknown"),
+        ({}, "Unknown"),
+    ],
+)
+def test_docker_context_uses_owned_container_without_image_lookup(container_state, expected_state):
     service = DockerDiagnosticsMixin()
-    service._get_container_by_sandbox_id = Mock(
-        return_value=SimpleNamespace(id="container-1", name="sandbox-1")
-    )
-    service._container_to_sandbox = Mock(
-        return_value=SimpleNamespace(status=SimpleNamespace(state="Paused"))
-    )
+    container = Mock(id="container-1", attrs={"State": container_state}, status="")
+    container.name = "sandbox-1"
+    image = PropertyMock(side_effect=RuntimeError("Image inspect unavailable"))
+    type(container).image = image
+    service._get_container_by_sandbox_id = Mock(return_value=container)
     context = service.get_sandbox_diagnostic_context("sbx-1")
+    assert context.state == expected_state
     assert context.backend_type == "docker"
     assert context.backend_identifiers == {
         "containerId": "container-1",
         "containerName": "sandbox-1",
     }
     service._get_container_by_sandbox_id.assert_called_once_with("sbx-1")
+    image.assert_not_called()
 
 
 def test_kubernetes_context_is_available_before_pod_allocation(monkeypatch):
