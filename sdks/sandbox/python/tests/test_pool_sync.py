@@ -32,7 +32,7 @@ from opensandbox.exceptions import (
     PoolEmptyException,
     PoolNotRunningException,
 )
-from opensandbox.models.sandboxes import PlatformSpec
+from opensandbox.models.sandboxes import CredentialProxyConfig, PlatformSpec
 from opensandbox.pool import (
     AcquirePolicy,
     InMemoryPoolStateStore,
@@ -363,6 +363,66 @@ def test_acquire_direct_create_forwards_pool_creation_platform() -> None:
         pool.shutdown(False)
 
 
+def test_acquire_direct_create_forwards_credential_proxy() -> None:
+    captured_kwargs: dict[str, Any] = {}
+    proxy = CredentialProxyConfig(enabled=True)
+
+    class CapturingSandbox(FakeSandbox):
+        @classmethod
+        def create(cls, *args: Any, **kwargs: Any) -> CapturingSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("created-with-credential-proxy")
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04",
+            credential_proxy=proxy,
+        ),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=CapturingSandbox,  # type: ignore[arg-type]
+    )
+    pool.start()
+    try:
+        pool.acquire()
+
+        assert captured_kwargs["credential_proxy"] is proxy
+    finally:
+        pool.shutdown(False)
+
+
+def test_warmup_create_forwards_credential_proxy() -> None:
+    captured_kwargs: dict[str, Any] = {}
+    proxy = CredentialProxyConfig(enabled=True)
+
+    class CapturingSandbox(FakeSandbox):
+        @classmethod
+        def create(cls, *args: Any, **kwargs: Any) -> CapturingSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("warmed-with-credential-proxy")
+
+    pool = SandboxPoolSync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=1,
+        state_store=InMemoryPoolStateStore(),
+        connection_config=ConnectionConfigSync(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04",
+            credential_proxy=proxy,
+        ),
+        sandbox_manager_factory=lambda config: FakeManager(),  # type: ignore[arg-type,return-value]
+        sandbox_factory=CapturingSandbox,  # type: ignore[arg-type]
+    )
+    sandbox = pool._build_warmup_sandbox()
+    assert sandbox.id == "warmed-with-credential-proxy"
+    assert captured_kwargs["credential_proxy"] is proxy
+
+
 def test_acquire_direct_create_kills_and_closes_when_renew_fails() -> None:
     FakeSandbox.reset()
     FakeSandbox.fail_renew = True
@@ -568,9 +628,7 @@ def test_forced_shutdown_cleans_create_that_finishes_after_warmup_loop_retired(
             cls.last_created = sandbox
             return sandbox
 
-    monkeypatch.setattr(
-        sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.01
-    )
+    monkeypatch.setattr(sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.01)
     pool = SandboxPoolSync(
         pool_name="late-create-pool",
         owner_id="owner-1",
@@ -615,9 +673,7 @@ def test_forced_shutdown_orphans_warmup_loop_until_stuck_stage_finishes(
     class StuckWarmupSandbox(FakeSandbox):
         pass
 
-    monkeypatch.setattr(
-        sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05
-    )
+    monkeypatch.setattr(sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05)
     pool = SandboxPoolSync(
         pool_name="stuck-warmup-pool",
         owner_id="owner-1",
@@ -685,9 +741,7 @@ def test_restart_after_stuck_warmup_shutdown_closes_new_loop_normally(
             # into backoff, starving run 2's warmups.
             release_first_preparer.wait()
 
-    monkeypatch.setattr(
-        sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05
-    )
+    monkeypatch.setattr(sync_pool_module, "_WARMUP_TERMINATION_TIMEOUT_SECONDS", 0.05)
     pool = SandboxPoolSync(
         pool_name="restart-after-stuck-pool",
         owner_id="owner-1",
@@ -1226,9 +1280,7 @@ def test_concurrent_start_shutdown_interleaved_closes_every_loop_once(
                 errors.append(exc)
                 return
 
-    threads = [
-        threading.Thread(target=worker, args=(index,)) for index in range(4)
-    ]
+    threads = [threading.Thread(target=worker, args=(index,)) for index in range(4)]
     for thread in threads:
         thread.start()
     for thread in threads:

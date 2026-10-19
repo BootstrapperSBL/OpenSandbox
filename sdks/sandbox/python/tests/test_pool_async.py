@@ -30,7 +30,7 @@ from opensandbox.exceptions import (
     PoolEmptyException,
     PoolNotRunningException,
 )
-from opensandbox.models.sandboxes import PlatformSpec
+from opensandbox.models.sandboxes import CredentialProxyConfig, PlatformSpec
 from opensandbox.pool import (
     AcquirePolicy,
     AsyncPoolConfig,
@@ -779,6 +779,66 @@ async def test_async_acquire_direct_create_forwards_pool_creation_platform() -> 
         assert captured_kwargs["platform"] == PlatformSpec(os="linux", arch="arm64")
     finally:
         await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_acquire_direct_create_forwards_credential_proxy() -> None:
+    captured_kwargs: dict[str, Any] = {}
+    proxy = CredentialProxyConfig(enabled=True)
+
+    class CapturingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def create(cls, *args: Any, **kwargs: Any) -> CapturingAsyncSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("created-with-credential-proxy")
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=0,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04",
+            credential_proxy=proxy,
+        ),
+        sandbox_factory=CapturingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    await pool.start()
+    try:
+        await pool.acquire()
+
+        assert captured_kwargs["credential_proxy"] is proxy
+    finally:
+        await pool.shutdown(False)
+
+
+@pytest.mark.asyncio
+async def test_async_warmup_create_forwards_credential_proxy() -> None:
+    captured_kwargs: dict[str, Any] = {}
+    proxy = CredentialProxyConfig(enabled=True)
+
+    class CapturingAsyncSandbox(FakeAsyncSandbox):
+        @classmethod
+        async def create(cls, *args: Any, **kwargs: Any) -> CapturingAsyncSandbox:
+            captured_kwargs.update(kwargs)
+            return cls("warmed-with-credential-proxy")
+
+    pool = SandboxPoolAsync(
+        pool_name="pool",
+        owner_id="owner-1",
+        max_idle=1,
+        state_store=InMemoryAsyncPoolStateStore(),
+        connection_config=ConnectionConfig(),
+        creation_spec=PoolCreationSpec(
+            image="ubuntu:22.04",
+            credential_proxy=proxy,
+        ),
+        sandbox_factory=CapturingAsyncSandbox,  # type: ignore[arg-type]
+    )
+    sandbox = await pool._build_warmup_sandbox()
+    assert sandbox.id == "warmed-with-credential-proxy"
+    assert captured_kwargs["credential_proxy"] is proxy
 
 
 @pytest.mark.asyncio

@@ -1078,9 +1078,7 @@ class SandboxPoolSync:
             except Exception:
                 pass
 
-    def _cleanup_cancelled_warmup_create(
-        self, future: Future[SandboxSync]
-    ) -> None:
+    def _cleanup_cancelled_warmup_create(self, future: Future[SandboxSync]) -> None:
         """Terminate a sandbox whose create completed after forced shutdown.
 
         This callback runs on the create worker, independently of the retired
@@ -1141,6 +1139,7 @@ class SandboxPoolSync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            credential_proxy=spec.credential_proxy,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,
@@ -1192,6 +1191,7 @@ class SandboxPoolSync:
             metadata=spec.metadata,
             resource=spec.resource,
             network_policy=spec.network_policy,
+            credential_proxy=spec.credential_proxy,
             platform=spec.platform,
             extensions=spec.extensions,
             secure_access=spec.secure_access,

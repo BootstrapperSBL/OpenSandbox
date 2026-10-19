@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
 from opensandbox.models.sandboxes import (
+    CredentialProxyConfig,
     NetworkPolicy,
     PlatformSpec,
     SandboxImageSpec,
@@ -318,6 +319,7 @@ class PoolCreationSpec:
     metadata: dict[str, str] | None = None
     extensions: dict[str, str] | None = None
     network_policy: NetworkPolicy | None = None
+    credential_proxy: CredentialProxyConfig | None = None
     platform: PlatformSpec | None = None
     secure_access: bool = False
     volumes: list[Volume] | None = None
