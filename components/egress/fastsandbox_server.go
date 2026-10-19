@@ -58,16 +58,20 @@ type fastSandboxPolicyServer struct {
 	reg *subject.MemoryRegistry
 	nft fastSandboxNftApplier
 
-	mu sync.Mutex
+	// actionGate serializes registry writers without making cancellation wait
+	// for a mutex holder. Vault transactions use mu, never this gate.
+	actionGate chan struct{}
+
+	mu      sync.Mutex
+	rebinds map[subject.Subject]*subjectRebind
 	// pendingPolicies holds the SET_BINDING input of a still-denying subject
 	// until its data-plane-ready Hook activates it. Deliberately NOT stored
 	// in the registry: DNS dispatch must keep denying (fail closed) while the
 	// policy has not been made effective.
 	pendingPolicies map[subject.Subject]*policy.NetworkPolicy
 	vaults          map[subject.Subject]vaultEntry
-	// subjAtt records the latest network attachment, used for terminal
-	// cleanup (gateway refcounts) even when the REMOVE_BINDING envelope omits
-	// the attachment block.
+	// subjAtt records the latest validated registration attempt, including
+	// failed enforcement, for same-fence comparison and old-IP cleanup.
 	subjAtt map[subject.Subject]actionhandler.NetworkAttachment
 
 	// vaultFiles owns the per-subject vault files; nil keeps the vault
@@ -112,6 +116,8 @@ func newFastSandboxPolicyServer(ctx context.Context, reg *subject.MemoryRegistry
 		ctx:                ctx,
 		reg:                reg,
 		nft:                nft,
+		actionGate:         make(chan struct{}, 1),
+		rebinds:            make(map[subject.Subject]*subjectRebind),
 		vaults:             make(map[subject.Subject]vaultEntry),
 		pendingPolicies:    make(map[subject.Subject]*policy.NetworkPolicy),
 		subjAtt:            make(map[subject.Subject]actionhandler.NetworkAttachment),
@@ -314,12 +320,22 @@ func (s *fastSandboxPolicyServer) handleCredentialVaultActive(w http.ResponseWri
 		http.Error(w, fmt.Sprintf("invalid clientIp %q", raw), http.StatusBadRequest)
 		return
 	}
-	subj, ok := s.reg.Resolve(subject.SubjectKey{SourceIP: ip})
-	if !ok {
-		http.Error(w, "no subject for clientIp", http.StatusNotFound)
-		return
-	}
-	handleActiveVaultSnapshot(w, r, s.vaultFor(subj))
+	respond := func() func(http.ResponseWriter) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		subj, ok := s.reg.Resolve(subject.SubjectKey{SourceIP: ip})
+		if !ok {
+			return func(w http.ResponseWriter) { http.Error(w, "no subject for clientIp", http.StatusNotFound) }
+		}
+		if s.subjectRebindingLocked(subj) {
+			return func(w http.ResponseWriter) {
+				http.Error(w, "subject rebind in progress", http.StatusServiceUnavailable)
+			}
+		}
+		fence, _ := s.reg.Fence(subj)
+		return captureActiveVaultSnapshot(r, s.vaultForLocked(subj, fence))
+	}()
+	respond(w)
 }
 
 // applyPolicy applies a policy to a subject. Ordering: nft FIRST, registry
@@ -360,7 +376,8 @@ type vaultEntry struct {
 	sealed   bool
 }
 
-// vaultFor returns the per-subject vault, created on first use (rehydrated
+// vaultFor returns nil for absent or rebinding subjects. Otherwise the vault
+// is created on first use (rehydrated
 // from its persisted file at registration, OSEP-0022 stage 2).
 // A store is only valid under the fence it was created with: a mismatch
 // (same-UID rebind without REMOVE_BINDING, or a TOCTOU store materialized
@@ -370,14 +387,20 @@ type vaultEntry struct {
 func (s *fastSandboxPolicyServer) vaultFor(subj subject.Subject) *credentialvault.Store {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.subjectRebindingLocked(subj) {
+		return nil
+	}
 	fence, _ := s.reg.Fence(subj)
 	return s.vaultForLocked(subj, fence)
 }
 
 // vaultForLocked implements vaultFor; callers hold s.mu.
 func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence subject.Fencing) *credentialvault.Store {
+	if fence == (subject.Fencing{}) {
+		return nil
+	}
 	if e, ok := s.vaults[subj]; ok {
-		if fence != (subject.Fencing{}) && e.fence == fence {
+		if e.fence == fence {
 			return e.store
 		}
 		delete(s.vaults, subj)
@@ -389,9 +412,9 @@ func (s *fastSandboxPolicyServer) vaultForLocked(subj subject.Subject, fence sub
 
 // dropVault purges the subject's vault slice (rebind cleanup): memory and,
 // when persistence is enabled, the per-subject file. The caller holds s.mu.
-func (s *fastSandboxPolicyServer) dropVault(subj subject.Subject) {
+func (s *fastSandboxPolicyServer) dropVault(subj subject.Subject) error {
 	delete(s.vaults, subj)
-	s.purgeVaultFile(subj)
+	return s.purgeVaultFile(subj)
 }
 
 // OnRegistered implements subject.LifecycleHooks: deny-first enforcement
@@ -453,8 +476,8 @@ func (s *fastSandboxPolicyServer) setMitmRedirect(subj subject.Subject, att acti
 	return nil
 }
 
-// OnUnloaded implements subject.LifecycleHooks: remove enforcement and drop
-// the pending policy and vault (stale for a new sandbox of the same UID).
+// OnUnloaded implements subject.LifecycleHooks: remove enforcement only.
+// The caller unregisters and then purges local state outside the registry lock.
 // The gateway refcount is released when the last subject using it goes away.
 //
 // Enforcement removal runs FIRST: a transient nft failure leaves every other
@@ -469,18 +492,16 @@ func (s *fastSandboxPolicyServer) OnUnloaded(subj subject.Subject, _ actionhandl
 	return nil
 }
 
-// unloadEnforcement performs the full teardown shared by REMOVE_BINDING
-// (OnUnloaded) and stale-subject takeover: nft removal first (a transient
-// failure leaves every other step undone so the caller retries whole), then
-// the per-subject state, the gateway DNS refcount, and the MITM entry. Does
-// not touch the registry — safe to run under the registry write lock.
+// unloadEnforcement tears down kernel/redirect state only. It must never
+// acquire s.mu or read the registry: takeover calls it under the registry
+// write lock, while vault transactions acquire s.mu before registry reads.
+// nft removal goes first; failure retains the existing cleanup retry boundary.
 func (s *fastSandboxPolicyServer) unloadEnforcement(subj subject.Subject) error {
 	nftCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
 	if err := s.nft.Remove(nftCtx, subj); err != nil {
 		return err
 	}
-	s.dropSubjectState(subj)
 	s.releaseGatewayDNSRedirect(subj)
 	s.removeMitmRedirect(subj)
 	return nil
@@ -506,16 +527,25 @@ func (s *fastSandboxPolicyServer) takeoverStaleSubject(stale subject.Subject) er
 // cleanup (OSEP-0022: REMOVE_BINDING purges memory + file).
 func (s *fastSandboxPolicyServer) dropSubjectState(subj subject.Subject) {
 	s.mu.Lock()
-	delete(s.vaults, subj)
-	delete(s.pendingPolicies, subj)
-	delete(s.subjAtt, subj)
-	s.purgeVaultFile(subj)
+	s.dropSubjectStateLocked(subj)
+	delete(s.rebinds, subj)
 	s.mu.Unlock()
 }
 
-// recordBindingState stores the SET_BINDING bookkeeping for a registered
-// subject: the network attachment (terminal cleanup). Called after the
-// registry lock is released.
+// dropSubjectStateLocked preserves an in-flight rebind token. Superseding
+// SETs use it only after full kernel removal and Unregister; Vault must stay
+// guarded until the successor has completed local publication.
+func (s *fastSandboxPolicyServer) dropSubjectStateLocked(subj subject.Subject) error {
+	err := s.dropVault(subj)
+	delete(s.pendingPolicies, subj)
+	delete(s.subjAtt, subj)
+	return err
+}
+
+// recordBindingState records a validated network attempt before enforcement.
+// A failed initial deny-first may already have kernel effects; retries must
+// still compare its network rather than treat missing success metadata as
+// evidence that no rules exist. Called outside the registry lock.
 func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment) {
 	s.mu.Lock()
 	s.subjAtt[subj] = att

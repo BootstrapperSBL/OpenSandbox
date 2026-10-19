@@ -149,6 +149,9 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 // exportSourceImageLocked runs the export guards and returns a consistent
 // image of the subject's vault file. Callers hold s.mu.
 func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, fence subject.Fencing) (*policy.PolicyFileSnapshot, int, error) {
+	if s.subjectRebindingLocked(subj) {
+		return nil, http.StatusServiceUnavailable, fmt.Errorf("subject rebind in progress")
+	}
 	regFence, ok := s.reg.Fence(subj)
 	if !ok {
 		return nil, http.StatusNotFound, fmt.Errorf("vault export for unknown subject %s", subj)
@@ -235,6 +238,9 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.subjectRebindingLocked(subj) {
+		return http.StatusServiceUnavailable, fmt.Errorf("subject rebind in progress")
+	}
 	// The latch freezes every vault file mutation; only a restart
 	// reconciles (relay-write parity).
 	if recovery := s.vaultRecovery.Load(); recovery != nil {

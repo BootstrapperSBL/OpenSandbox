@@ -590,15 +590,14 @@ func TestVaultPersistRemoveBindingPurgesFile(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code)
 	require.True(t, h.fileFor(vaultTestUID).exists)
 
-	// The final purge runs AFTER Unregister: a relay write parked on the
-	// server lock during the first purge can recreate the file for the dead
-	// subject — simulate that survivor with an uncertain first purge.
+	// Cleanup runs after Unregister and retains its bounded second attempt
+	// on failure, without unlocking between attempts.
 	h.fileFor(vaultTestUID).failFirstDelete = errors.New("unlink EIO")
 
 	rec = doAction(t, h.srv, removeBody(t, vaultTestUID, testFenceR, testFenceA))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.False(t, h.fileFor(vaultTestUID).exists, "REMOVE_BINDING purges memory + file (terminal)")
-	assert.Equal(t, 2, h.fileFor(vaultTestUID).deleteCalls, "the post-unregister purge retries a failed first purge")
+	assert.Equal(t, 2, h.fileFor(vaultTestUID).deleteCalls, "the post-unregister cleanup retries its failed first purge")
 
 	// REMOVE_BINDING for unknown Handler state also drops any cached file.
 	h.seedVaultFile(vaultTestUID, "runtime-x", "attachment-x", 1, reloadVaultBody)
