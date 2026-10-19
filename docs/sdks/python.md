@@ -140,10 +140,12 @@ The Server validates `timeout_seconds`; `pre_start` accepts 1–10800 seconds, w
 `SandboxLifecycle.idle_policy` (OSEP-0024, fast-sandbox only) tells the control plane to auto-pause the sandbox after `idle_timeout_seconds` (30–86400) of continuously idle ingress-observed traffic, and to wake it on the next request. It is control-plane state: it never reaches the guest, is allowed in template mode (`Sandbox.create_from_template(idle_policy=...)`), and is rejected by non-fast-sandbox backends. Omitting it preserves non-automated behavior exactly.
 
 ```python
+from datetime import timedelta
+
 sandbox = await Sandbox.create(
     "ubuntu:24.04",
     connection_config=config,
-    timeout_seconds=86400,
+    timeout=timedelta(seconds=86400),
     lifecycle=SandboxLifecycle(
         idle_policy=IdlePolicy(
             idle_timeout_seconds=300,
