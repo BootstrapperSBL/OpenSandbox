@@ -1722,10 +1722,13 @@ vault_lifecycle_verify() {
 	wait_for "vault sandbox Running" 150 sandbox_running
 	sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$VERIFY_ID" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
 	[[ -n "$sandbox_uid" ]] || fail "vault verify: sandbox CR carried no uid"
-	# The subject must be registered (deny-first -> active) before the vault
-	# POST; otherwise the relay 404s (create -> ready -> set vault).
+	# The subject must be registered AND activated (deny-first install, then
+	# the data-plane-ready hook flips it) before the vault POST; otherwise
+	# the relay 404s (create -> ready -> set vault). The second
+	# "SET_BINDING applied (state=active)" line only appears after a policy
+	# UPDATE; a create-carried policy activates without it.
 	wait_for "vault subject registered on egress" 120 \
-		vault_log_contains "subject s-$sandbox_uid: SET_BINDING applied (state=active)"
+		vault_log_contains "subject s-$sandbox_uid: data-plane-ready, policy active"
 
 	# 1) create-only: 201 ack carries the egress-validated revision; a
 	#    duplicate POST is 409 (atomic across server replicas).
