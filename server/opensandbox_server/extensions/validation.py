@@ -49,6 +49,10 @@ def _warn_access_renew_deprecation() -> None:
     logger.warning(_LEGACY_RENEW_KEY_DEPRECATION, ACCESS_RENEW_EXTEND_SECONDS_KEY)
 
 
+# TODO(2.0): delete this function and the deprecation-warning helper above
+# with the legacy request-entry removal (#2289). The conflict check's
+# lifecycle-vs-extensions comparison goes with it; create requests carrying
+# the key are rejected as an unknown extension by then.
 def _validate_access_renew_extend_seconds(extensions: Dict[str, str]) -> None:
     """
     If ``access.renew.extend.seconds`` is set, require a base-10 integer in [MIN, MAX] seconds.
@@ -157,6 +161,9 @@ def validate_renew_policy_conflict(
 
     Raises:
         HTTPException: 400 when both inputs are set with different values.
+
+    TODO(2.0): delete this transition-window check and its call site in
+    ``api/lifecycle.py`` with the legacy request-entry removal (#2289).
     """
     declared = access_renew_extend_seconds_from_lifecycle(lifecycle)
     if declared is None or not extensions:

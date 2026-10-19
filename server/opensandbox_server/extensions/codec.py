@@ -56,6 +56,10 @@ def apply_access_renew_extend_seconds_to_mapping(
     set here they agree and the structured value is written.
 
     ``mapping`` may be Kubernetes annotations or Docker container labels.
+
+    TODO(2.0): drop the legacy ``extensions`` fallback branch (and the
+    ``extensions`` parameter) with the request-entry removal (#2289); the
+    lifecycle branch and the metadata key stay.
     """
     declared = access_renew_extend_seconds_from_lifecycle(lifecycle)
     if declared is not None:
