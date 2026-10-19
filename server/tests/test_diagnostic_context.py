@@ -149,6 +149,47 @@ def test_fast_context_uses_lifecycle_identity():
     service.get_sandbox.assert_called_once_with("fsb-1")
 
 
+@pytest.mark.parametrize("failure_stage", ["namespace", "workload", "mapping"])
+def test_kubernetes_context_normalizes_errors(client, auth_headers, monkeypatch, failure_stage):
+    service = K8sDiagnosticsMixin()
+    service._resolve_namespace_for_lookup = Mock(return_value="tenant-ns")
+    service.workload_provider = Mock()
+    owned = Mock(return_value={"metadata": {}})
+    mapper = Mock()
+    monkeypatch.setattr(
+        "opensandbox_server.services.k8s.k8s_diagnostics._get_owned_workload_or_404", owned
+    )
+    monkeypatch.setattr(
+        "opensandbox_server.services.k8s.k8s_diagnostics._build_sandbox_from_workload", mapper
+    )
+    stages = {"namespace": service._resolve_namespace_for_lookup, "workload": owned, "mapping": mapper}
+    stages[failure_stage].side_effect = RuntimeError("API server unavailable")
+    monkeypatch.setattr(devops, "sandbox_service", service)
+
+    response = client.get("/v1/sandboxes/sbx-1/diagnostics/context", headers=auth_headers)
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "code": "KUBERNETES::API_ERROR",
+        "message": "Failed to get sandbox diagnostic context: API server unavailable",
+    }
+
+
+@pytest.mark.parametrize("status_code", [403, 404])
+def test_kubernetes_context_preserves_http_errors(monkeypatch, status_code):
+    service = K8sDiagnosticsMixin()
+    service._resolve_namespace_for_lookup = Mock(return_value="tenant-ns")
+    service.workload_provider = Mock()
+    error = HTTPException(status_code, detail={"code": "TEST_ERROR", "message": "Unavailable"})
+    monkeypatch.setattr(
+        "opensandbox_server.services.k8s.k8s_diagnostics._get_owned_workload_or_404",
+        Mock(side_effect=error),
+    )
+    with pytest.raises(HTTPException) as raised:
+        service.get_sandbox_diagnostic_context("sbx-1")
+    assert raised.value is error
+
+
 @pytest.mark.parametrize("sandbox_id,backend", [("fsb-1", "fsb"), ("sbx-1", "kubernetes")])
 def test_composite_routes_context(sandbox_id, backend):
     k8s, fsb = Mock(), Mock()

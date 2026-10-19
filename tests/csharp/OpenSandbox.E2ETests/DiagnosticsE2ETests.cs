@@ -18,6 +18,7 @@ using Xunit;
 
 namespace OpenSandbox.E2ETests;
 
+[Collection("CSharp E2E Tests")]
 public class DiagnosticsE2ETests : IClassFixture<DiagnosticsE2ETestFixture>
 {
     private readonly DiagnosticsE2ETestFixture _fixture;
@@ -147,6 +148,7 @@ public sealed class DiagnosticsE2ETestFixture : IAsyncLifetime
             if (_sandbox != null)
             {
                 try { await _sandbox.KillAsync(); }
+                catch (SandboxApiException error) when (error.StatusCode == 404) { }
                 finally { await _sandbox.DisposeAsync(); }
             }
         }

@@ -22,6 +22,7 @@ by querying K8s Pod state and events. Mixed into KubernetesSandboxService.
 from __future__ import annotations
 
 import re
+import logging
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -38,12 +39,14 @@ from opensandbox_server.services.diagnostics import (
     unsupported_scope_error,
 )
 from opensandbox_server.services.k8s.workload_access import _get_owned_workload_or_404
+from opensandbox_server.services.k8s.error_helpers import _build_k8s_api_error
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     allocated_pod_names,
 )
 
 _SUPPORTED_LOG_SCOPES = ("container", "all")
+logger = logging.getLogger(__name__)
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
 _STABLE_LOG_LINE_LIMIT = 100
 _STABLE_EVENT_LINE_LIMIT = 50
@@ -70,9 +73,15 @@ class K8sDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Kubernetes backend."""
 
     def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
-        namespace = self._resolve_namespace_for_lookup(sandbox_id)
-        workload = _get_owned_workload_or_404(self.workload_provider, namespace, sandbox_id)
-        sandbox = _build_sandbox_from_workload(workload, self.workload_provider)
+        try:
+            namespace = self._resolve_namespace_for_lookup(sandbox_id)
+            workload = _get_owned_workload_or_404(self.workload_provider, namespace, sandbox_id)
+            sandbox = _build_sandbox_from_workload(workload, self.workload_provider)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Error getting sandbox diagnostic context %s", sandbox_id)
+            raise _build_k8s_api_error("get sandbox diagnostic context", exc) from exc
         metadata = workload.get("metadata", {}) if isinstance(workload, dict) else workload.metadata
         name = metadata.get("name") if isinstance(metadata, dict) else metadata.name
         uid = metadata.get("uid") if isinstance(metadata, dict) else metadata.uid

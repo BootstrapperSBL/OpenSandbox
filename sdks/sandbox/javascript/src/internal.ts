@@ -24,6 +24,7 @@
  */
 
 export { createLifecycleClient } from "./openapi/lifecycleClient.js";
+export { createDiagnosticClient } from "./openapi/diagnosticClient.js";
 export type { LifecycleClient } from "./openapi/lifecycleClient.js";
 export { createExecdClient } from "./openapi/execdClient.js";
 export type { ExecdClient } from "./openapi/execdClient.js";

@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Sandbox, SandboxManager, ConnectionConfig, SandboxApiException } from "../dist/index.js";
+import { createDiagnosticClient, createLifecycleClient } from "../dist/internal.js";
 
 const context = { sandboxId: "sbx-1", backendType: "kubernetes", backendIdentifiers: { namespace: "tenant-ns" } };
 
@@ -113,7 +114,84 @@ test("sandbox diagnostics delegates through the injected lifecycle stack", async
   } finally { await sandbox.close(); }
 });
 
-test("context preserves API errors", async () => {
+test("diagnostic and lifecycle clients share environment and URL defaults", async () => {
+  const previousKey = process.env.OPEN_SANDBOX_API_KEY;
+  process.env.OPEN_SANDBOX_API_KEY = "environment-key";
+  const calls = [];
+  const fetch = async (req) => {
+    calls.push(req);
+    assert.equal(req.headers.get("OPEN-SANDBOX-API-KEY"), "environment-key");
+    return Response.json(context);
+  };
+  try {
+    await createLifecycleClient({ fetch }).GET("/sandboxes/{sandboxId}", {
+      params: { path: { sandboxId: "sbx-1" } },
+    });
+    await createDiagnosticClient({ fetch }).GET("/sandboxes/{sandboxId}/diagnostics/context", {
+      params: { path: { sandboxId: "sbx-1" } },
+    });
+    assert.deepEqual(calls.map((req) => req.url), [
+      "http://localhost:8080/v1/sandboxes/sbx-1",
+      "http://localhost:8080/v1/sandboxes/sbx-1/diagnostics/context",
+    ]);
+  } finally {
+    if (previousKey === undefined) delete process.env.OPEN_SANDBOX_API_KEY;
+    else process.env.OPEN_SANDBOX_API_KEY = previousKey;
+  }
+});
+
+test("inline diagnostics preserves content without requiring an expiry", async () => {
+  for (const expiry of [{}, { expiresAt: null }]) {
+    const manager = SandboxManager.create({ connectionConfig: mockConfig(async (req) => {
+      const kind = new URL(req.url).pathname.endsWith("/logs") ? "logs" : "events";
+      return Response.json({
+        sandboxId: "sbx-1", kind, scope: "all", delivery: "inline", contentType: "text/plain",
+        content: "hello\n", contentLength: 6, truncated: false, ...expiry,
+      });
+    }) });
+    try {
+      for (const kind of ["Logs", "Events"]) {
+        const result = await manager[`getDiagnostic${kind}`]("sbx-1", "all");
+        assert.equal(result.delivery, "inline");
+        assert.equal(result.content, "hello\n");
+        assert.equal(result.contentLength, 6);
+        assert.equal(result.expiresAt, undefined);
+      }
+    } finally { await manager.close(); }
+  }
+});
+
+test("custom factories without diagnostics produce an actionable error", async () => {
+  const config = new ConnectionConfig({ domain: "localhost:8080" });
+  const adapterFactory = {
+    createLifecycleStack: () => ({
+      sandboxes: { getSandboxEndpoint: async () => ({ endpoint: "localhost:44772" }) },
+    }),
+    createExecdStack: () => ({ commands: {}, files: {}, health: {}, metrics: {} }),
+    createEgressStack: () => ({ egress: {} }),
+  };
+  const manager = SandboxManager.create({ connectionConfig: config, adapterFactory });
+  const sandbox = await Sandbox.connect({
+    sandboxId: "sbx-1", connectionConfig: config, skipHealthCheck: true, adapterFactory,
+  });
+  try {
+    for (const call of [
+      () => manager.getDiagnosticContext("sbx-1"),
+      () => manager.getDiagnosticLogs("sbx-1", "all"),
+      () => manager.getDiagnosticEvents("sbx-1", "all"),
+      () => sandbox.getDiagnosticContext(),
+      () => sandbox.getDiagnosticLogs("all"),
+      () => sandbox.getDiagnosticEvents("all"),
+    ]) {
+      assert.throws(call, /The adapter factory does not provide diagnostics/);
+    }
+  } finally {
+    await sandbox.close();
+    await manager.close();
+  }
+});
+
+test("diagnostics preserves API errors", async () => {
   for (const status of [403, 404, 501]) {
     const manager = SandboxManager.create({ connectionConfig: mockConfig(
       async () => Response.json(
@@ -121,8 +199,14 @@ test("context preserves API errors", async () => {
       ),
     ) });
     try {
-      await assert.rejects(manager.getDiagnosticContext("sbx-1"), (error) =>
-        error instanceof SandboxApiException && error.statusCode === status && error.requestId === "request-1");
+      for (const call of [
+        () => manager.getDiagnosticContext("sbx-1"),
+        () => manager.getDiagnosticLogs("sbx-1", "all"),
+        () => manager.getDiagnosticEvents("sbx-1", "all"),
+      ]) {
+        await assert.rejects(call, (error) =>
+          error instanceof SandboxApiException && error.statusCode === status && error.requestId === "request-1");
+      }
     } finally { await manager.close(); }
   }
 });
