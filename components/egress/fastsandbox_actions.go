@@ -213,13 +213,16 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 			return http.StatusInternalServerError, fmt.Errorf("active subject %s has no registered network", subj)
 		}
 	}
-	// A null binding may omit attachment. Preserve a known current network;
-	// omission is not a request to migrate a same-fence subject to zero IP.
+	// A null binding may omit attachment only for its own known identity.
+	// Never register a new fence using the previous instance's network.
 	if env.Binding.IsRemoval() && env.Attachment == nil {
-		if token != nil && token.expectedNew.Matches(fence) {
+		if token != nil && token.expectedNew.Matches(fence) && token.newNetwork.IP.IsValid() {
 			att = token.newNetwork
-		} else if knownNetwork {
+		} else if token == nil && registered && old.Matches(fence) {
 			att = oldAtt
+		} else if registered || token != nil {
+			s.mu.Unlock()
+			return http.StatusBadRequest, fmt.Errorf("attachment required for registration identity")
 		}
 	}
 	if (token != nil && token.expectedNew.Matches(fence) && !sameBindingNetwork(token.newNetwork, att)) ||
@@ -239,6 +242,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	}
 	needsReset := token != nil && token.needsReset
 	s.mu.Unlock()
+	defer s.logPendingRebind(subj, token)
 	if token != nil {
 		if needsReset {
 			if err := s.unloadEnforcement(subj); err != nil {
@@ -398,6 +402,7 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 		log.Infof("subject %s: stale REMOVE_BINDING ignored (pending rebind fence mismatch)", subj)
 		return http.StatusOK, nil
 	}
+	defer s.logPendingRebind(subj, token)
 	registeredFence, ok := s.reg.Fence(subj)
 	if token == nil && ok && !registeredFence.Matches(fence) {
 		log.Infof("subject %s: stale REMOVE_BINDING ignored (fence mismatch)", subj)
@@ -421,10 +426,14 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 	if err := s.dropSubjectStateLocked(subj); err != nil {
 		s.purgeVaultFile(subj)
 	}
-	if s.rebinds[subj] == token {
+	cleared := token != nil && s.rebinds[subj] == token
+	if cleared {
 		delete(s.rebinds, subj)
 	}
 	s.mu.Unlock()
+	if cleared {
+		log.Infof("subject_rebind_cleared")
+	}
 	log.Infof("subject %s: REMOVE_BINDING complete (was %s)", subj, prev)
 	return http.StatusOK, nil
 }

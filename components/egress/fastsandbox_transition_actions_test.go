@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -704,4 +705,114 @@ func TestTransitionInitiallyNullUnknownNetworkCanReceiveBinding(t *testing.T) {
 	require.Equal(t, http.StatusOK, doAction(t, srv, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, vaultAllowPolicy())).Code)
 	require.Equal(t, http.StatusOK, doAction(t, srv, hookBody(t, testUID, testFenceR, testFenceA, constants.HookDataPlaneReady)).Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(subject.FromSandboxUID(testUID))))
+}
+
+func omittedNullBinding(t *testing.T, runtime, attachment string) string {
+	t.Helper()
+	var env actionhandler.Envelope
+	require.NoError(t, json.Unmarshal([]byte(bindBody(t, testUID, testIP, runtime, attachment, 3, nil)), &env))
+	env.Attachment = nil
+	body, err := json.Marshal(env)
+	require.NoError(t, err)
+	return string(body)
+}
+
+func TestTransitionNullOmissionRejectsUnprovenNewNetwork(t *testing.T) {
+	for _, stage := range []string{"registered", "pending-before-publication", "pending-after-publication", "pending-absent-registry"} {
+		t.Run(stage, func(t *testing.T) {
+			h := newVaultPersistHarness(t)
+			subj := h.readySubject(t, testUID, testIP)
+			require.Equal(t, http.StatusCreated, doVault(t, h.srv, http.MethodPost, testUID, vaultCredential(), testFenceR).Code)
+			if stage != "registered" {
+				if stage == "pending-before-publication" {
+					h.nft.removeErr = errors.New("blocked remove")
+				} else {
+					h.nft.denyFirstErr = errors.New("blocked install")
+				}
+				require.Equal(t, http.StatusInternalServerError, doAction(t, h.srv, bindBody(t, testUID, "10.0.0.6", "B", "B-att", 2, nil)).Code)
+				if stage == "pending-absent-registry" {
+					h.reg.Unregister(subj)
+				}
+			}
+			token := transitionCurrentToken(h.srv, subj)
+			fence, registered := h.reg.Fence(subj)
+			att, known := h.srv.attachment(subj)
+			store := h.srv.vaults[subj]
+			purges := h.fileFor(testUID).deleteCalls
+			// Trap attempted effects even when the prior fake failed before recording them.
+			h.srv.nft = &transitionNft{fakeNft: h.nft, remove: func(subject.Subject) error { t.Error("unexpected Remove"); return nil }, deny: func(subject.Subject, actionhandler.NetworkAttachment) error {
+				t.Error("unexpected install")
+				return nil
+			}}
+			require.Equal(t, http.StatusBadRequest, doAction(t, h.srv, omittedNullBinding(t, "C", "C-att")).Code)
+			if token != nil {
+				// Old A is also a superseding intent, even before B publication
+				// while the registry still contains A and its known network.
+				require.Equal(t, http.StatusBadRequest, doAction(t, h.srv, omittedNullBinding(t, testFenceR, testFenceA)).Code)
+			}
+			if token == nil {
+				require.Nil(t, transitionCurrentToken(h.srv, subj))
+			} else {
+				require.Same(t, token, transitionCurrentToken(h.srv, subj))
+			}
+			gotFence, gotRegistered := h.reg.Fence(subj)
+			require.Equal(t, registered, gotRegistered)
+			require.Equal(t, fence, gotFence)
+			gotAtt, gotKnown := h.srv.attachment(subj)
+			require.Equal(t, known, gotKnown)
+			require.Equal(t, att, gotAtt)
+			require.Equal(t, store, h.srv.vaults[subj])
+			require.Equal(t, purges, h.fileFor(testUID).deleteCalls)
+		})
+	}
+}
+
+func TestTransitionNullOmissionRetriesOnlyExpectedNetwork(t *testing.T) {
+	for _, partial := range []bool{false, true} {
+		t.Run(fmt.Sprintf("published=%v", partial), func(t *testing.T) {
+			srv, reg, nft := fastSandboxTestServer(t)
+			subj := setBindingAndReady(t, srv, reg, testUID, testIP, vaultAllowPolicy())
+			if partial {
+				nft.denyFirstErr = errors.New("install failed")
+			} else {
+				nft.removeErr = errors.New("remove failed")
+			}
+			require.Equal(t, http.StatusInternalServerError, doAction(t, srv, bindBody(t, testUID, "10.0.0.6", "B", "B-att", 2, nil)).Code)
+			token := transitionCurrentToken(srv, subj)
+			require.Equal(t, "10.0.0.6", token.newNetwork.IP.String())
+			nft.denyFirstErr = nil
+			nft.removeErr = nil
+			require.Equal(t, http.StatusOK, doAction(t, srv, omittedNullBinding(t, "B", "B-att")).Code)
+			att, _ := srv.attachment(subj)
+			require.Equal(t, token.newNetwork, att)
+			owner, found := reg.Resolve(subject.SubjectKey{SourceIP: att.IP})
+			require.True(t, found)
+			require.Equal(t, subj, owner)
+			_, found = reg.Resolve(subject.SubjectKey{SourceIP: netip.MustParseAddr(testIP)})
+			require.False(t, found)
+			require.Nil(t, transitionCurrentToken(srv, subj))
+		})
+	}
+}
+
+func TestTransitionNullOmissionCannotFallbackFromInvalidExpectedNetwork(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
+	subj := setBindingAndReady(t, srv, reg, testUID, testIP, vaultAllowPolicy())
+	fence, _ := reg.Fence(subj)
+	// Defensive inconsistent token: even a matching registered fence and known
+	// attachment cannot substitute for this intent's missing attempted network.
+	token := &subjectRebind{expectedNew: fence}
+	srv.rebinds[subj] = token
+	before := len(nft.denyFirst)
+	require.Equal(t, http.StatusBadRequest, doAction(t, srv, omittedNullBinding(t, testFenceR, testFenceA)).Code)
+	require.Same(t, token, transitionCurrentToken(srv, subj))
+	require.Len(t, nft.denyFirst, before)
+	require.Empty(t, nft.removed)
+}
+
+func TestTransitionInitialNullOmissionRemainsReplayable(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	for i := 0; i < 2; i++ {
+		require.Equal(t, http.StatusOK, doAction(t, srv, omittedNullBinding(t, testFenceR, testFenceA)).Code)
+	}
 }

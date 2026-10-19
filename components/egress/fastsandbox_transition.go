@@ -18,6 +18,7 @@ import (
 	"context"
 
 	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
@@ -77,8 +78,26 @@ func (s *fastSandboxPolicyServer) finishRebind(subj subject.Subject, token *subj
 		return
 	}
 	s.mu.Lock()
-	if s.rebinds[subj] == token {
+	cleared := s.rebinds[subj] == token
+	if cleared {
 		delete(s.rebinds, subj)
 	}
 	s.mu.Unlock()
+	if cleared {
+		log.Infof("subject_rebind_cleared")
+	}
+}
+
+// logPendingRebind runs once at the end of an attempted SET/REMOVE, never on
+// polling Vault/HOOK reads. Fixed events contain no identity or request data.
+func (s *fastSandboxPolicyServer) logPendingRebind(subj subject.Subject, token *subjectRebind) {
+	if token == nil {
+		return
+	}
+	s.mu.Lock()
+	pending := s.rebinds[subj] == token
+	s.mu.Unlock()
+	if pending {
+		log.Warnf("subject_rebind_pending")
+	}
 }

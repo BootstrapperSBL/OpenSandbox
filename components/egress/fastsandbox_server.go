@@ -528,8 +528,12 @@ func (s *fastSandboxPolicyServer) takeoverStaleSubject(stale subject.Subject) er
 func (s *fastSandboxPolicyServer) dropSubjectState(subj subject.Subject) {
 	s.mu.Lock()
 	s.dropSubjectStateLocked(subj)
+	cleared := s.rebinds[subj] != nil
 	delete(s.rebinds, subj)
 	s.mu.Unlock()
+	if cleared {
+		log.Infof("subject_rebind_cleared")
+	}
 }
 
 // dropSubjectStateLocked preserves an in-flight rebind token. Superseding
