@@ -34,4 +34,3 @@ export interface DiagnosticContent {
   expiresAt?: Date;
   warnings?: string[];
 }
-

@@ -99,4 +99,3 @@ test("context preserves API errors", async () => {
     } finally { await manager.close(); }
   }
 });
-

@@ -53,4 +53,3 @@ public class DiagnosticContent
     /// <summary>Gets or sets warnings about diagnostic completeness.</summary>
     public List<string>? Warnings { get; set; }
 }
-

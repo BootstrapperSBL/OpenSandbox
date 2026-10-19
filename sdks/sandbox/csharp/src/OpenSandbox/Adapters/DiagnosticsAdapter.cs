@@ -37,4 +37,3 @@ internal sealed class DiagnosticsAdapter(HttpClientWrapper client) : IDiagnostic
             new Dictionary<string, string?> { ["scope"] = scope },
             cancellationToken);
 }
-

@@ -26,4 +26,3 @@ export function createDiagnosticClient(opts: CreateLifecycleClientOptions): Diag
     (createClient as unknown as { default?: typeof createClient }).default ?? createClient;
   return createClientFn<paths>({ baseUrl: opts.baseUrl, headers, fetch: opts.fetch });
 }
-

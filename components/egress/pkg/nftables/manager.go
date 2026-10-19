@@ -15,11 +15,14 @@
 package nftables
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
@@ -43,10 +46,13 @@ const (
 type runner func(ctx context.Context, script string) ([]byte, error)
 
 type Options struct {
-	BlockDoT       bool
-	BlockDoH443    bool
-	DoHBlocklistV4 []string
-	DoHBlocklistV6 []string
+	// QuiesceOnApplyFailure freezes runtime writes on an unknown static effect.
+	// Explicit Quiesce calls always take effect, regardless of this option.
+	QuiesceOnApplyFailure bool
+	BlockDoT              bool
+	BlockDoH443           bool
+	DoHBlocklistV4        []string
+	DoHBlocklistV6        []string
 	// ConnectionRefreshInterval controls how often active TCP connections renew
 	// DNS-derived nft leases. Shorter intervals reduce the maximum temporary
 	// reconnect gap, but increase /proc scans and nft updates. The 30-second
@@ -64,6 +70,7 @@ type Manager struct {
 	run          runner
 	opts         Options
 	mu           sync.Mutex
+	quiesced     atomic.Bool
 	tracker      *connectionTracker
 	domainPolicy *policy.NetworkPolicy
 	domains      map[string]*resolvedDomain
@@ -94,17 +101,23 @@ func newManager(r runner, opts Options) *Manager {
 }
 
 func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.quiesced.Load() {
+		return &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
+	}
+	if err := ctx.Err(); err != nil {
+		return &ApplyError{Effect: ApplyUnchanged, Err: err}
+	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
 	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
 	log.Infof("nftables: applying static policy: default=%s, allow_v4=%d, allow_v6=%d, deny_v4=%d, deny_v6=%d",
 		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6))
-	m.mu.Lock()
-	defer m.mu.Unlock()
 	script, err := buildRuleset(p, m.opts)
 	if err != nil {
-		return err
+		return &ApplyError{Effect: ApplyUnchanged, Err: err}
 	}
 	if _, err := m.run(ctx, script); err != nil {
 		if isMissingTableError(err) {
@@ -117,8 +130,19 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 					telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 					telemetry.RecordNftablesUpdate()
 					return nil
+				} else {
+					effect := ApplyUnknown
+					if ApplyEffectOf(err) == ApplyUnchanged && ApplyEffectOf(retryErr) == ApplyUnchanged {
+						effect = ApplyUnchanged
+					}
+					err = &ApplyError{Effect: effect, Err: fmt.Errorf("nft missing-table fallback failed: %w", errors.Join(err, retryErr))}
 				}
 			}
+		}
+		// Keep the failure and freeze in the same critical section so queued
+		// writers cannot publish old permits before the owner receives it.
+		if m.opts.QuiesceOnApplyFailure && ApplyEffectOf(err) != ApplyUnchanged {
+			m.quiesced.Store(true)
 		}
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
 		return err
@@ -133,15 +157,17 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 }
 
 func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
-	if len(ips) == 0 {
-		return nil
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.quiesced.Load() {
+		return ErrQuiesced
+	}
 	return m.addResolvedIPsLocked(ctx, ips)
 }
 
+// addResolvedIPsLocked completes an admitted operation. The caller must hold
+// m.mu and have checked admission before changing any associated state. Do not
+// recheck here: Quiesce may close admission while that operation is draining.
 func (m *Manager) addResolvedIPsLocked(ctx context.Context, ips []ResolvedIP) error {
 	script := buildAddResolvedIPsScript(tableName, ips)
 	if script == "" {
@@ -176,6 +202,7 @@ func (m *Manager) StartConnectionRefresh(ctx context.Context) {
 }
 
 // RemoveEnforcement drops inet opensandbox; missing table is not an error.
+// Shutdown may remove the table even when quiesced, but never unfreezes writes.
 func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -287,8 +314,13 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 			}
 		}
 	}
+	portDeny, portAllow := p.PortScopedRules()
+	// Port-scoped deny before every allow; port-scoped allow after the
+	// plain deny set, before the dynamic/plain allow sets.
+	writePortScopedRules(&b, portDeny, "drop")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s drop\n", tableName, chainName, denyV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s drop\n", tableName, chainName, denyV6Set)
+	writePortScopedRules(&b, portAllow, "accept")
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, dynAllowV4Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s accept\n", tableName, chainName, dynAllowV6Set)
 	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s accept\n", tableName, chainName, allowV4Set)
@@ -307,14 +339,53 @@ func writeElements(b *strings.Builder, setName string, elems []string) {
 	fmt.Fprintf(b, "add element inet %s %s { %s }\n", tableName, setName, strings.Join(elems, ", "))
 }
 
+// writePortScopedRules emits one "add rule" line per rule, preserving
+// declaration order. A rule with no Target applies to all destinations
+// (bare "tcp dport { ... }" covers both address families); the dport set
+// mixes ports and lo-hi intervals. TCP only.
+func writePortScopedRules(b *strings.Builder, rules []policy.PortScopedRule, verb string) {
+	for _, r := range rules {
+		members := make([]string, 0, len(r.Ports)+len(r.Ranges))
+		for _, port := range r.Ports {
+			members = append(members, fmt.Sprintf("%d", port))
+		}
+		for _, rg := range r.Ranges {
+			members = append(members, fmt.Sprintf("%d-%d", rg.Lo, rg.Hi))
+		}
+		portsClause := strings.Join(members, ", ")
+		if r.Target == "" {
+			fmt.Fprintf(b, "add rule inet %s %s tcp dport { %s } %s\n", tableName, chainName, portsClause, verb)
+			continue
+		}
+		daddr := "ip daddr"
+		if r.IsV6 {
+			daddr = "ip6 daddr"
+		}
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } %s\n", tableName, chainName, daddr, r.Target, portsClause, verb)
+	}
+}
+
 func defaultRunner(ctx context.Context, script string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "nft", "-f", "-")
 	cmd.Stdin = strings.NewReader(script)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return output, fmt.Errorf("nft apply failed: %w (output: %s)", err, strings.TrimSpace(string(output)))
+	return runNftCommand(ctx, cmd)
+}
+
+func runNftCommand(ctx context.Context, cmd *exec.Cmd) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, &ApplyError{Effect: ApplyUnchanged, Err: err}
 	}
-	return output, nil
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Start(); err != nil {
+		return output.Bytes(), &ApplyError{Effect: ApplyUnchanged, Err: fmt.Errorf("nft start failed: %w (output: %s)", err, strings.TrimSpace(output.String()))}
+	}
+	// A nonzero exit or diagnostic text cannot prove that no kernel operation
+	// ran. Wait also reports cancellation, signals and I/O-copy failures.
+	if err := cmd.Wait(); err != nil {
+		return output.Bytes(), &ApplyError{Effect: ApplyUnknown, Err: fmt.Errorf("nft apply failed: %w (output: %s)", err, strings.TrimSpace(output.String()))}
+	}
+	return output.Bytes(), nil
 }
 
 func isMissingTableError(err error) bool {

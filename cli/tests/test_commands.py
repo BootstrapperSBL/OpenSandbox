@@ -46,6 +46,7 @@ from opensandbox.models.templates import (
     TemplateStatus,
 )
 
+from opensandbox_cli.config import load_config_file
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
 
@@ -138,6 +139,19 @@ class TestConfigShow:
         assert data["config_path"].endswith(".opensandbox/config.toml")
         assert "config_file_exists" in data
 
+    def test_show_masks_numeric_api_key_from_file(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\napi_key = 1234567890\n")
+        result = runner.invoke(
+            cli, ["--config", str(cfg_path), "config", "show", "-o", "json"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        # A numeric-looking key is still a string, so it is masked and not dropped.
+        assert data["api_key"] == "12******90"
+
     def test_show_table_output(self, runner: CliRunner) -> None:
         result = runner.invoke(cli, ["--api-key", "test-key", "config", "show"])
         assert result.exit_code == 0
@@ -183,6 +197,144 @@ class TestConfigSet:
         )
         assert result.exit_code != 0
         assert "Run 'osb config init' first." in result.output
+
+    def test_set_escapes_special_characters(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", 'a"b\\c'],
+        )
+
+        assert result.exit_code == 0
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["domain"] == 'a"b\\c'
+
+    def test_set_preserves_comments_and_unrelated_sections(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            "# top comment\n"
+            "[connection]\n"
+            "# keep this note\n"
+            'api_key = "k"\n\n'
+            "[output]\n"
+            "color = true\n"
+        )
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code == 0
+        text = cfg_path.read_text()
+        assert "# top comment" in text
+        assert "# keep this note" in text
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["api_key"] == "k"
+        assert parsed["connection"]["domain"] == "team.host"
+        assert parsed["output"]["color"] is True
+
+    def test_set_creates_missing_section(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "defaults.image", "python:3.12"],
+        )
+
+        assert result.exit_code == 0
+        parsed = load_config_file(cfg_path)
+        assert parsed["defaults"]["image"] == "python:3.12"
+
+    def test_set_infers_scalar_types(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.request_timeout", "45"],
+        )
+        runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.use_server_proxy", "true"],
+        )
+
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["request_timeout"] == 45
+        assert parsed["connection"]["use_server_proxy"] is True
+
+    def test_set_reports_invalid_existing_toml(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection\nbroken =")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code != 0
+        assert "not valid TOML" in result.output
+
+    def test_set_rejects_nested_key(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text("[connection]\n")
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.retry.count", "3"],
+        )
+
+        assert result.exit_code != 0
+        assert "section.field" in result.output
+        # The value must not be silently misfiled as a quoted literal key.
+        assert load_config_file(cfg_path) == {"connection": {}}
+
+    def test_set_handles_out_of_order_tables(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            "[connection]\n"
+            'domain = "old"\n\n'
+            "[output]\n"
+            "color = true\n\n"
+            "[connection.retry]\n"
+            "count = 3\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code == 0
+        parsed = load_config_file(cfg_path)
+        assert parsed["connection"]["domain"] == "team.host"
+        assert parsed["connection"]["retry"]["count"] == 3
+        assert parsed["output"]["color"] is True
+
+    def test_set_preserves_non_ascii_config(self, runner: CliRunner, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.toml"
+        cfg_path.write_text(
+            "# café comment\n[connection]\ndomain = \"old\"\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(cfg_path), "config", "set", "connection.domain", "team.host"],
+        )
+
+        assert result.exit_code == 0
+        # Reads and writes must stay UTF-8 regardless of the platform locale.
+        assert "café comment" in cfg_path.read_text(encoding="utf-8")
+        assert load_config_file(cfg_path)["connection"]["domain"] == "team.host"
 
 
 # Sandbox commands
@@ -1145,8 +1297,8 @@ class TestSandboxKill:
         assert mock_mgr.kill_sandbox.call_count == 2
         data = json.loads(result.output)
         assert data == [
-            {"sandbox_id": "id1", "status": "terminated"},
-            {"sandbox_id": "id2", "status": "terminated"},
+            {"sandbox_id": "id1", "status": "deletion_requested"},
+            {"sandbox_id": "id2", "status": "deletion_requested"},
         ]
 
 

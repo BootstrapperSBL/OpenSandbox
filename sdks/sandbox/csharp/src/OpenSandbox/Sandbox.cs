@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+using OpenSandbox.Adapters;
 using OpenSandbox.Config;
 using OpenSandbox.Core;
 using OpenSandbox.Factory;
@@ -82,15 +83,28 @@ public sealed class Sandbox : IAsyncDisposable
     /// <summary>
     /// Gets the sandbox-scoped Credential Vault service.
     /// </summary>
-    /// <exception cref="SandboxException">Thrown for template-backed sandboxes: they have no sandbox-side egress sidecar.</exception>
+    /// <remarks>
+    /// Direct sidecar sandboxes write straight to the sandbox egress sidecar.
+    /// Template-backed sandboxes route through the lifecycle control plane
+    /// (OSEP-0022): the server relays vault revisions to the egress-held vault
+    /// over the FastPath handler relay, so the ack is synchronous and values
+    /// never appear on any read. A 412 patch failure means another writer won
+    /// the revision — re-read and retry with the fresh <c>ExpectedRevision</c>.
+    /// </remarks>
+    /// <exception cref="SandboxException">
+    /// Thrown for a template-backed sandbox whose adapter factory did not
+    /// provide a Credential Vault service. For direct sidecar sandboxes the
+    /// unavailable marker is returned instead and each operation throws
+    /// <see cref="InvalidArgumentException"/> when invoked.
+    /// </exception>
     public ICredentialVault CredentialVault
     {
         get
         {
-            if (Origin == SandboxOrigin.Template)
+            if (Origin == SandboxOrigin.Template && _credentialVault is UnavailableCredentialVault)
             {
                 throw new SandboxException(
-                    "Credential Vault is not available for template-backed sandboxes: they have no sandbox-side egress sidecar.");
+                    "Credential Vault is not available: the adapter factory did not provide a Credential Vault service. Provide NetworkPolicyStack.CredentialVault (the server-routed vault for template-backed sandboxes) or EgressStack.CredentialVault in the adapter factory.");
             }
 
             return _credentialVault;
@@ -195,8 +209,14 @@ public sealed class Sandbox : IAsyncDisposable
         {
             throw new InvalidArgumentException("Entrypoint must be omitted when SnapshotId is provided.");
         }
+        options.Lifecycle?.IdlePolicy?.Validate();
         ValidateHostPaths(options.Volumes);
         var startupSource = options.Image ?? options.SnapshotId;
+
+        if (options.NetworkPolicy?.Egress is { Count: > 0 })
+        {
+            NetworkPolicyCodec.ValidateRules(options.NetworkPolicy.Egress, nameof(options.NetworkPolicy.Egress));
+        }
 
         var request = new CreateSandboxRequest
         {
@@ -250,11 +270,12 @@ public sealed class Sandbox : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// Template mode fixes the workload shape on the server: the entrypoint,
-    /// env, resources, volumes, platform and lifecycle of the sandbox come
-    /// from the template's golden image and cannot be overridden here. Only
-    /// metadata, network policy and extensions may accompany the template id,
-    /// and the timeout is required. The created sandbox routes egress policy
-    /// operations through the lifecycle control plane.
+    /// env, resources, volumes, platform and lifecycle hooks of the sandbox
+    /// come from the template's golden image and cannot be overridden here.
+    /// Only metadata, network policy, extensions and the OSEP-0024 idle policy
+    /// (control-plane state, not workload shape) may accompany the template
+    /// id, and the timeout is required. The created sandbox routes egress
+    /// policy operations through the lifecycle control plane.
     /// </remarks>
     /// <param name="options">The template creation options.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -271,8 +292,14 @@ public sealed class Sandbox : IAsyncDisposable
         {
             throw new InvalidArgumentException("TemplateId must be specified.");
         }
+        options.IdlePolicy?.Validate();
 
         var connectionConfig = options.ConnectionConfig ?? new ConnectionConfig();
+        if (options.NetworkPolicy?.Egress is { Count: > 0 })
+        {
+            NetworkPolicyCodec.ValidateRules(options.NetworkPolicy.Egress, nameof(options.NetworkPolicy.Egress));
+        }
+
         var request = new CreateSandboxRequest
         {
             TemplateId = options.TemplateId,
@@ -285,7 +312,10 @@ public sealed class Sandbox : IAsyncDisposable
                     Egress = options.NetworkPolicy.Egress
                 }
                 : null,
-            Extensions = options.Extensions?.ToDictionary(kv => kv.Key, kv => (object)kv.Value)
+            Extensions = options.Extensions?.ToDictionary(kv => kv.Key, kv => (object)kv.Value),
+            Lifecycle = options.IdlePolicy != null
+                ? new SandboxLifecycle { IdlePolicy = options.IdlePolicy }
+                : null
         };
 
         return await LaunchAsync(
@@ -405,14 +435,16 @@ public sealed class Sandbox : IAsyncDisposable
                 logger.LogInformation(
                     "Sandbox {SandboxId} is template-backed; routing egress policy through the lifecycle control plane",
                     sandboxId);
-                egress = factory.CreateNetworkPolicyStack(new CreateNetworkPolicyStackOptions
+                var policyStack = factory.CreateNetworkPolicyStack(new CreateNetworkPolicyStackOptions
                 {
                     ConnectionConfig = connectionConfig,
                     LifecycleBaseUrl = lifecycleBaseUrl,
                     SandboxId = sandboxId,
                     HttpClientProvider = httpClientProvider,
                     LoggerFactory = loggerFactory
-                }).Egress;
+                });
+                egress = policyStack.Egress;
+                credentialVault = policyStack.CredentialVault;
             }
             else
             {
@@ -580,15 +612,16 @@ public sealed class Sandbox : IAsyncDisposable
                 logger.LogInformation(
                     "Sandbox {SandboxId} is template-backed; routing egress policy through the lifecycle control plane",
                     options.SandboxId);
-                egress = adapterFactory.CreateNetworkPolicyStack(new CreateNetworkPolicyStackOptions
+                var policyStack = adapterFactory.CreateNetworkPolicyStack(new CreateNetworkPolicyStackOptions
                 {
                     ConnectionConfig = connectionConfig,
                     LifecycleBaseUrl = lifecycleBaseUrl,
                     SandboxId = options.SandboxId,
                     HttpClientProvider = httpClientProvider,
                     LoggerFactory = loggerFactory
-                }).Egress;
-                credentialVault = null;
+                });
+                egress = policyStack.Egress;
+                credentialVault = policyStack.CredentialVault;
             }
             else
             {
@@ -795,7 +828,8 @@ public sealed class Sandbox : IAsyncDisposable
     }
 
     /// <summary>
-    /// Terminates the sandbox.
+    /// Requests irreversible sandbox termination.
+    /// Completes when deletion is accepted; runtime cleanup may continue afterward.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <exception cref="SandboxApiException">Thrown when the sandbox API returns an error.</exception>

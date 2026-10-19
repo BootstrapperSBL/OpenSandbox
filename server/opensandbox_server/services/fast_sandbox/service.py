@@ -27,9 +27,11 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Optional
 
 from fastapi import HTTPException
+from kubernetes.client import ApiException
 from starlette import status
 
 from opensandbox_server.api.schema import (
@@ -47,7 +49,17 @@ from opensandbox_server.api.schema import (
     SandboxStatus,
 )
 from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
+from opensandbox_server.extensions.keys import IDLE_POLICY_ANNOTATION_KEY
+from opensandbox_server.integrations.idle_pause.constants import DEFAULT_PROBE_TIMEOUT_SECONDS
+from opensandbox_server.integrations.idle_pause.policy import (
+    ActivityProbe as IdlePauseActivityProbe,
+)
+from opensandbox_server.integrations.idle_pause.policy import (
+    idle_policy_to_annotation,
+    validate_idle_policy,
+)
 from opensandbox_server.middleware.request_id import get_request_id
+from opensandbox_server.services.activity_recorder import ActivityRecorder
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
     DiagnosticContext,
@@ -71,7 +83,12 @@ from opensandbox_server.services.fast_sandbox.fastpath_client import (
     FastPathUnavailable,
 )
 from opensandbox_server.services.fast_sandbox.endpoint import build_endpoint
-from opensandbox_server.services.fast_sandbox.cr_reader import SandboxCRReader
+from opensandbox_server.services.fast_sandbox.cr_reader import (
+    GROUP,
+    PLURAL,
+    VERSION,
+    SandboxCRReader,
+)
 from opensandbox_server.services.fast_sandbox.cr_mapping import sandbox_from_cr
 from opensandbox_server.services.fast_sandbox.network_policy import (
     delete_policy_rules,
@@ -79,6 +96,7 @@ from opensandbox_server.services.fast_sandbox.network_policy import (
     normalized_policy,
     policy_status,
 )
+from opensandbox_server.services.fast_sandbox import vault as vault_relay
 from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -91,6 +109,10 @@ from opensandbox_server.services.validators import (
 )
 
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
+
+# Fixed shard count for the per-process vault PATCH locks (bounded memory;
+# see FastSandboxService.__init__).
+_VAULT_LOCK_SHARDS = 64
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +136,119 @@ class FastSandboxService(SandboxService, ExtensionService):
             timeout_seconds=self._k8s.fastpath_timeout_seconds,
         )
         self._tenant_provider = None  # type: ignore[assignment]
+        self._k8s_client = k8s_client
+        self._k8s_client_lock = Lock()
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
         self._template_service = template_service
+        self._activity_recorder: Optional[ActivityRecorder] = None
+        # Fixed-size shard locks serialize the server-side vault PATCH
+        # (relay GET -> merge -> relay PUT) within this process. A fixed map
+        # keeps memory bounded: fsb sandboxes mostly expire through FastPath
+        # instead of going through delete_sandbox, so per-sandbox entries
+        # would leak for the process lifetime. Shard collisions only widen
+        # the serialization scope; the revision precondition inside the
+        # merged PUT stays the cross-replica backstop either way.
+        self._vault_locks = [Lock() for _ in range(_VAULT_LOCK_SHARDS)]
+
+    def vault_lock(self, sandbox_id: str) -> Lock:
+        """Return the process-local PATCH shard lock for one sandbox."""
+        return self._vault_locks[hash(sandbox_id) % _VAULT_LOCK_SHARDS]
+
+    @property
+    def cr_reader(self) -> SandboxCRReader:
+        """Informer-cached Sandbox CR reader, for background integrations."""
+        return self._cr_reader
+
+    @property
+    def fastpath_client(self) -> FastPathClient:
+        """Shared FastPath gRPC client, for background integrations."""
+        return self._fastpath
+
+    def set_activity_recorder(self, recorder: Optional[ActivityRecorder]) -> None:
+        """Inject the OSEP-0024 activity recorder (None disables the writes)."""
+        self._activity_recorder = recorder
+
+    def _record_activity(self, sandbox_id: str) -> None:
+        """Restart the idle clock after a lifecycle transition (fire-and-forget)."""
+        if self._activity_recorder is not None:
+            self._activity_recorder.record(sandbox_id)
+
+    def _validated_idle_policy_annotation(
+        self, request: CreateSandboxRequest
+    ) -> Optional[str]:
+        """Validate the declared policy (deployment bounds included) and
+        return the annotation value, or None. Raises 400 before any create
+        side effect; the TTL bound needs config, so it lives here."""
+        lifecycle = request.lifecycle
+        if lifecycle is None or lifecycle.idle_policy is None:
+            return None
+        policy = lifecycle.idle_policy
+        probe = policy.active_probe
+        try:
+            validated = validate_idle_policy(
+                idle_timeout_seconds=policy.idle_timeout_seconds,
+                on_idle=policy.on_idle,
+                wake_on_access=policy.wake_on_access,
+                active_probe=(
+                    None
+                    if probe is None
+                    else IdlePauseActivityProbe(
+                        port=probe.port,
+                        path=probe.path,
+                        timeout_seconds=(
+                            probe.timeout_seconds
+                            if probe.timeout_seconds is not None
+                            else DEFAULT_PROBE_TIMEOUT_SECONDS
+                        ),
+                    )
+                ),
+                activity_ttl_seconds=self._app_config.automation.idle_pause.activity_ttl_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SandboxErrorCodes.INVALID_PARAMETER,
+                    "message": str(exc),
+                },
+            ) from exc
+        return idle_policy_to_annotation(validated)
+
+    def _persist_idle_policy_annotation(
+        self, namespace: str, sandbox_id: str, annotation: str
+    ) -> None:
+        """Best-effort CR annotation write: a failed write leaves the sandbox
+        unpolicied (never auto-paused or auto-woken), so the create itself
+        must not fail after its side effects exist."""
+        try:
+            self._kubernetes_client().patch_custom_object(
+                GROUP,
+                VERSION,
+                namespace,
+                PLURAL,
+                sandbox_id,
+                body={"metadata": {"annotations": {IDLE_POLICY_ANNOTATION_KEY: annotation}}},
+            )
+        except ApiException as exc:
+            logger.warning(
+                f"idle_pause policy annotation write failed sandbox_id={sandbox_id} "
+                f"namespace={namespace} status={exc.status}; sandbox stays unpolicied"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"idle_pause policy annotation write failed sandbox_id={sandbox_id} "
+                f"namespace={namespace} error={exc}; sandbox stays unpolicied"
+            )
+        else:
+            self._cr_reader.invalidate(namespace)
+
+    def _kubernetes_client(self) -> K8sClient:
+        # create_sandbox runs in worker threads; lazy init must not race
+        # (K8sClient._load_config mutates process-global config).
+        with self._k8s_client_lock:
+            if self._k8s_client is None:
+                self._k8s_client = K8sClient(self._k8s)
+            return self._k8s_client
 
     def close(self) -> None:
         self._cr_reader.close()
@@ -223,6 +356,8 @@ class FastSandboxService(SandboxService, ExtensionService):
     def _create_sandbox_sync(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         if request.network_policy is not None:
             self._reject_network_policy_with_upstream_proxy()
+        # Validate the opt-in before any side effect.
+        idle_policy_annotation = self._validated_idle_policy_annotation(request)
         created_at = datetime.now(timezone.utc)
         # Template mode: the resolved artifact reference becomes
         # the FastPath image; workload shape comes from the golden image.
@@ -310,6 +445,12 @@ class FastSandboxService(SandboxService, ExtensionService):
             info = response.sandbox
         finally:
             self._cr_reader.invalidate(namespace)
+
+        # Durable intent exists (accepted or recovery-confirmed): restart the
+        # idle clock from this transition (OSEP-0024).
+        self._record_activity(sandbox_id)
+        if idle_policy_annotation is not None:
+            self._persist_idle_policy_annotation(namespace, sandbox_id, idle_policy_annotation)
 
         return self._build_create_response(
             request,
@@ -420,6 +561,10 @@ class FastSandboxService(SandboxService, ExtensionService):
             )
         except FastPathError as exc:
             raise self._fastpath_http_error(exc) from exc
+        else:
+            # The idle clock restarts from the resume transition (OSEP-0024):
+            # a stale key or aged tombstone must not cause an immediate pause.
+            self._record_activity(sandbox_id)
         finally:
             self._cr_reader.invalidate(namespace)
 
@@ -549,6 +694,36 @@ class FastSandboxService(SandboxService, ExtensionService):
             scope=scope,
             content=content,
         )
+
+    # -- credential vault (relay; OSEP-0022) -------------------------------
+
+    def create_credential_vault(self, sandbox_id: str, request) -> dict:
+        """Relay POST create-only; the relay response is the sync ack."""
+        return vault_relay.relay_create(self, sandbox_id, request)
+
+    def get_credential_vault(self, sandbox_id: str) -> dict:
+        """Sanitized vault state — values never leave the server."""
+        return vault_relay.relay_get(self, sandbox_id)
+
+    def patch_credential_vault(self, sandbox_id: str, request) -> dict:
+        """Server-side merge commit: relay GET → merge → relay PUT."""
+        return vault_relay.relay_patch(self, sandbox_id, request)
+
+    def delete_credential_vault(self, sandbox_id: str) -> None:
+        """Relay DELETE; the policy is kept."""
+        vault_relay.relay_delete(self, sandbox_id)
+
+    def list_credential_vault_credentials(self, sandbox_id: str) -> dict:
+        return vault_relay.relay_list_credentials(self, sandbox_id)
+
+    def get_credential_vault_credential(self, sandbox_id: str, name: str) -> dict:
+        return vault_relay.relay_get_credential(self, sandbox_id, name)
+
+    def list_credential_vault_bindings(self, sandbox_id: str) -> dict:
+        return vault_relay.relay_list_bindings(self, sandbox_id)
+
+    def get_credential_vault_binding(self, sandbox_id: str, name: str) -> dict:
+        return vault_relay.relay_get_binding(self, sandbox_id, name)
 
     # -- endpoints ---------------------------------------------------------
 

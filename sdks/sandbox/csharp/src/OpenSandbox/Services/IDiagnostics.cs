@@ -26,4 +26,3 @@ public interface IDiagnostics
     /// <summary>Gets a scoped event descriptor.</summary>
     Task<DiagnosticContent> GetEventsAsync(string sandboxId, string scope, CancellationToken cancellationToken = default);
 }
-

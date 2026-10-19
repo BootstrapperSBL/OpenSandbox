@@ -113,6 +113,7 @@ export class DefaultAdapterFactory implements AdapterFactory {
     const files = new FilesystemAdapter(execdClient, {
       baseUrl: opts.execdBaseUrl,
       fetch: opts.connectionConfig.fetch,
+      uploadFetch: opts.connectionConfig.uploadFetch,
       headers,
     });
     const commands = new CommandsAdapter(execdClient, {
@@ -125,6 +126,7 @@ export class DefaultAdapterFactory implements AdapterFactory {
       baseUrl: opts.execdBaseUrl,
       fetch: opts.connectionConfig.fetch,
       sseFetch: opts.connectionConfig.sseFetch,
+      uploadFetch: opts.connectionConfig.uploadFetch,
       headers,
     });
 
@@ -167,8 +169,10 @@ export class DefaultAdapterFactory implements AdapterFactory {
       headers: opts.connectionConfig.headers,
       fetch: opts.connectionConfig.fetch,
     });
+    const networkPolicy = new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId);
     return {
-      egress: new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId),
+      egress: networkPolicy,
+      credentialVault: networkPolicy,
     };
   }
 }

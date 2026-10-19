@@ -221,10 +221,8 @@ class SandboxPoolAsync:
                     self._run_heartbeat(stop_event, self._run_generation),
                     name=f"sandbox-pool-heartbeat-{self._config.pool_name}",
                 )
-            except Exception:
-                await self._stop_reconcile(wait_for_warmup=True)
-                await self._close_provider()
-                self._lifecycle_state = PoolLifecycleState.STOPPED
+            except (Exception, asyncio.CancelledError):
+                await self._cleanup_failed_start()
                 raise
 
     async def acquire(
@@ -1150,7 +1148,8 @@ class SandboxPoolAsync:
 
     def _connection_for_warmup_create(self) -> ConnectionConfig:
         if self._pool_transport_owner is None:
-            return self._pool_connection_config or self._connection_config
+            base = self._pool_connection_config or self._connection_config
+            return base.model_copy(update={"disable_metrics": True})
         # Match the Kotlin staged-warmup ownership model: temporary warmup
         # sandboxes get their own transports, while manager/acquire resources
         # use the pool-wide shared transport. Thousands of unique endpoint
@@ -1159,6 +1158,7 @@ class SandboxPoolAsync:
             update={
                 "transport": None,
                 "retry_policy": RetryPolicy.disabled(),
+                "disable_metrics": True,
             }
         )
         config._owns_transport = True
@@ -1346,6 +1346,32 @@ class SandboxPoolAsync:
             logger.warning(
                 f"Async pool primary lock release failed: pool_name={self._config.pool_name} owner_id={self._config.owner_id} error={exc}"
             )
+
+    async def _cleanup_failed_start(self) -> None:
+        async def cleanup() -> None:
+            try:
+                await self._stop_reconcile(wait_for_warmup=True)
+                await self._close_provider()
+            finally:
+                self._lifecycle_state = PoolLifecycleState.STOPPED
+
+        # Keep the lifecycle lock until cleanup finishes, even if the caller
+        # cancels again while closing startup-owned resources.
+        task = asyncio.create_task(cleanup())
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    cancellation = cancellation or exc
+            await task
+        except Exception as exc:
+            if cancellation is not None:
+                raise cancellation from exc
+            raise
+        if cancellation is not None:
+            raise cancellation
 
     async def _close_provider(self) -> None:
         if self._sandbox_manager is not None:

@@ -57,4 +57,3 @@ export function requireDiagnostics(service: Diagnostics | undefined): Diagnostic
   if (!service) throw new Error("The adapter factory does not provide diagnostics");
   return service;
 }
-

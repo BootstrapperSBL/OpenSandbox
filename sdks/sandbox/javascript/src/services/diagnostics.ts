@@ -19,4 +19,3 @@ export interface Diagnostics {
   getLogs(sandboxId: string, scope: string): Promise<DiagnosticContent>;
   getEvents(sandboxId: string, scope: string): Promise<DiagnosticContent>;
 }
-
