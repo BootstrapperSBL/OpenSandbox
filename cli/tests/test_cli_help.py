@@ -134,6 +134,12 @@ class TestDevopsHelp:
 
 
 class TestDiagnosticsHelp:
+    def test_context_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["diagnostics", "context", "--help"])
+        assert result.exit_code == 0
+        assert "SANDBOX_ID" in result.output
+        assert "--output" in result.output
+
     def test_diagnostics_help_documents_scopes(self, runner: CliRunner) -> None:
         logs = runner.invoke(cli, ["diagnostics", "logs", "--help"])
         events = runner.invoke(cli, ["diagnostics", "events", "--help"])

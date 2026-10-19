@@ -29,6 +29,7 @@ from fastapi import HTTPException, status
 
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     limit_diagnostic_lines,
     unsupported_scope_error,
@@ -58,6 +59,16 @@ def _parse_since_to_timestamp(since: str) -> int:
 
 class DockerDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Docker backend."""
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        container = self._get_container_by_sandbox_id(sandbox_id)
+        sandbox = self._container_to_sandbox(container, sandbox_id)
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            state=sandbox.status.state,
+            backend_type="docker",
+            backend_identifiers={"containerId": container.id, "containerName": container.name},
+        )
 
     def get_sandbox_log_diagnostics(
         self,

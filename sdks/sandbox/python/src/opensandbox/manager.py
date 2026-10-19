@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 
 from opensandbox.adapters.factory import AdapterFactory
 from opensandbox.config import ConnectionConfig
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     PagedSandboxInfos,
@@ -166,6 +166,10 @@ class SandboxManager:
         """
         logger.debug(f"Getting info for sandbox: {sandbox_id}")
         return await self._sandbox_service.get_sandbox_info(sandbox_id)
+
+    async def get_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        """Get backend routing context without connecting to execd."""
+        return await self._diagnostics_service.get_context(sandbox_id)
 
     async def get_diagnostic_logs(
         self,

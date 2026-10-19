@@ -112,8 +112,9 @@ for examples, configuration, and namespace retirement.
 Set `enableTracing: true` in `ConnectionConfig` to enable [pool warmup tracing](/sdks/observability#pool-warmup-tracing).
 JavaScript emits phase spans but fewer diagnostic attributes than Python/JVM.
 Create-latency [telemetry](/sdks/observability#creation-metrics) has a separate opt-out setting.
-Remote diagnostic logs/events are available through [CLI or HTTP](/api/#diagnostics),
-not through the JavaScript SDK.
+Use `SandboxManager.getDiagnosticContext(sandboxId)` to identify the runtime
+backend without connecting to execd. Both the manager and sandbox expose
+`getDiagnosticLogs` / `getDiagnosticEvents`; see [SDK diagnostics](/sdks/#diagnostics).
 
 ## Usage Examples
 

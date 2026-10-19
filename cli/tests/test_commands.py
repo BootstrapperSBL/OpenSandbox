@@ -30,7 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from click.testing import CliRunner
 from opensandbox.exceptions import SandboxApiException
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.execd import Execution, ExecutionComplete, ExecutionError
 from opensandbox.models.sandboxes import (
     PagedSnapshotInfos,
@@ -2290,6 +2290,19 @@ class TestDevopsCommands:
 
 
 class TestDiagnosticsCommands:
+    def test_context_prints_structured_backend(self, runner: CliRunner) -> None:
+        manager = MagicMock()
+        manager.get_diagnostic_context.return_value = DiagnosticContext(
+            sandboxId="sb-1", backendType="kubernetes",
+            backendIdentifiers={"namespace": "tenant-ns"}, state="Pending",
+        )
+        result = _invoke(
+            runner, ["diagnostics", "context", "sb-1", "-o", "json"], manager=manager,
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.output)["backend_identifiers"] == {"namespace": "tenant-ns"}
+        manager.get_diagnostic_context.assert_called_once_with("sb-1")
+
     def test_logs_raw_prints_inline_content(self, runner: CliRunner) -> None:
         manager = MagicMock()
         manager.get_diagnostic_logs.return_value = DiagnosticContent(

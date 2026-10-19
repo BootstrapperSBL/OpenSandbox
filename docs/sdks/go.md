@@ -463,8 +463,9 @@ acquire policies, namespace retirement, and per-acquire TTL/health-check overrid
 Go uses `ReconcileInterval` and `WarmupConcurrency`; it does not expose the
 Python/JVM/JavaScript create-QPS, initial-delay, or post-prepare-check settings.
 See [Client Pool](/guides/client-pool) for defaults, examples, and cleanup.
-Go does not currently emit built-in pool warmup traces or expose stable remote
-diagnostics; use [CLI or HTTP diagnostics](/api/#diagnostics).
+Go does not currently emit built-in pool warmup traces.
+Both `SandboxManager` and `Sandbox` expose `GetDiagnosticContext`,
+`GetDiagnosticLogs`, and `GetDiagnosticEvents`; see [SDK diagnostics](/sdks/#diagnostics).
 
 ## Lifecycle Hooks
 

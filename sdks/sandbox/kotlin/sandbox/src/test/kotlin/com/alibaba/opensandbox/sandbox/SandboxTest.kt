@@ -21,6 +21,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentExceptio
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.NetworkRule
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
@@ -111,6 +112,15 @@ class SandboxTest {
                 httpClientProvider = httpClientProvider,
                 diagnosticsService = diagnosticsService,
             )
+    }
+
+    @Test
+    fun `diagnostic context uses diagnostics service`() {
+        val id = sandboxId
+        val expected = mockk<DiagnosticContext>()
+        every { diagnosticsService.getContext(id) } returns expected
+        assertSame(expected, sandbox.getDiagnosticContext())
+        verify { diagnosticsService.getContext(id) }
     }
 
     @Test

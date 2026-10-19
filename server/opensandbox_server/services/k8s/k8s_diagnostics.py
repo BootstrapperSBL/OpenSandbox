@@ -32,11 +32,16 @@ from opensandbox_server.services.constants import (
     SandboxErrorCodes,
 )
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     limit_diagnostic_lines,
     unsupported_scope_error,
 )
-from opensandbox_server.services.k8s.workload_mapper import allocated_pod_names
+from opensandbox_server.services.k8s.workload_access import _get_owned_workload_or_404
+from opensandbox_server.services.k8s.workload_mapper import (
+    _build_sandbox_from_workload,
+    allocated_pod_names,
+)
 
 _SUPPORTED_LOG_SCOPES = ("container", "all")
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
@@ -63,6 +68,28 @@ def _parse_since(since: str) -> int:
 
 class K8sDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Kubernetes backend."""
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        namespace = self._resolve_namespace_for_lookup(sandbox_id)
+        workload = _get_owned_workload_or_404(self.workload_provider, namespace, sandbox_id)
+        sandbox = _build_sandbox_from_workload(workload, self.workload_provider)
+        metadata = workload.get("metadata", {}) if isinstance(workload, dict) else workload.metadata
+        name = metadata.get("name") if isinstance(metadata, dict) else metadata.name
+        uid = metadata.get("uid") if isinstance(metadata, dict) else metadata.uid
+        identifiers = {"namespace": namespace}
+        if name:
+            identifiers["workloadName"] = name
+        if uid:
+            identifiers["workloadUid"] = str(uid)
+        pod_names = allocated_pod_names(workload)
+        if len(pod_names) == 1:
+            identifiers["podName"] = pod_names[0]
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            state=sandbox.status.state,
+            backend_type="kubernetes",
+            backend_identifiers=identifiers,
+        )
 
     def get_sandbox_log_diagnostics(
         self,

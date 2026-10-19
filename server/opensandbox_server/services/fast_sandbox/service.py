@@ -50,6 +50,7 @@ from opensandbox_server.config import AppConfig, KubernetesRuntimeConfig
 from opensandbox_server.middleware.request_id import get_request_id
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     unsupported_scope_error,
 )
@@ -472,6 +473,15 @@ class FastSandboxService(SandboxService, ExtensionService):
         return sandbox_from_cr(self._cr_reader.get(namespace, sandbox_id))
 
     # -- diagnostics -------------------------------------------------------
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        sandbox = self.get_sandbox(sandbox_id)
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            state=sandbox.status.state,
+            backend_type="fast-sandbox",
+            backend_identifiers={},
+        )
 
     def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         raise self._unsupported("sandbox logs", status.HTTP_501_NOT_IMPLEMENTED)

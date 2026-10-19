@@ -116,6 +116,10 @@ public sealed class Sandbox : IAsyncDisposable
     private readonly IEgress _egress;
 
     private readonly ISandboxes _sandboxes;
+    private readonly IDiagnostics? _diagnostics;
+
+    private IDiagnostics Diagnostics => _diagnostics
+        ?? throw new NotSupportedException("The adapter factory does not provide diagnostics.");
     private readonly IAdapterFactory _adapterFactory;
     private readonly string _lifecycleBaseUrl;
     private readonly string _execdBaseUrl;
@@ -143,7 +147,8 @@ public sealed class Sandbox : IAsyncDisposable
         IIsolatedSessions isolated,
         IEgress egress,
         ICredentialVault? credentialVault,
-        string? origin = null)
+        string? origin = null,
+        IDiagnostics? diagnostics = null)
     {
         Id = id;
         ConnectionConfig = connectionConfig;
@@ -154,6 +159,7 @@ public sealed class Sandbox : IAsyncDisposable
         _httpClientProvider = httpClientProvider;
         _logger = _loggerFactory.CreateLogger("OpenSandbox.Sandbox");
         _sandboxes = sandboxes;
+        _diagnostics = diagnostics;
         Commands = commands;
         Files = files;
         Health = health;
@@ -322,6 +328,7 @@ public sealed class Sandbox : IAsyncDisposable
         var httpClientProvider = new HttpClientProvider(connectionConfig, loggerFactory);
 
         ISandboxes sandboxes;
+        IDiagnostics? diagnosticService;
         logger.LogInformation(
             "Creating sandbox (startupSource={StartupSource}, useServerProxy={UseServerProxy})",
             startupSource,
@@ -336,6 +343,7 @@ public sealed class Sandbox : IAsyncDisposable
                 LoggerFactory = loggerFactory
             });
             sandboxes = lifecycleStack.Sandboxes;
+            diagnosticService = lifecycleStack.Diagnostics;
         }
         catch
         {
@@ -444,7 +452,8 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Isolation,
                 egress,
                 credentialVault,
-                effectiveOrigin);
+                effectiveOrigin,
+                diagnosticService);
 
             if (!skipHealthCheck)
             {
@@ -518,6 +527,7 @@ public sealed class Sandbox : IAsyncDisposable
         logger.LogInformation("Connecting to sandbox: {SandboxId}", options.SandboxId);
 
         ISandboxes sandboxes;
+        IDiagnostics? diagnostics;
         try
         {
             var lifecycleStack = adapterFactory.CreateLifecycleStack(new CreateLifecycleStackOptions
@@ -528,6 +538,7 @@ public sealed class Sandbox : IAsyncDisposable
                 LoggerFactory = loggerFactory
             });
             sandboxes = lifecycleStack.Sandboxes;
+            diagnostics = lifecycleStack.Diagnostics;
         }
         catch (Exception ex)
         {
@@ -617,7 +628,8 @@ public sealed class Sandbox : IAsyncDisposable
                 execdStack.Isolation,
                 egress,
                 credentialVault,
-                origin);
+                origin,
+                diagnostics);
 
             if (!options.SkipHealthCheck)
             {
@@ -685,6 +697,18 @@ public sealed class Sandbox : IAsyncDisposable
     {
         return _sandboxes.GetSandboxAsync(Id, cancellationToken);
     }
+
+    /// <summary>Gets this sandbox's backend routing context.</summary>
+    public Task<DiagnosticContext> GetDiagnosticContextAsync(CancellationToken cancellationToken = default) =>
+        Diagnostics.GetContextAsync(Id, cancellationToken);
+
+    /// <summary>Gets this sandbox's scoped diagnostic log descriptor.</summary>
+    public Task<DiagnosticContent> GetDiagnosticLogsAsync(string scope, CancellationToken cancellationToken = default) =>
+        Diagnostics.GetLogsAsync(Id, scope, cancellationToken);
+
+    /// <summary>Gets this sandbox's scoped diagnostic event descriptor.</summary>
+    public Task<DiagnosticContent> GetDiagnosticEventsAsync(string scope, CancellationToken cancellationToken = default) =>
+        Diagnostics.GetEventsAsync(Id, scope, cancellationToken);
 
     /// <summary>
     /// Patches metadata for this sandbox.

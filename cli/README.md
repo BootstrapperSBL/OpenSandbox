@@ -378,9 +378,10 @@ credential values as command-line flags; keep them in the payload stream or file
 
 ### Collect diagnostics
 
-Use the stable diagnostics commands for API-backed log and event descriptors.
+Use context to identify the runtime backend, then collect log and event descriptors.
 
 ```bash
+osb diagnostics context <sandbox-id> -o json
 osb diagnostics events <sandbox-id> --scope runtime -o raw
 osb diagnostics events <sandbox-id> --scope all -o raw
 osb diagnostics logs <sandbox-id> --scope container -o raw
@@ -389,7 +390,9 @@ osb diagnostics events <sandbox-id> --scope runtime -o json
 osb diagnostics logs <sandbox-id> --scope container -o yaml
 ```
 
-`--scope` is required for stable diagnostics. The built-in server supports
+`context` returns backend routing information without connecting to execd and
+supports table, JSON, and YAML output. `--scope` is required for logs/events.
+The built-in server supports
 `container` and `all` for logs, and `runtime` and `all` for events. It returns
 `DIAGNOSTICS_SCOPE_UNSUPPORTED` for unavailable scopes, including lifecycle events.
 Best-effort scopes may include a `warnings` field when the backend can only

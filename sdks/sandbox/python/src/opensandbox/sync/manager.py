@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.sandboxes import (
     CreateSnapshotRequest,
     PagedSandboxInfos,
@@ -149,6 +149,10 @@ class SandboxManagerSync:
         """
         logger.debug(f"Getting info for sandbox: {sandbox_id}")
         return self._sandbox_service.get_sandbox_info(sandbox_id)
+
+    def get_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        """Get backend routing context without connecting to execd."""
+        return self._diagnostics_service.get_context(sandbox_id)
 
     def get_diagnostic_logs(
         self,

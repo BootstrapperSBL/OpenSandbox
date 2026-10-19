@@ -418,7 +418,9 @@ for configuration, examples, cleanup, and namespace retirement.
 
 Set `ConnectionConfig.builder().enableTracing(true)` to emit [pool warmup traces](/sdks/observability#pool-warmup-tracing).
 The JVM SDK also adds trace IDs to SLF4J MDC. For remote logs/events, use
-`SandboxManager.getDiagnosticLogs` / `getDiagnosticEvents`; see [Diagnostics](/api/#diagnostics).
+`SandboxManager.getDiagnosticContext`, `getDiagnosticLogs`, and
+`getDiagnosticEvents`. These methods also exist on `Sandbox`;
+see [SDK diagnostics](/sdks/#diagnostics).
 Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Snapshots and metadata

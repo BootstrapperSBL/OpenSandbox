@@ -108,7 +108,9 @@ configuration, cleanup, and distributed deployment.
 
 Enable `ConnectionConfig(enable_tracing=True)` or
 `ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/sdks/observability#pool-warmup-tracing).
-For remote logs/events, use the [Diagnostics](/api/#diagnostics) manager API.
+For backend context and remote logs/events, use `SandboxManager.get_diagnostic_context`,
+`get_diagnostic_logs`, and `get_diagnostic_events`. These methods also exist on
+`Sandbox`; see [SDK diagnostics](/sdks/#diagnostics).
 Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Lifecycle Hooks

@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxInternalException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxReadyTimeoutException
 import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContent
+import com.alibaba.opensandbox.sandbox.domain.models.diagnostics.DiagnosticContext
 import com.alibaba.opensandbox.sandbox.domain.models.execd.DEFAULT_EGRESS_PORT
 import com.alibaba.opensandbox.sandbox.domain.models.execd.DEFAULT_EXECD_PORT
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.CredentialProxyConfig
@@ -704,6 +705,11 @@ class Sandbox internal constructor(
      */
     fun getMetrics(): SandboxMetrics {
         return metricsService.getMetrics(id)
+    }
+
+    /** Gets the sandbox's runtime backend and diagnostic identifiers. */
+    fun getDiagnosticContext(): DiagnosticContext {
+        return diagnosticsService.getContext(id)
     }
 
     /**
