@@ -489,6 +489,25 @@ An internal `InstallationReceiver` now adapts a fresh Publisher to the existing 
 
 This backend confirms coherent installation only, never transport drain or a public mutation ACK. It adds no TLS/request hooks, live timer, transport closure, HTTP/2 GOAWAY, public configuration or selective TLS activation. The experimental gate still blocks public Vault writes; a future transport-aware owner must consume Publisher obligations before enabling live admissions.
 
+An internal v2 subject-scoped installation channel now routes authenticated
+revision transactions to a bounded set of independent `InstallationReceiver`
+owners. Subject-bound Go transports reuse the existing Coordinator. A single
+process lifecycle client serializes register/unload commands, retaining exact
+request bytes and reconciling lost replies against a bounded last-command
+receipt. Registration is known-but-uninstalled; even authoritative empty state
+requires an explicit snapshot commit. Exact generation fencing and lifecycle
+high-water checks prevent delayed commands from reviving unloaded subjects.
+
+This channel has no production caller: its consumer is a mandatory real
+Go/Python Unix-socket test harness, with pure snapshot classification only.
+Resource bounds cover subject count, retained payload envelope, request bytes
+and worker concurrency. Unload reports zero transport obligations because this
+owner permanently disables admission, not because any real sockets were drained.
+It adds no shared Fast Sandbox launch, public API, live TLS isolation, parent
+liveness guarantee or complete R4/R9 parity. Those require the later lifecycle
+and transport-owner integration and its own runtime acceptance. v1 remains
+unchanged.
+
 An internal Go Vault mutation owner now composes candidate preparation/rendering, exact process-session Update/Reconcile, and local Store finalization under the shared policy/Vault barrier and an exclusive live-generation lease. It requires a deadline context that its future caller must cancel on sidecar shutdown. The owner sends each candidate once, reconciles only the exact attempt, and checks the complete returned identity against the pinned generation, rendered digest, Vault revision and the authoritative committed Policy epoch before finalization. The initial Policy epoch may be zero; later Vault writes do not reset it. Confirmed success finalizes even if cancellation arrives with the confirmation; an exact confirmed abort discards without replacing the live generation.
 
 An unresolved deadline, terminal session failure, inconsistent acknowledgement or failed local finalization after acknowledgement fences readiness and detaches the exact child/session. Both locks remain held while that child is stopped and reaped, the session is closed, and the unpublished candidate is discarded. This prevents shutdown from claiming the same child twice and prevents the existing restart path from reading recovery state before cleanup. Session-close failure never reports success or restores readiness. IPC reconciliation is bounded by the context; existing process stop/reap does not promise a hard cleanup deadline.
