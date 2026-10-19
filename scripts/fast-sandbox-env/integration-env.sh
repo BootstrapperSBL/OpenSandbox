@@ -331,12 +331,21 @@ failure_dump() {
 		# --all-containers is the point: `kubectl logs -l` without it logs
 		# only the first container (fastlet) and silently drops egress /
 		# fastlet-proxy, which is where pause/snapshot and policy failures
-		# actually surface.
-		echo "--- fastlet pod logs, every container (tail) ---"
-		# A failure loop (e.g. a per-second pause retry) floods the tail and
-		# buries the pre-incident history, so this keeps a deep window.
+		# actually surface. The window is deep because a failure loop (a
+		# per-second pause retry) floods the tail and buries the
+		# pre-incident history that explains how the failure started.
+		echo "--- fastlet pod logs, every container (deep tail) ---"
 		kubectl logs -n "$RESOURCE_NS" -l app=sandbox-fastlet \
-			--all-containers --prefix --timestamps --tail=800 2>&1 || true
+			--all-containers --prefix --timestamps --tail=15000 2>&1 || true
+		echo "--- fastlet pod logs, previous container instances (crashes) ---"
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			for container in $(kubectl -n "$RESOURCE_NS" get "$pod" -o jsonpath='{.spec.containers[*].name}' 2>/dev/null); do
+				prev="$(kubectl -n "$RESOURCE_NS" logs "$pod" -c "$container" --previous --timestamps --tail=200 2>&1 || true)"
+				case "$prev" in *"no previous container"*) continue ;; esac
+				echo "### ${pod##*/} container=$container (previous)"
+				printf '%s\n' "$prev"
+			done
+		done
 		echo "--- builder pods + logs (tail) ---"
 		kubectl get pods -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --show-labels 2>&1 || true
 		kubectl logs -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --tail=80 2>&1 || true
