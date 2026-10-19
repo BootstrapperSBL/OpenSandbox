@@ -286,11 +286,9 @@ type StatusResponse struct {
 	// (interception fails closed for them; a successful write clears it).
 	Recovery       bool     `json:"vaultRecovery,omitempty"`
 	DegradedVaults []string `json:"degradedVaults,omitempty"`
-	// VaultTransfer is the vault-transfer capability signal (OSEP-0022,
-	// additive): true only when this Handler serves VAULT_EXPORT /
-	// VAULT_IMPORT AND persists vault files (OPENSANDBOX_EGRESS_VAULT_DIR
-	// configured). Absent on older Handler builds, which decodes as false:
-	// the Fastlet then skips the pause/resume vault transfer and the
-	// checkpoint proceeds without a vault — the pre-transfer semantics.
+	// VaultTransfer reports that this Handler serves VAULT_EXPORT /
+	// VAULT_IMPORT and persists vault files. Absent on older builds decodes
+	// as false: the Fastlet then skips the transfer (checkpoint proceeds
+	// without a vault) instead of failing it.
 	VaultTransfer bool `json:"vaultTransfer,omitempty"`
 }

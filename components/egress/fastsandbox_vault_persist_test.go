@@ -385,12 +385,9 @@ func TestVaultPersistApplyFailureRollsBackFile(t *testing.T) {
 const reloadVaultBody = `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 	`"bindings":[{"name":"api","match":{"hosts":["api.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
 
-// Kubelet creates emptyDir volume roots root:root 0777, and the per-file
-// atomic machinery rejects group/world-writable ancestors — which failed
-// every vault op on the documented layout (volume mounted at the vault
-// directory's parent). Construction restricts a dedicated volume root,
-// leaves one holding foreign entries alone, and keeps already-restrictive
-// roots as they are.
+// Construction restricts a dedicated 0777 emptyDir volume root (an
+// untrusted ancestor for the atomic machinery), leaves one holding foreign
+// entries alone, and keeps already-restrictive roots as they are.
 func TestVaultPersistRestrictsDedicatedVolumeRoot(t *testing.T) {
 	t.Run("dedicated root is restricted", func(t *testing.T) {
 		root := t.TempDir()

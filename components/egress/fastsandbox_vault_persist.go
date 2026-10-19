@@ -96,12 +96,8 @@ func newVaultPersistence(dir string) (*vaultPersistence, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("restrict vault directory %s: %w", dir, err)
 	}
-	// Kubelet creates emptyDir roots root-owned and 0777; the per-file atomic
-	// machinery validates every ancestor and rejects group/world-writable
-	// ones ("policy ancestor is not a trusted directory"), so the documented
-	// layout — a volume dedicated to vault state, mounted at the vault
-	// directory's parent — would fail every vault op at runtime. Restrict
-	// that root here, bounded to volumes that hold nothing else.
+	// The volume root must pass the atomic machinery's trusted-ancestor
+	// check; kubelet creates emptyDir roots 0777, which fails it.
 	if err := restrictVolumeRoot(dir); err != nil {
 		return nil, err
 	}
@@ -116,13 +112,10 @@ func newVaultPersistence(dir string) (*vaultPersistence, error) {
 }
 
 // restrictVolumeRoot clears group/world-write bits from the vault volume
-// root (the vault directory's immediate parent) when the volume is dedicated
-// to vault state: kubelet creates emptyDir roots root:root 0777, which the
-// per-file atomic machinery rejects as an untrusted ancestor, so without
-// this every vault op fails at runtime on the documented layout. A parent
-// holding foreign entries is left untouched — a shared-volume layout fixes
-// its permissions in the manifest, and the per-file machinery keeps failing
-// closed and loudly. Already-restrictive parents are a no-op.
+// root (the vault directory's parent): kubelet creates emptyDir roots 0777,
+// which the atomic machinery rejects as an untrusted ancestor. A parent
+// holding foreign entries is left untouched — that is the manifest's job —
+// and already-restrictive roots are a no-op.
 func restrictVolumeRoot(dir string) error {
 	parent := filepath.Dir(dir)
 	info, err := os.Stat(parent)

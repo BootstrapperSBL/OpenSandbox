@@ -84,13 +84,10 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 	if s.vaultFiles.reservesPath(target) {
 		return http.StatusBadRequest, fmt.Errorf("vault bundle target %q must not live under the vault persistence directory", target)
 	}
-	// A subject that never registered has no vault state to carry and
-	// nothing to seal: a sandbox created without an egress binding (e.g. a
-	// template-backed create that never set a network policy) is a legal,
-	// vault-free shape, and a terminal cleanup looks identical. Answer 200
-	// so the checkpoint proceeds without a vault — a 404 here would fail
-	// every pause of a binding-less sandbox forever. A REGISTERED subject
-	// under a stale fence still fails below.
+	// A subject that never registered (a sandbox created without an egress
+	// binding, or after terminal cleanup) has no vault to carry: 200 so the
+	// checkpoint proceeds — a 404 would fail every pause of a binding-less
+	// sandbox. A registered subject under a stale fence still fails below.
 	if _, ok := s.reg.Fence(subj); !ok {
 		log.Infof("vault export: subject %s not registered; no vault to carry, checkpoint proceeds without it", subj)
 		return http.StatusOK, nil

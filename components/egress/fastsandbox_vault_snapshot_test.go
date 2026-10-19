@@ -160,12 +160,9 @@ func TestVaultSnapshotExportWithoutVaultFileStillSeals(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, doVault(t, h.srv, http.MethodPost, snapshotTestUID, vaultCredential(), "").Code)
 }
 
-// A subject that never registered (a sandbox created without an egress
-// binding — e.g. a template-backed create that never set a network policy)
-// has no vault state to carry: the export is a 200 no-op so the checkpoint
-// proceeds. A 404 here would fail every pause of a binding-less sandbox
-// forever; terminal cleanup looks identical and is equally vault-free, and
-// a registered subject under a stale fence still fails (409) below.
+// An unregistered subject (no egress binding, or after terminal cleanup)
+// has no vault to carry: the export is a 200 no-op. A registered subject
+// under a stale fence still fails (409).
 func TestVaultSnapshotExportUnregisteredSubjectIsNoOp(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	bundlePath := filepath.Join(t.TempDir(), "bundle", "unregistered.json")
@@ -210,9 +207,7 @@ func TestVaultSnapshotExportGuards(t *testing.T) {
 	t.Run("unknown subject", func(t *testing.T) {
 		h := newVaultPersistHarness(t)
 		rec := doAction(t, h.srv, snapshotBody(t, "ghost", testFenceR, testFenceA, "VAULT_EXPORT", "/tmp/bundle.json"))
-		// An unregistered subject has no vault state to carry (a sandbox
-		// without an egress binding, or after terminal cleanup): 200 no-op
-		// so the checkpoint proceeds. See the dedicated no-op test.
+		// 200 no-op: nothing to carry. See the dedicated no-op test.
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.False(t, h.fakeForPath("/tmp/bundle.json").exists)
 	})
