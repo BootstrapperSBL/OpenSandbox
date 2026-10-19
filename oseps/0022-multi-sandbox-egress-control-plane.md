@@ -195,7 +195,7 @@ flowchart LR
     end
 ```
 
-**Ordering invariant: export strictly precedes the runtime teardown** — `REMOVE_BINDING` purges the local file, so the bundle copy must exist first; the driver invokes export inside the pause flow, before teardown. **No server re-push exists or is needed** — egress self-persistence covers both recovery paths. A Handler without the `vaultTransfer` capability (an older build predating the vault operations, or one without vault persistence configured) makes the fastlet skip the transfer and pause without the vault: a capability gap degrades to the pre-transfer semantics instead of failing the checkpoint, and only a genuine transfer failure on a capable Handler fails it.
+**Ordering invariant: export strictly precedes the runtime teardown** — `REMOVE_BINDING` purges the local file, so the bundle copy must exist first; the driver invokes export inside the pause flow, before teardown. **No server re-push exists or is needed** — egress self-persistence covers both recovery paths. A Handler without the `vaultTransfer` capability (an older build predating the vault operations, or one without vault persistence configured) makes the fastlet skip the transfer and pause without the vault: a capability gap degrades to the pre-transfer semantics instead of failing the checkpoint, and only a genuine transfer failure on a capable Handler fails it. An **unregistered subject** (a sandbox created without an egress binding — e.g. a template-backed create that never set a network policy — or after terminal cleanup) exports as a 200 no-op: there is no vault state to carry, so the checkpoint also proceeds without one; only a registered subject under a stale fence fails the export.
 
 #### Vault Sealing (deferred)
 
