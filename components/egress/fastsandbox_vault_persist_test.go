@@ -694,6 +694,9 @@ func TestVaultPersistHealthyStatusOmitsFields(t *testing.T) {
 	assert.True(t, status.Ready)
 	assert.False(t, status.Recovery)
 	assert.Empty(t, status.DegradedVaults)
+	// Vault persistence configured: the capability the Fastlet's
+	// pause/resume vault transfer probes for.
+	assert.True(t, status.VaultTransfer)
 	assert.NotContains(t, rec.Body.String(), "degradedVaults", "healthy vault fields stay omitted")
 	assert.Equal(t, http.StatusOK, doRequest(t, h.srv, http.MethodGet, "/healthz", "").Code)
 }
