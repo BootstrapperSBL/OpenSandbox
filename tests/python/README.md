@@ -19,6 +19,7 @@ Run a specific suite:
 
 ```bash
 uv run pytest tests/test_sandbox_e2e.py
+uv run pytest tests/test_diagnostics_e2e.py tests/test_diagnostics_e2e_sync.py
 uv run pytest tests/test_sandbox_pool_e2e_sync.py tests/test_sandbox_pool_e2e_async.py
 uv run pytest tests/test_credential_vault_e2e.py
 ```
