@@ -58,7 +58,7 @@ spec:
         # the egress container (same volume below) resolves the vault
         # bundle PATH the checkpoint envelope hands it.
         - name: snapshot-staging
-          mountPath: /var/lib/fast-sandbox/firecracker/snapshots
+          mountPath: /var/lib/fast-sandbox/firecracker
       - name: egress
         image: "@EGRESS_IMAGE@"
         # IfNotPresent: the environment kind-loads the image into the
@@ -90,7 +90,7 @@ spec:
         # export/import envelope carries the DRIVER's snapshot staging path,
         # so the same node directory is mounted here.
         - name: snapshot-staging
-          mountPath: /var/lib/fast-sandbox/firecracker/snapshots
+          mountPath: /var/lib/fast-sandbox/firecracker
           # Plaintext v1 posture: the vault volume joins the credential
           # trust surface. Swap to `medium: Memory` (tmpfs) to keep the
           # per-subject vault files off node disk.
@@ -121,14 +121,17 @@ spec:
       # medium: Memory would keep the plaintext v1 files off node disk.
       - name: egress-vault
         emptyDir: {}
-      # Snapshot staging shared between the fastlet driver and the egress
-      # container (OSEP-0022 vault bundle handoff): a shared node directory
-      # so the envelope's file PATH resolves in both mount namespaces, and
-      # the runtime-agent's publish reads the same directory. DirectoryOrCreate
-      # keeps the root-owned 0755 mode the atomic policy machinery trusts.
+      # The fastlet driver's whole firecracker state directory, shared with
+      # the egress container (OSEP-0022 vault bundle handoff): the envelope's
+      # file PATH must resolve in the egress mount namespace, and the shared
+      # mount must keep the jailed dump's rename (jail root -> staging) on
+      # one filesystem — hence the state directory as a whole, not just the
+      # snapshots subdirectory. The runtime-agent reads the same node
+      # directory for publish. DirectoryOrCreate keeps the root-owned 0755
+      # mode the atomic policy machinery trusts.
       - name: snapshot-staging
         hostPath:
-          path: /var/lib/fast-sandbox/firecracker/snapshots
+          path: /var/lib/fast-sandbox/firecracker
           type: DirectoryOrCreate
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
