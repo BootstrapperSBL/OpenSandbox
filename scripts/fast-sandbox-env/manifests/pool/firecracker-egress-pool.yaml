@@ -51,17 +51,14 @@ spec:
         env:
         - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
           value: /run/fast-sandbox/firecracker/runtime.sock
-        # Vault bundle handoff (OSEP-0022): the export/import envelope carries
-        # a file PATH and the egress Handler resolves it in its own mount
-        # namespace, so the bundle moves through this hostPath directory
-        # shared with the egress container (mounted there too, below).
-        - name: FAST_SANDBOX_EGRESS_BUNDLE_DIR
-          value: /var/lib/fast-sandbox/bundles
         volumeMounts:
         - name: agent-socket
           mountPath: /run/fast-sandbox/firecracker
-        - name: checkpoint-bundles
-          mountPath: /var/lib/fast-sandbox/bundles
+        # Pin the snapshot staging area onto the shared node directory so
+        # the egress container (same volume below) resolves the vault
+        # bundle PATH the checkpoint envelope hands it.
+        - name: snapshot-staging
+          mountPath: /var/lib/fast-sandbox/firecracker/snapshots
       - name: egress
         image: "@EGRESS_IMAGE@"
         # IfNotPresent: the environment kind-loads the image into the
@@ -89,10 +86,11 @@ spec:
         volumeMounts:
         - name: egress-vault
           mountPath: /var/lib/opensandbox-egress
-        # The other side of the vault bundle handoff: reads exports written
-        # by the fastlet driver and writes imports for it (both root).
-        - name: checkpoint-bundles
-          mountPath: /var/lib/fast-sandbox/bundles
+        # The other side of the vault bundle handoff (OSEP-0022): the
+        # export/import envelope carries the DRIVER's snapshot staging path,
+        # so the same node directory is mounted here.
+        - name: snapshot-staging
+          mountPath: /var/lib/fast-sandbox/firecracker/snapshots
           # Plaintext v1 posture: the vault volume joins the credential
           # trust surface. Swap to `medium: Memory` (tmpfs) to keep the
           # per-subject vault files off node disk.
@@ -123,13 +121,14 @@ spec:
       # medium: Memory would keep the plaintext v1 files off node disk.
       - name: egress-vault
         emptyDir: {}
-      # Vault bundle handoff between the fastlet driver and the egress
-      # container (OSEP-0022): a shared node directory so the envelope's
-      # file PATH resolves in both mount namespaces. DirectoryOrCreate
-      # keeps the 0755 root-owned mode the atomic machinery trusts.
-      - name: checkpoint-bundles
+      # Snapshot staging shared between the fastlet driver and the egress
+      # container (OSEP-0022 vault bundle handoff): a shared node directory
+      # so the envelope's file PATH resolves in both mount namespaces, and
+      # the runtime-agent's publish reads the same directory. DirectoryOrCreate
+      # keeps the root-owned 0755 mode the atomic policy machinery trusts.
+      - name: snapshot-staging
         hostPath:
-          path: /var/lib/fast-sandbox/bundles
+          path: /var/lib/fast-sandbox/firecracker/snapshots
           type: DirectoryOrCreate
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
