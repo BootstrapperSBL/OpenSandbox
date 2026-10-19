@@ -36,6 +36,7 @@ router = APIRouter(tags=["DevOps"])
 @router.get(
     "/sandboxes/{sandbox_id}/diagnostics/context",
     response_model=DiagnosticContext,
+    response_model_exclude_none=True,
     responses={404: {"description": "Sandbox not found"}, 501: {"description": "Not implemented"}},
 )
 def get_sandbox_diagnostic_context(sandbox_id: str) -> DiagnosticContext:

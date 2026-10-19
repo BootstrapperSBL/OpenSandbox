@@ -27,7 +27,7 @@ class DiagnosticContext(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     sandbox_id: str = Field(alias="sandboxId")
-    state: str
+    state: str | None = None
     backend_type: str = Field(alias="backendType")
     backend_identifiers: dict[str, str] = Field(alias="backendIdentifiers")
 

@@ -48,6 +48,28 @@ def test_context_route(client, auth_headers, monkeypatch, backend):
     service.get_sandbox_diagnostic_context.assert_called_once_with("sbx-1")
 
 
+@pytest.mark.parametrize("state_fields", [{}, {"state": None}])
+def test_context_route_omits_unavailable_state(client, auth_headers, monkeypatch, state_fields):
+    service = Mock()
+    service.get_sandbox_diagnostic_context.return_value = DiagnosticContext(
+        sandbox_id="sbx-1",
+        backend_type="extension",
+        backend_identifiers={"resource": "runtime-1"},
+        **state_fields,
+    )
+    monkeypatch.setattr(devops, "sandbox_service", service)
+
+    response = client.get("/v1/sandboxes/sbx-1/diagnostics/context", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sandboxId": "sbx-1",
+        "backendType": "extension",
+        "backendIdentifiers": {"resource": "runtime-1"},
+    }
+    service.get_sandbox_diagnostic_context.assert_called_once_with("sbx-1")
+
+
 @pytest.mark.parametrize(
     "status,code", [(404, "NOT_FOUND"), (403, "FORBIDDEN"), (501, "DIAGNOSTICS_NOT_IMPLEMENTED")]
 )
