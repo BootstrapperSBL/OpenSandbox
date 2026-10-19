@@ -261,6 +261,41 @@ func TestUpperManager_UsageRejectsMissingInUseUpper(t *testing.T) {
 	}
 }
 
+func TestUpperManager_AllocateRejectsInvalidUsageWithLimit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+	mgr, err := NewUpperManager(root, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, healthyUpper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, missingUpper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(healthyUpper, "full.bin"), make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(missingUpper); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown usage must not let new allocations bypass an exhausted quota.
+	if _, _, err := mgr.AllocateN(1); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("AllocateN() error = %v, want missing upper directory error", err)
+	}
+	// Once measurement recovers, the intact upper still consumes the budget.
+	if err := os.MkdirAll(missingUpper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mgr.AllocateN(1); !errors.Is(err, ErrUpperLimitExceeded) {
+		t.Fatalf("AllocateN() error = %v, want ErrUpperLimitExceeded", err)
+	}
+}
+
 func TestUpperManager_Allocate(t *testing.T) {
 	mgr := newTestUpperManager(t)
 

@@ -167,7 +167,10 @@ func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair,
 
 	if m.maxBytes > 0 {
 		usage, usageErr := m.usageLocked()
-		if usageErr == nil && usage >= m.maxBytes {
+		if usageErr != nil {
+			return "", nil, fmt.Errorf("upper: measure usage before allocation: %w", usageErr)
+		}
+		if usage >= m.maxBytes {
 			return "", nil, fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
 		}
 	}
