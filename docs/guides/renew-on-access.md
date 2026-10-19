@@ -69,13 +69,15 @@ Pass `lifecycle.renewalPolicy.extendSeconds` (300–86400) in the create request
 ::: code-group
 
 ```python Python
+from datetime import timedelta
+
 from opensandbox import Sandbox
 from opensandbox.models import RenewalPolicy, SandboxLifecycle
 
 sandbox = await Sandbox.create(
     "ubuntu:24.04",
     connection_config=config,
-    timeout_seconds=3600,
+    timeout=timedelta(seconds=3600),
     lifecycle=SandboxLifecycle(
         renewal_policy=RenewalPolicy(extend_seconds=3600),
     ),
@@ -83,7 +85,7 @@ sandbox = await Sandbox.create(
 ```
 
 ```javascript JavaScript
-import { Sandbox } from "@opensandbox/sdk";
+import { Sandbox } from "@alibaba-group/opensandbox";
 
 const sandbox = await Sandbox.create({
   connectionConfig: { domain: "http://127.0.0.1:8080" },
@@ -96,9 +98,10 @@ const sandbox = await Sandbox.create({
 ```
 
 ```go Go
+ttl := 3600
 info, err := opensandbox.CreateSandbox(ctx, cfg, opensandbox.SandboxCreateOptions{
     Image:           "ubuntu:24.04",
-    TimeoutSeconds:  ptr.To(3600),
+    TimeoutSeconds:  &ttl,
     Lifecycle: &opensandbox.SandboxLifecycle{
         RenewalPolicy: &opensandbox.RenewalPolicy{ExtendSeconds: 3600},
     },
@@ -118,15 +121,15 @@ var sandbox = await OpenSandbox.Sandbox.CreateAsync(new SandboxCreateOptions
 ```
 
 ```kotlin Kotlin
-val sandbox = Sandbox.create(
-    SandboxCreateOptions(
-        image = "ubuntu:24.04",
-        timeoutSeconds = 3600,
-        lifecycle = SandboxLifecycle.builder()
+val sandbox = Sandbox.builder()
+    .image("ubuntu:24.04")
+    .timeout(Duration.ofSeconds(3600))
+    .lifecycle(
+        SandboxLifecycle.builder()
             .renewalPolicy { extendSeconds(3600) }
-            .build(),
+            .build()
     )
-)
+    .build()
 ```
 
 :::
@@ -145,15 +148,10 @@ The field is control-plane state: it never reaches the guest and may accompany `
 
 ## Deprecated extensions key
 
-Before this field existed, opt-in used the opaque creation key
-`extensions["access.renew.extend.seconds"]` (a decimal string with the same
-300–86400 bounds).
+Before this field existed, opt-in used the opaque creation key `extensions["access.renew.extend.seconds"]` (a decimal string with the same 300–86400 bounds).
 
 ::: warning Deprecation timeline
-The extensions key is **deprecated** in favor of `lifecycle.renewalPolicy`. It
-remains supported throughout the entire **1.x** series and is **removed in
-2.0**. New code should use `lifecycle.renewalPolicy`; existing SDKs, scripts,
-and integrations that still send the extensions key keep working on 1.x.
+The extensions key is **deprecated** in favor of `lifecycle.renewalPolicy`. It remains supported throughout the entire **1.x** series and is **removed in 2.0**. New code should use `lifecycle.renewalPolicy`; existing SDKs, scripts, and integrations that still send the extensions key keep working on 1.x.
 :::
 
 Transition rules while both are accepted:
