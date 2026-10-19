@@ -357,6 +357,19 @@ failure_dump() {
 		echo "--- Sandbox CRs (status only) ---"
 		kubectl get sandboxes -n "$RESOURCE_NS" -o json 2>/dev/null \
 			| jq -c '.items[] | {name: .metadata.name, phase: .status.phase, conditions: .status.conditions, infra: .status.infraComponents}' 2>&1 || true
+		# Cross-container visibility of the snapshot staging area: the vault
+		# export hands the DRIVER's bundle path to the egress container, and
+		# a mount-namespace mismatch shows up as ENOENT on the egress side
+		# only. Compare both views.
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			echo "### ${pod##*/}: snapshot staging visibility"
+			echo "-- fastlet view:"
+			kubectl -n "$RESOURCE_NS" exec "$pod" -c fastlet -- \
+				ls -la /var/lib/fast-sandbox/firecracker/snapshots 2>&1 | tail -8 || true
+			echo "-- egress view:"
+			kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- \
+				ls -la /var/lib/fast-sandbox/firecracker/snapshots 2>&1 | tail -8 || true
+		done
 		echo "--- recent events ($RESOURCE_NS) ---"
 		kubectl get events -n "$RESOURCE_NS" --sort-by=.lastTimestamp 2>&1 | tail -30 || true
 		echo "--- OpenSandbox pods ($OSB_NS) ---"
