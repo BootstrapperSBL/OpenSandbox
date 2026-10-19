@@ -91,6 +91,22 @@ def test_get_status_reports_terminated_when_expire_time_has_passed():
     assert result["last_transition_at"] == "2020-01-01T00:00:00Z"
 
 
+def test_get_status_reports_terminated_when_allocated_pod_is_past_expire_time():
+    # Pod has IP but is not Ready yet (Allocated). Create wait treats Allocated as success,
+    # so expiry must be checked before the ready/IP split.
+    provider = BatchSandboxProvider(MagicMock())
+    workload = {
+        "spec": {"expireTime": "2020-01-01T00:00:00Z"},
+        "status": {"replicas": 1, "ready": 0, "allocated": 1},
+        "metadata": _ENDPOINTS,
+    }
+
+    result = provider.get_status(workload)
+
+    assert result["state"] == "Terminated"
+    assert result["reason"] == "SANDBOX_EXPIRED"
+
+
 def test_get_status_reports_terminated_when_ready_pod_is_past_expire_time():
     provider = BatchSandboxProvider(MagicMock())
     workload = {
