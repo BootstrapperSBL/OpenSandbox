@@ -237,7 +237,10 @@ def patch_sandbox_metadata(
     """
     Patch sandbox metadata via JSON Merge Patch (RFC 7396).
     Non-null adds/replaces, null deletes, absent keeps.
-    No optimistic locking: concurrent PATCH requests are applied one after another, last write wins per key.
+    Docker: concurrent PATCH requests apply one after another, last write wins per key.
+    Kubernetes: a PATCH writes back the whole label set it read, with no resourceVersion check,
+    so a concurrent PATCH may revert a value another PATCH changed or resurrect a key it deleted;
+    a PATCH on an fsb sandbox sends only its own keys, fenced by the sandbox UID and generation.
     """
     return sandbox_service.patch_sandbox_metadata(sandbox_id, patch)
 

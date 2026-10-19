@@ -18,6 +18,8 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from opensandbox_server.services.docker.metadata import (
     DockerMetadataStore,
     _extract_user_labels,
@@ -238,6 +240,24 @@ class TestDockerMetadataStore:
         store2 = DockerMetadataStore(root=root)
         result = store2.get("sbx-001", {"hello": "world"})
         assert result == {"hello": "world", "team": "platform"}
+
+    def test_failed_rename_leaves_no_temporary_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A write whose rename fails must raise and leave no temporary file behind."""
+        root = tmp_path / "metadata"
+        store = DockerMetadataStore(root=root)
+        store.patch("sbx-001", {}, {"team": "platform"})
+
+        def failing_replace(self: Path, target: Path) -> Path:
+            raise PermissionError(f"{self} -> {target}")
+
+        monkeypatch.setattr(Path, "replace", failing_replace)
+        with pytest.raises(PermissionError):
+            store.patch("sbx-001", {}, {"owner": "alice"})
+
+        assert [p.name for p in root.iterdir()] == ["sbx-001.json"]
+        assert store.get("sbx-001", {}) == {"team": "platform"}
 
     # -- concurrency ---------------------------------------------------------
 
