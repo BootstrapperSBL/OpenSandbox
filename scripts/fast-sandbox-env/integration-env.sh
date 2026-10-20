@@ -202,9 +202,7 @@ ACTION=""
 log() { printf '\033[1;34m[fast-sandbox-env]\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
 die() { printf '\033[1;31m[fast-sandbox-env] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 pass() { printf '\033[1;32m[fast-sandbox-env] PASS\033[0m %s\n' "$*" | tee -a "$WORK/run.log" >&2; }
-# fail dumps before exiting: an explicit `exit` does NOT fire the ERR trap
-# (only a failing command does), so verify-stage failures reached through
-# wait_for -> fail would otherwise tear down the cluster with no pod logs.
+# fail dumps before exiting: an explicit `exit` does not fire the ERR trap.
 fail() { printf '\033[1;31m[fast-sandbox-env] FAIL\033[0m %s\n' "$*" >&2; failure_dump "${STAGE_CUR_LABEL:-$ACTION}" || true; exit 1; }
 highlight() { printf '\033[1;36m%s\033[0m\n' "$*"; }
 
@@ -328,13 +326,21 @@ failure_dump() {
 		kubectl logs -n "$NS" deploy/fast-sandbox-controller --tail=80 2>&1 || true
 		echo "--- firecracker-runtime logs (tail) ---"
 		kubectl logs -n "$NS" daemonset/firecracker-runtime --all-containers --tail=80 2>&1 || true
-		# --all-containers is the point: `kubectl logs -l` without it logs
-		# only the first container (fastlet) and silently drops egress /
-		# fastlet-proxy, which is where pause/snapshot and policy failures
-		# actually surface.
-		echo "--- fastlet pod logs, every container (tail) ---"
+		# --all-containers: the label selector alone logs only the first
+		# container and drops egress. Deep tail: failure loops flood the
+		# window and bury the pre-incident history.
+		echo "--- fastlet pod logs, every container (deep tail) ---"
 		kubectl logs -n "$RESOURCE_NS" -l app=sandbox-fastlet \
-			--all-containers --prefix --timestamps --tail=300 2>&1 || true
+			--all-containers --prefix --timestamps --tail=15000 2>&1 || true
+		echo "--- fastlet pod logs, previous container instances (crashes) ---"
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			for container in $(kubectl -n "$RESOURCE_NS" get "$pod" -o jsonpath='{.spec.containers[*].name}' 2>/dev/null); do
+				prev="$(kubectl -n "$RESOURCE_NS" logs "$pod" -c "$container" --previous --timestamps --tail=200 2>&1 || true)"
+				case "$prev" in *"no previous container"*) continue ;; esac
+				echo "### ${pod##*/} container=$container (previous)"
+				printf '%s\n' "$prev"
+			done
+		done
 		echo "--- builder pods + logs (tail) ---"
 		kubectl get pods -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --show-labels 2>&1 || true
 		kubectl logs -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --tail=80 2>&1 || true
@@ -346,6 +352,17 @@ failure_dump() {
 		echo "--- Sandbox CRs (status only) ---"
 		kubectl get sandboxes -n "$RESOURCE_NS" -o json 2>/dev/null \
 			| jq -c '.items[] | {name: .metadata.name, phase: .status.phase, conditions: .status.conditions, infra: .status.infraComponents}' 2>&1 || true
+		# A mount-namespace mismatch (driver staging path invisible to
+		# egress) shows up as ENOENT on the egress side only.
+		for pod in $(kubectl -n "$RESOURCE_NS" get pods -l app=sandbox-fastlet -o name 2>/dev/null); do
+			echo "### ${pod##*/}: snapshot staging visibility"
+			echo "-- fastlet view:"
+			kubectl -n "$RESOURCE_NS" exec "$pod" -c fastlet -- \
+				ls -la /var/lib/fast-sandbox/firecracker/snapshots 2>&1 | tail -8 || true
+			echo "-- egress view:"
+			kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- \
+				ls -la /var/lib/fast-sandbox/firecracker/snapshots 2>&1 | tail -8 || true
+		done
 		echo "--- recent events ($RESOURCE_NS) ---"
 		kubectl get events -n "$RESOURCE_NS" --sort-by=.lastTimestamp 2>&1 | tail -30 || true
 		echo "--- OpenSandbox pods ($OSB_NS) ---"
@@ -1652,6 +1669,124 @@ pause_resume_verify() {
 	wait_for "pause/resume sandbox deleted" 120 verify_sandbox_gone
 }
 
+# --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay) --------
+
+# Status-code-returning variant of server_api for negative-path assertions
+# (curl -f hides the status).
+server_api_status() { # method path [json-body]
+	local method="$1" path="$2" body="${3:-}" out
+	if [[ -n "$body" ]]; then
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-H "Content-Type: application/json" -d "$body" -w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	else
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	fi
+	printf '%s' "${out##*$'\n'}"
+}
+
+# The vault stage's sandbox must ride the subject-scoped egress log markers
+# (export/import/registration), so every log assertion goes through this.
+vault_log_contains() { # <fixed-substring>
+	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null \
+		| grep -qF "$1"
+}
+
+vault_revision_is() { # <expected-revision>
+	local out
+	out="$(server_api GET "/sandboxes/$VERIFY_ID/credential-vault" 2>/dev/null)" || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.revision // empty')" == "$1" ]]
+}
+
+vault_lifecycle_verify() {
+	local created vault_body ack rev sandbox_uid
+	log "verify (vault): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+	# The policy rides the create: a policy-less create produces no egress
+	# binding at all, so the subject would never register.
+	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "ext.test"}]}' \
+		> "$GEN_DIR/vault-policy.json"
+	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+		--metadata origin=fast-sandbox-env-vault \
+		--network-policy-file "$GEN_DIR/vault-policy.json" \
+		--skip-health-check -o json 2>/dev/null)" \
+		|| fail "vault verify: sandbox create failed"
+	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
+	wait_for "vault sandbox Running" 150 sandbox_running
+	sandbox_uid="$(kubectl -n "$RESOURCE_NS" get sandbox "$VERIFY_ID" -o jsonpath='{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$sandbox_uid" ]] || fail "vault verify: sandbox CR carried no uid"
+	# Registered and activated before the vault POST, else the relay 404s.
+	# (The "(state=active)" re-delivery only follows a policy UPDATE; a
+	# create-carried policy activates without it.)
+	wait_for "vault subject registered on egress" 120 \
+		vault_log_contains "subject s-$sandbox_uid: data-plane-ready, policy active"
+
+	# 1) create-only: ack carries the revision; duplicate POST is 409.
+	vault_body="$(jq -n '{credentials: [{name: "tok", source: {type: "inline", value: "sekrit-vault-e2e"}}], bindings: [{name: "ext", match: {hosts: ["ext.test"]}, auth: {type: "apiKey", name: "X-Api-Key", credential: "tok"}}]}')"
+	ack="$(server_api POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body")" \
+		|| fail "vault verify: POST credential-vault failed"
+	rev="$(printf '%s' "$ack" | jq -r '.revision // empty')"
+	[[ "$rev" =~ ^[0-9]+$ ]] || fail "vault verify: create ack carried no revision: $(printf '%s' "$ack" | head -c 200)"
+	pass "vault created over the relay (ack revision $rev)"
+	if server_api POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body" >/dev/null 2>&1; then
+		fail "vault verify: duplicate POST succeeded (create-only must 409)"
+	fi
+	[[ "$(server_api_status POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body")" == "409" ]] \
+		|| fail "vault verify: duplicate POST was not 409"
+	pass "duplicate POST rejected (create-only 409)"
+
+	# 2) pause/resume carries the real vault: export -> bundle -> import,
+	#    with the relay GET reporting the same revision.
+	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 || fail "vault verify: pause failed"
+	wait_for "vault sandbox Paused (checkpoint durable)" 240 sandbox_paused
+	wait_for "vault exported into the checkpoint bundle" 120 \
+		vault_log_contains "subject s-$sandbox_uid: vault exported to snapshot bundle"
+	pass "pause exported the vault bundle (subject sealed)"
+	osb_api sandbox resume "$VERIFY_ID" --skip-health-check >/dev/null 2>&1 || fail "vault verify: resume failed"
+	wait_for "vault sandbox Running (restored)" 240 sandbox_running
+	# The pause's REMOVE_BINDING purges the subject, so the restore import
+	# lands through the unregistered branch and the file reloads at the
+	# SET_BINDING replay (the reload line carries the restored revision).
+	wait_for "vault bundle reloaded at re-registration" 120 \
+		vault_log_contains "subject s-$sandbox_uid: vault reloaded from file"
+	wait_for "vault revision preserved across pause/resume" 120 vault_revision_is "$rev"
+	pass "vault survived pause/resume (revision $rev preserved)"
+
+	# 3) egress-restart recovery: crash the worker (fresh instanceId ->
+	#    SET_BINDING replay -> vault file reload by incarnation).
+	local pod restarted=0
+	for pod in $(pool_pods); do
+		if kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- sh -c 'command -v pkill >/dev/null' 2>/dev/null; then
+			kubectl -n "$RESOURCE_NS" exec "$pod" -c egress -- pkill -f '/opt/opensandbox-egress/egress' >/dev/null 2>&1 || true
+			restarted=1
+		else
+			log "verify (vault): egress restart skipped on ${pod##*/} (pkill unavailable)"
+		fi
+	done
+	if [[ "$restarted" == 1 ]]; then
+		wait_for "pool egress containers back up" 180 egress_containers_ready
+		wait_for "vault reloaded after egress restart" 240 vault_revision_is "$rev"
+		pass "vault reloaded after egress restart (revision $rev preserved)"
+	fi
+
+	# 4) delete + re-create.
+	server_api DELETE "/sandboxes/$VERIFY_ID/credential-vault" >/dev/null \
+		|| fail "vault verify: DELETE failed"
+	[[ "$(server_api_status GET "/sandboxes/$VERIFY_ID/credential-vault")" == "404" ]] \
+		|| fail "vault verify: GET after DELETE was not 404"
+	pass "vault deleted (GET 404)"
+	ack="$(server_api POST "/sandboxes/$VERIFY_ID/credential-vault" "$vault_body")" \
+		|| fail "vault verify: re-create after DELETE failed"
+	rev="$(printf '%s' "$ack" | jq -r '.revision // empty')"
+	[[ "$rev" == "1" ]] || fail "vault verify: fresh vault revision is $rev, expected 1"
+	pass "vault re-created (fresh revision $rev)"
+
+	osb_api sandbox kill "$VERIFY_ID" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill failed; remove $VERIFY_ID manually"
+	wait_for "vault sandbox deleted" 120 verify_sandbox_gone
+}
+
+
+
 # --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile) --------------
 
 # Poll the gateway until /ping returns 200 (marked 503s tolerated; the
@@ -2211,6 +2346,7 @@ case "$ACTION" in
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
 		run_stage "end-to-end verify (CLI create -> gateway -> execd /ping)" opensandbox_verify
 		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
+		run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 		run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
 		run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
 		trap - ERR

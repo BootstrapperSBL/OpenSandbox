@@ -160,6 +160,18 @@ func TestVaultSnapshotExportWithoutVaultFileStillSeals(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, doVault(t, h.srv, http.MethodPost, snapshotTestUID, vaultCredential(), "").Code)
 }
 
+// An unregistered subject (no egress binding, or after terminal cleanup)
+// has no vault to carry: the export is a 200 no-op. A registered subject
+// under a stale fence still fails (409).
+func TestVaultSnapshotExportUnregisteredSubjectIsNoOp(t *testing.T) {
+	h := newVaultPersistHarness(t)
+	bundlePath := filepath.Join(t.TempDir(), "bundle", "unregistered.json")
+
+	rec := doAction(t, h.srv, snapshotBody(t, "unregistered-sandbox", testFenceR, testFenceA, "VAULT_EXPORT", bundlePath))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.False(t, h.fakeForPath(bundlePath).exists, "nothing to carry: no subject, no bundle write")
+}
+
 func TestVaultSnapshotExportFailureStaysActive(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	h.snapshotSubject(t)
@@ -195,7 +207,9 @@ func TestVaultSnapshotExportGuards(t *testing.T) {
 	t.Run("unknown subject", func(t *testing.T) {
 		h := newVaultPersistHarness(t)
 		rec := doAction(t, h.srv, snapshotBody(t, "ghost", testFenceR, testFenceA, "VAULT_EXPORT", "/tmp/bundle.json"))
-		assert.Equal(t, http.StatusNotFound, rec.Code)
+		// 200 no-op: nothing to carry. See the dedicated no-op test.
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.False(t, h.fakeForPath("/tmp/bundle.json").exists)
 	})
 	t.Run("stale fence", func(t *testing.T) {
 		h := newVaultPersistHarness(t)

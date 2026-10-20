@@ -385,6 +385,46 @@ func TestVaultPersistApplyFailureRollsBackFile(t *testing.T) {
 const reloadVaultBody = `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 	`"bindings":[{"name":"api","match":{"hosts":["api.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
 
+// Construction restricts a dedicated 0777 emptyDir volume root (an
+// untrusted ancestor for the atomic machinery), leaves one holding foreign
+// entries alone, and keeps already-restrictive roots as they are.
+func TestVaultPersistRestrictsDedicatedVolumeRoot(t *testing.T) {
+	t.Run("dedicated root is restricted", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "vault")
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		require.NoError(t, os.Chmod(root, 0o777))
+		_, err := newVaultPersistence(dir)
+		require.NoError(t, err)
+		info, err := os.Stat(root)
+		require.NoError(t, err)
+		assert.Zero(t, info.Mode().Perm()&0o022, "group/world write cleared on the dedicated volume root")
+	})
+	t.Run("root with foreign entries is untouched", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "vault")
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		require.NoError(t, os.Chmod(root, 0o777))
+		require.NoError(t, os.WriteFile(filepath.Join(root, "confdir"), []byte("x"), 0o600))
+		_, err := newVaultPersistence(dir)
+		require.NoError(t, err)
+		info, err := os.Stat(root)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o777), info.Mode().Perm(), "shared volume root left for the manifest to fix")
+	})
+	t.Run("restrictive root is a no-op", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "vault")
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		require.NoError(t, os.Chmod(root, 0o755))
+		_, err := newVaultPersistence(dir)
+		require.NoError(t, err)
+		info, err := os.Stat(root)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+	})
+}
+
 func TestVaultPersistReloadAtSetBinding(t *testing.T) {
 	h := newVaultPersistHarness(t)
 

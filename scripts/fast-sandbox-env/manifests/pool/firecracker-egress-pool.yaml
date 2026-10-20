@@ -80,10 +80,15 @@ spec:
           value: /var/lib/opensandbox-egress/vault
         volumeMounts:
         - name: egress-vault
-          mountPath: /var/lib/opensandbox-egress
           # Plaintext v1 posture: the vault volume joins the credential
           # trust surface. Swap to `medium: Memory` (tmpfs) to keep the
           # per-subject vault files off node disk.
+          mountPath: /var/lib/opensandbox-egress
+        # Vault bundle handoff (OSEP-0022): the envelope carries the
+        # driver's staging path under the runtime state root; mount the
+        # same runtime-injected volume so the path resolves here.
+        - name: firecracker-state
+          mountPath: /var/lib/fast-sandbox/firecracker
         # Egress installs nft/iptables rules (DNS redirect + per-subject
         # sets) and marks sockets; NET_ADMIN covers nft/iptables/SO_MARK,
         # NET_RAW covers the raw sockets used for DNS response spoofing.

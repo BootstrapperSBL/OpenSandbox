@@ -102,9 +102,9 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 		InstanceID:     s.instanceID,
 		Recovery:       recovery,
 		DegradedVaults: degraded,
-		// Capability signal for the Fastlet's pause/resume vault transfer:
-		// without vault persistence the Handler cannot hold vault state at
-		// all, so the transfer must degrade (skip), not fail the checkpoint.
+		// Capability signal for the Fastlet's vault transfer: without vault
+		// persistence there is no vault state to hand off, so the transfer
+		// degrades (skips) rather than failing the checkpoint.
 		VaultTransfer: s.vaultFiles != nil,
 	}
 	if s.mitmGate != nil {
