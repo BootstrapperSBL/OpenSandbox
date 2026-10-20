@@ -16,8 +16,9 @@
 // protocol (docs/concepts/sandbox-actions.md, sandbox.fast.io/actions/v1)
 // from the egress side: the egress process IS the Handler, and the Fastlet
 // delivers Binding synchronization (SET_BINDING / REMOVE_BINDING), Lifecycle
-// Hooks, and the pause/resume vault snapshot transfer (VAULT_EXPORT /
-// VAULT_IMPORT) over two Pod-loopback HTTP endpoints.
+// Hooks, and the pause/resume snapshot transfer (VAULT_EXPORT / VAULT_IMPORT
+// for the credential vault, POLICY_EXPORT / POLICY_IMPORT for the recorded
+// egress policy) over two Pod-loopback HTTP endpoints.
 //
 // The package owns the wire model, parsing, and validation only. Lifecycle
 // semantics (deny-first registration, data-plane-ready activation) are wired
@@ -56,6 +57,13 @@ const (
 	// transfer.
 	OperationVaultExport Operation = "VAULT_EXPORT"
 	OperationVaultImport Operation = "VAULT_IMPORT"
+	// PolicyExport/Import carry the subject's persisted egress policy across
+	// pause/resume with the same contract as the vault transfer: export into
+	// the snapshot bundle before teardown, import re-stamped before
+	// data-plane-ready — the only authorized incarnation transfer for the
+	// recorded policy.
+	OperationPolicyExport Operation = "POLICY_EXPORT"
+	OperationPolicyImport Operation = "POLICY_IMPORT"
 )
 
 // Lifecycle Hook names (v1). Unknown Hook names are rejected: the Handler
@@ -217,7 +225,8 @@ func (e *Envelope) Validate() error {
 		}
 	case OperationRemoveBinding:
 		// no payload required; terminal cleanup is identified by the sandbox ref
-	case OperationVaultExport, OperationVaultImport:
+	case OperationVaultExport, OperationVaultImport,
+		OperationPolicyExport, OperationPolicyImport:
 		if e.Snapshot == nil || strings.TrimSpace(e.Snapshot.Path) == "" {
 			return fmt.Errorf("%s requires a snapshot payload with a path", e.Operation)
 		}
@@ -291,4 +300,13 @@ type StatusResponse struct {
 	// as false: the Fastlet then skips the transfer (checkpoint proceeds
 	// without a vault) instead of failing it.
 	VaultTransfer bool `json:"vaultTransfer,omitempty"`
+	// PolicyTransfer reports that this Handler serves POLICY_EXPORT /
+	// POLICY_IMPORT and persists per-subject policy files (same shape as
+	// VaultTransfer). Absent decodes as false: the Fastlet skips the
+	// policy transfer instead of failing the checkpoint.
+	PolicyTransfer bool `json:"policyTransfer,omitempty"`
+	// PolicyRecovery is true while the policy persistence recovery latch
+	// freezes policy relay writes until restart (same mechanics as
+	// vaultRecovery).
+	PolicyRecovery bool `json:"policyRecovery,omitempty"`
 }

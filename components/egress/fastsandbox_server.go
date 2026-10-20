@@ -78,6 +78,26 @@ type fastSandboxPolicyServer struct {
 	// lock-free so healthz never contends).
 	vaultRecovery atomic.Pointer[vaultRecoveryState]
 
+	// policies tracks the recorded policy of each subject: the revision the
+	// relay preconditions fence on, the runtime fence the state was
+	// materialized under, and whether the policy is file-backed (loaded from
+	// the persisted file — the binding input no longer drives it). The
+	// policy itself lives in the registry (active subjects) or
+	// pendingPolicies (denying subjects); this entry carries only the
+	// bookkeeping the vault entry carries for vault state.
+	policies map[subject.Subject]*policyEntry
+	// policyFiles owns the per-subject policy files; nil keeps the policy
+	// memory-only (the default).
+	policyFiles *policyPersistence
+	// policyRecovery is the policy persistence recovery latch (same
+	// mechanics as vaultRecovery).
+	policyRecovery atomic.Pointer[policyRecoveryState]
+	// policyCommitMu serializes policy file-commit operations process-wide:
+	// the Fastlet serializes same-UID actions, but relayed writers from
+	// server replicas do not serialize with each other or with a concurrent
+	// SET_BINDING commit.
+	policyCommitMu sync.Mutex
+
 	// gatewayDNSRefs maps each subject to its gateway so the shared
 	// prerouting REDIRECT (sandbox DNS -> loopback proxy) is installed once
 	// per gateway and removed when the last subject using it is gone. Keyed
@@ -114,6 +134,7 @@ func newFastSandboxPolicyServer(ctx context.Context, reg *subject.MemoryRegistry
 		nft:                nft,
 		vaults:             make(map[subject.Subject]vaultEntry),
 		pendingPolicies:    make(map[subject.Subject]*policy.NetworkPolicy),
+		policies:           make(map[subject.Subject]*policyEntry),
 		subjAtt:            make(map[subject.Subject]actionhandler.NetworkAttachment),
 		gatewayDNSRefs:     make(map[subject.Subject]netip.Addr),
 		dnsRedirectInstall: iptables.SetupGatewayDNSRedirect,
@@ -226,13 +247,15 @@ func (s *fastSandboxPolicyServer) releaseGatewayDNSRedirect(subj subject.Subject
 
 // Handler returns the fast-sandbox-profile HTTP mux: the Sandbox Actions Handler
 // endpoints (Fastlet, envelope-driven) plus the healthz probe. Policy rides the
-// SET_BINDING binding input; the credential vault is egress-held behind the
+// SET_BINDING binding input at create and the relay surface (/policy/
+// {sandboxUid}) at runtime; the credential vault is egress-held behind the
 // FastPath handler-relay (OSEP-0022) — there is no proxy-route surface.
 func (s *fastSandboxPolicyServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(constants.ActionsStatusPath, s.handleActionsStatus)
 	mux.HandleFunc(constants.ActionsDispatchPath, s.handleActions)
 	mux.HandleFunc(constants.VaultRelayPathPrefix, s.handleVaultRelay)
+	mux.HandleFunc(constants.PolicyRelayPathPrefix, s.handlePolicyRelay)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	return mux
 }
@@ -253,6 +276,9 @@ type healthzResponse struct {
 	// VaultHealthIssue is the non-empty vault-persistence reason (recovery
 	// latch; see fastsandbox_vault_persist.go). Status mirrors its class.
 	VaultHealthIssue string `json:"vaultHealthIssue,omitempty"`
+	// PolicyHealthIssue is the non-empty policy-persistence reason (recovery
+	// latch; see fastsandbox_policy_persist.go).
+	PolicyHealthIssue string `json:"policyHealthIssue,omitempty"`
 }
 
 // handleHealthz: 503 while the mitm stack is not ready (pre-create probe) and
@@ -277,6 +303,13 @@ func (s *fastSandboxPolicyServer) handleHealthz(w http.ResponseWriter, _ *http.R
 			})
 			return
 		}
+		if issue := s.policyHealthIssue(); issue != "" {
+			writeJSON(w, http.StatusServiceUnavailable, healthzResponse{
+				Status:            "policy-unhealthy",
+				PolicyHealthIssue: issue,
+			})
+			return
+		}
 		if s.mitmGate.MitmPending() {
 			writeJSON(w, http.StatusServiceUnavailable, healthzResponse{Status: "mitmproxy-not-ready"})
 			return
@@ -291,6 +324,13 @@ func (s *fastSandboxPolicyServer) handleHealthz(w http.ResponseWriter, _ *http.R
 		writeJSON(w, http.StatusServiceUnavailable, healthzResponse{
 			Status:           "vault-unhealthy",
 			VaultHealthIssue: issue,
+		})
+		return
+	}
+	if issue := s.policyHealthIssue(); issue != "" {
+		writeJSON(w, http.StatusServiceUnavailable, healthzResponse{
+			Status:            "policy-unhealthy",
+			PolicyHealthIssue: issue,
 		})
 		return
 	}
@@ -502,14 +542,17 @@ func (s *fastSandboxPolicyServer) takeoverStaleSubject(stale subject.Subject) er
 }
 
 // dropSubjectState removes every piece of per-subject bookkeeping (vault,
-// pending policy, attachment) plus the persisted vault file — terminal
-// cleanup (OSEP-0022: REMOVE_BINDING purges memory + file).
+// policy record, pending policy, attachment) plus the persisted vault and
+// policy files — terminal cleanup (OSEP-0022: REMOVE_BINDING purges memory +
+// file).
 func (s *fastSandboxPolicyServer) dropSubjectState(subj subject.Subject) {
 	s.mu.Lock()
 	delete(s.vaults, subj)
+	delete(s.policies, subj)
 	delete(s.pendingPolicies, subj)
 	delete(s.subjAtt, subj)
 	s.purgeVaultFile(subj)
+	s.purgePolicyFile(subj)
 	s.mu.Unlock()
 }
 

@@ -60,17 +60,29 @@ const (
 // server↔egress contract terminated by the FastPath handler-relay. Every op
 // may carry the expectedIncarnation precondition (the owning runtime
 // instance recorded at SET_BINDING); a mismatch is a 412.
+//
+// Relay policy surface mirrors the vault relay: /policy/{sandboxUid}
+// terminates the same handler-relay channel for the subject's recorded
+// egress policy (full replace with an optional expectedRevision, deny-first
+// on DELETE).
 const (
 	EgressVaultIncarnationHeader = "X-Fast-Sandbox-Incarnation"
 
 	VaultRelayPathPrefix = "/vault/"
+
+	PolicyRelayPathPrefix = "/policy/"
 )
 
 // EnvEgressVaultDir (fast-sandbox profile): directory for the per-subject
 // vault files on the Pod-scoped emptyDir volume. Empty/unset keeps the vault
 // memory-only; the sidecar profile never persists.
+//
+// EnvEgressPolicyDir (fast-sandbox profile): directory for the per-subject
+// policy files with the same semantics. Persistence is required for the
+// POLICY_EXPORT / POLICY_IMPORT snapshot transfer.
 const (
-	EnvEgressVaultDir = "OPENSANDBOX_EGRESS_VAULT_DIR"
+	EnvEgressVaultDir  = "OPENSANDBOX_EGRESS_VAULT_DIR"
+	EnvEgressPolicyDir = "OPENSANDBOX_EGRESS_POLICY_DIR"
 )
 
 const (

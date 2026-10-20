@@ -50,13 +50,19 @@ var errVaultSnapshotTooLarge = fmt.Errorf("vault bundle file exceeds %d bytes", 
 // inside the vault persistence directory — reserved for per-subject vault
 // files (an export target there could clobber another subject's vault).
 func (p *vaultPersistence) reservesPath(path string) bool {
-	rel, err := filepath.Rel(filepath.Clean(p.dir), filepath.Clean(path))
+	return reservesPathUnder(p.dir, path)
+}
+
+// reservesPathUnder is the shared path-reservation check for the per-subject
+// state directories: only the parent chain may be outside; children whose
+// names begin with dots (e.g. "..victim.json") are inside the reserved
+// subtree. Uncomparable paths fail closed.
+func reservesPathUnder(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
 	if err != nil {
 		// Uncomparable — fail closed.
 		return true
 	}
-	// Only the parent chain is outside; children whose names begin with
-	// dots (e.g. "..victim.json") are inside the reserved subtree.
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 

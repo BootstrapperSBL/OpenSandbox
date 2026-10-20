@@ -67,48 +67,80 @@ type vaultPersistence struct {
 // the volume joins the credential trust surface) and sweeps staged leftovers:
 // startup loads the committed files only.
 func newVaultPersistence(dir string) (*vaultPersistence, error) {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return nil, errors.New("vault persistence directory is empty")
-	}
-	if !filepath.IsAbs(dir) {
-		return nil, fmt.Errorf("vault persistence directory %q must be absolute", dir)
-	}
-	for _, part := range strings.Split(dir, string(os.PathSeparator)) {
-		if part == ".." {
-			return nil, fmt.Errorf("vault persistence directory %q must not traverse parents", dir)
-		}
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("prepare vault directory %s: %w", dir, err)
-	}
-	// Reject a symlinked vault directory BEFORE chmod/sweep act through it
-	// (the per-file atomic machinery re-validates no-follow on every real
-	// vault op; this keeps startup from mutating a link target first).
-	if info, err := os.Lstat(dir); err != nil {
-		return nil, fmt.Errorf("inspect vault directory %s: %w", dir, err)
-	} else if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("vault persistence directory %q must not be a symlink", dir)
-	} else if !info.IsDir() {
-		return nil, fmt.Errorf("vault persistence directory %q is not a directory", dir)
-	}
-	// An existing directory may carry wider bits from a previous generation.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("restrict vault directory %s: %w", dir, err)
-	}
-	// The volume root must pass the atomic machinery's trusted-ancestor
-	// check; kubelet creates emptyDir roots 0777, which fails it.
-	if err := restrictVolumeRoot(dir); err != nil {
+	if err := prepareStateDir(dir, "vault"); err != nil {
 		return nil, err
-	}
-	if err := sweepVaultTempFiles(dir); err != nil {
-		return nil, fmt.Errorf("sweep staged vault leftovers in %s: %w", dir, err)
 	}
 	return &vaultPersistence{
 		dir:     dir,
 		newFile: func(path string) (vaultFileStore, error) { return policy.NewAtomicPolicyFile(path) },
 		files:   make(map[subject.Subject]vaultFileStore),
 	}, nil
+}
+
+// prepareStateDir validates and prepares one per-subject state directory
+// (0700, no symlink, no traversal) for the atomic file machinery: it sweeps
+// staging leftovers a crashed writer left behind, so startup loads the
+// committed files only. noun names the state kind in errors and logs
+// ("vault", "policy").
+func prepareStateDir(dir, noun string) error {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return fmt.Errorf("%s persistence directory is empty", noun)
+	}
+	if !filepath.IsAbs(dir) {
+		return fmt.Errorf("%s persistence directory %q must be absolute", noun, dir)
+	}
+	for _, part := range strings.Split(dir, string(os.PathSeparator)) {
+		if part == ".." {
+			return fmt.Errorf("%s persistence directory %q must not traverse parents", noun, dir)
+		}
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("prepare %s directory %s: %w", noun, dir, err)
+	}
+	// Reject a symlinked state directory BEFORE chmod/sweep act through it
+	// (the per-file atomic machinery re-validates no-follow on every real
+	// op; this keeps startup from mutating a link target first).
+	if info, err := os.Lstat(dir); err != nil {
+		return fmt.Errorf("inspect %s directory %s: %w", noun, dir, err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s persistence directory %q must not be a symlink", noun, dir)
+	} else if !info.IsDir() {
+		return fmt.Errorf("%s persistence directory %q is not a directory", noun, dir)
+	}
+	// An existing directory may carry wider bits from a previous generation.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("restrict %s directory %s: %w", noun, dir, err)
+	}
+	// The volume root must pass the atomic machinery's trusted-ancestor
+	// check; kubelet creates emptyDir roots 0777, which fails it.
+	if err := restrictVolumeRoot(dir); err != nil {
+		return err
+	}
+	if err := sweepStateTempFiles(dir, noun); err != nil {
+		return fmt.Errorf("sweep staged %s leftovers in %s: %w", noun, dir, err)
+	}
+	return nil
+}
+
+// sweepStateTempFiles unlinks staging files a crashed writer left behind
+// (rename never attempted — unconfirmed candidate state).
+func sweepStateTempFiles(dir, noun string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, policy.AtomicTempPrefix) || !strings.HasSuffix(name, policy.AtomicTempSuffix) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return fmt.Errorf("discard staged leftover %s: %w", name, err)
+		}
+		log.Infof("%s persistence: discarded staged leftover %s", noun, name)
+	}
+	return nil
 }
 
 // restrictVolumeRoot clears group/world-write bits from the vault volume
@@ -149,21 +181,7 @@ func restrictVolumeRoot(dir string) error {
 // sweepVaultTempFiles unlinks staging files a crashed writer left behind
 // (rename never attempted — unconfirmed candidate state).
 func sweepVaultTempFiles(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasPrefix(name, policy.AtomicTempPrefix) || !strings.HasSuffix(name, policy.AtomicTempSuffix) {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil {
-			return fmt.Errorf("discard staged leftover %s: %w", name, err)
-		}
-		log.Infof("vault persistence: discarded staged leftover %s", name)
-	}
-	return nil
+	return sweepStateTempFiles(dir, "vault")
 }
 
 // vaultFileUID strips the internal "s-" prefix: the file contract names files
