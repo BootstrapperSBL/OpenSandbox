@@ -143,31 +143,26 @@ func sweepStateTempFiles(dir, noun string) error {
 	return nil
 }
 
-// stateDirNames are the basenames of the per-subject state directories that
-// share one egress volume root, registered at assembly from the CONFIGURED
-// paths (the basename is deployment-owned, so it cannot be hardcoded; the
-// conventional names stay pre-seeded). restrictVolumeRoot treats registered
-// siblings as ours — without this, whichever directory initializes second
-// would see the first as foreign, skip the volume-root restriction, and the
-// atomic machinery would then reject every file op on the untrusted
-// ancestor.
+// stateDirNames are the basenames of the per-subject state directories
+// sharing one egress volume root, registered at assembly from the CONFIGURED
+// paths (the basename is deployment-owned). restrictVolumeRoot treats
+// registered siblings as ours — otherwise the second initializer skips the
+// volume-root restriction and the atomic machinery rejects every file op on
+// the untrusted ancestor.
 var stateDirNames = map[string]bool{
 	"vault":  true,
 	"policy": true,
 }
 
-// registerStateDirName records a configured state directory basename so the
-// volume-root restriction recognizes it as a sibling.
+// registerStateDirName records a configured state directory basename.
 func registerStateDirName(dir string) {
 	stateDirNames[filepath.Base(filepath.Clean(dir))] = true
 }
 
 // restrictVolumeRoot clears group/world-write bits from the state volume
-// root (the state directory's parent): kubelet creates emptyDir roots 0777,
-// which the atomic machinery rejects as an untrusted ancestor. Sibling
-// state directories (stateDirNames) belong to us; a root holding any
-// other entry is left untouched — that is the manifest's job — and
-// already-restrictive roots are a no-op.
+// root: kubelet creates emptyDir roots 0777, which the atomic machinery
+// rejects as an untrusted ancestor. Registered siblings belong to us; a
+// root holding any other entry is left untouched (the manifest's job).
 func restrictVolumeRoot(dir, noun string) error {
 	parent := filepath.Dir(dir)
 	info, err := os.Stat(parent)

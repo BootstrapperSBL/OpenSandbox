@@ -311,11 +311,9 @@ func (s *fastSandboxPolicyServer) vaultSealedLocked(subj subject.Subject) bool {
 }
 
 // vaultValidationPolicy returns the policy a vault op validates against:
-// the effective policy of an active subject, or — while the subject is
-// still denying — its pending binding policy MERGED with the always
-// overlay (the op is held to the data-plane-ready barrier, so validation
-// must not depend on hook timing). Call this BEFORE s.mu — it reads the
-// registry (lock order: registry → s.mu, see handleVaultRelayWrite).
+// the effective policy of an active subject, or the pending policy merged
+// with the always overlay while denying (a barrier-held op must not depend
+// on hook timing). Call BEFORE s.mu — it reads the registry.
 func (s *fastSandboxPolicyServer) vaultValidationPolicy(subj subject.Subject) *policy.NetworkPolicy {
 	effective := s.reg.EffectivePolicy(subj)
 	if effective != nil {

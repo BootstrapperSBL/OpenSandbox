@@ -291,18 +291,11 @@ func (s *fastSandboxPolicyServer) policyHealthIssue() string {
 	return ""
 }
 
-// clearPolicyRecord removes the subject's recorded policy (binding removal
-// on a still-live sandbox): the in-memory record and pending policy go, and
-// the persisted file is purged so the deny-first state is also the durable
-// state. An uncertain/failed purge falls back to persisting a default-deny
-// tombstone at the successor revision — a leftover file whose recorded
-// content still matches the removed policy would otherwise be loaded by a
-// later same-fence registration or restart, resurrecting an acknowledged-
-// away policy. A tombstone persist failure latches recovery (writes frozen
-// until restart). Serialized with the relay commits (policyCommitMu) so an
-// in-flight write against the removed binding cannot recreate the record
-// after the purge. The caller holds policyCommitMu (the SET_BINDING
-// mutation hold); never call under the registry write lock.
+// clearPolicyRecordLocked removes the recorded policy (binding removal on a
+// still-live sandbox). A failed purge falls back to a default-deny
+// tombstone — a leftover file would otherwise resurrect the removed policy
+// at the next same-fence registration; a tombstone persist failure latches
+// recovery. The caller holds policyCommitMu.
 func (s *fastSandboxPolicyServer) clearPolicyRecordLocked(subj subject.Subject) error {
 	s.mu.Lock()
 	entry := s.policies[subj]
@@ -358,25 +351,17 @@ func (s *fastSandboxPolicyServer) clearPolicyRecordLocked(subj subject.Subject) 
 // (re)registration of a subject with no recorded policy entry, load its
 // committed file, fenced by the full runtime identity:
 //
-//   - fence match → the file is authoritative — the replayed binding input
-//     carries only the original bootstrap policy, never the relay mutations
-//     recorded since — and the record materializes from the file
-//   - mismatch → stale, purged (a reset never inherits the predecessor's
-//     policy)
-//   - unreadable, a newer schema, or content that fails to parse → the
-//     subject DEGRADES fail-closed: the pending policy becomes default-deny
-//     and the degraded mark surfaces on the actions status (a successful
-//     relay PUT heals it). The file may carry an acknowledged runtime
-//     change this egress can no longer read — the bootstrap input could be
-//     more permissive, so it must not seed
+//   - fence match → the file is authoritative (the replayed input carries
+//     only the bootstrap policy, never relay mutations)
+//   - mismatch → stale, purged
+//   - unreadable, a newer schema, or unparseable → the subject DEGRADES
+//     fail-closed (pending default-deny, healed by a relay PUT) — the
+//     bootstrap input could be more permissive than the unreadable runtime
+//     change, so it must not seed
 //
-// Removal SET_BINDINGS skip the reload (clearPolicyRecord handles them).
-// A live record for this exact fence wins (duplicate SET_BINDING); one left
-// under a different fence goes through the file rules as a fresh
-// registration. The reload runs BEFORE RegisterAndEnforce so no concurrent
-// action can materialize state ahead of it, mirroring rehydrateVaultReload;
-// a failed registration leaves the reloaded pending policy on a denying
-// subject, which the Fastlet's retry converges.
+// Removal SET_BINDINGS skip the reload (clearPolicyRecordLocked). A live
+// record for this exact fence wins (duplicate SET_BINDING). Runs BEFORE
+// RegisterAndEnforce, mirroring rehydrateVaultReload.
 func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fence subject.Fencing) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -460,13 +445,10 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 }
 
 // applyBindingPolicyLocked seeds the binding's policy for a freshly
-// registered subject (record absent) through the same commit protocol as
-// the relay writes. The caller holds policyCommitMu (the SET_BINDING
-// mutation hold). A subject with an existing record never reads its
-// binding input again: the recorded policy — seeded once, then owned by the relay writes
-// and the snapshot transfer — is authoritative, exactly like the vault
-// slice. Binding replays (at-least-once delivery, egress restarts, and the
-// superseded CRD-driven update path) are therefore policy no-ops.
+// registered subject (record absent). A subject with an existing record
+// never reads its binding input again — the recorded policy is
+// authoritative, like the vault slice — so binding replays are policy
+// no-ops. The caller holds policyCommitMu.
 func (s *fastSandboxPolicyServer) applyBindingPolicyLocked(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, stateActive bool) error {
 	s.mu.Lock()
 	entry := s.policies[subj]

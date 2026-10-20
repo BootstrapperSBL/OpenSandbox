@@ -22,7 +22,7 @@ the revision state machine):
 - ``PATCH`` composed server-side: relay ``GET`` → merge in memory → relay
   ``PUT`` carrying the read revision as ``expectedRevision`` (the
   per-sandbox in-process lock serializes local merges; the revision
-  precondition is the cross-replica backstop — a stale writer gets 412).
+  precondition is the cross-replica backstop — a stale writer gets 409).
 
 No policy state is persisted server-side; reads reflect exactly what the
 egress enforces.
@@ -160,12 +160,7 @@ def relay_put(service, sandbox_id: str, normalized: dict) -> dict:
 
 
 def relay_patch(service, sandbox_id: str, rules: list[NetworkRule]) -> dict:
-    """PATCH composed server-side: GET → merge → PUT(expectedRevision).
-
-    The per-sandbox in-process lock serializes local merges; the revision
-    precondition inside the merged PUT is the cross-replica backstop (a
-    concurrent writer commits first and the stale PATCH sees 412).
-    """
+    """PATCH composed server-side: GET → merge → PUT(expectedRevision)."""
     with service.policy_lock(sandbox_id):
         state = _relay_get_full(service, sandbox_id)
         merged = merge_policy_rules(state["policy"], rules)
@@ -182,7 +177,7 @@ def relay_patch(service, sandbox_id: str, rules: list[NetworkRule]) -> dict:
 
 
 def relay_delete_rules(service, sandbox_id: str, targets: list[str]) -> dict:
-    """Remove rules by target (idempotent) through the relay."""
+    """Remove rules by target (idempotent): GET → filter → PUT."""
     with service.policy_lock(sandbox_id):
         state = _relay_get_full(service, sandbox_id)
         kept = delete_policy_rules(state["policy"], targets)

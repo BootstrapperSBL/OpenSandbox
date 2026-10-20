@@ -78,9 +78,8 @@ const (
 // memory-only; the sidecar profile never persists.
 //
 // EnvEgressPolicyDir (fast-sandbox profile): REQUIRED — directory for the
-// per-subject policy files. The recorded policy is egress-held state; there
-// is no memory-only posture (the profile fails startup without it), so the
-// binding input never becomes a policy recovery source.
+// per-subject policy files. The recorded policy is egress-held state; the
+// profile fails startup without it.
 const (
 	EnvEgressVaultDir  = "OPENSANDBOX_EGRESS_VAULT_DIR"
 	EnvEgressPolicyDir = "OPENSANDBOX_EGRESS_POLICY_DIR"

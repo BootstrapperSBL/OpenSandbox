@@ -57,11 +57,8 @@ const (
 	// transfer.
 	OperationVaultExport Operation = "VAULT_EXPORT"
 	OperationVaultImport Operation = "VAULT_IMPORT"
-	// PolicyExport/Import carry the subject's persisted egress policy across
-	// pause/resume with the same contract as the vault transfer: export into
-	// the snapshot bundle before teardown, import re-stamped before
-	// data-plane-ready — the only authorized incarnation transfer for the
-	// recorded policy.
+	// PolicyExport/Import carry the recorded policy across pause/resume
+	// with the same contract as the vault transfer.
 	OperationPolicyExport Operation = "POLICY_EXPORT"
 	OperationPolicyImport Operation = "POLICY_IMPORT"
 )
@@ -301,15 +298,12 @@ type StatusResponse struct {
 	// without a vault) instead of failing it.
 	VaultTransfer bool `json:"vaultTransfer,omitempty"`
 	// PolicyTransfer reports that this Handler serves POLICY_EXPORT /
-	// POLICY_IMPORT and persists per-subject policy files (same shape as
-	// VaultTransfer). Absent decodes as false: the Fastlet skips the
-	// policy transfer instead of failing the checkpoint.
+	// POLICY_IMPORT and persists per-subject policy files.
 	PolicyTransfer bool `json:"policyTransfer,omitempty"`
 	// PolicyRecovery is true while the policy persistence recovery latch
-	// freezes policy relay writes until restart (same mechanics as
-	// vaultRecovery); DegradedPolicies lists subjects whose persisted
-	// policy failed to load (default-deny fail closed for them; a
-	// successful relay write clears it).
+	// freezes policy relay writes until restart; DegradedPolicies lists
+	// subjects whose persisted policy failed to load (default-deny fail
+	// closed for them; a relay write heals).
 	PolicyRecovery   bool     `json:"policyRecovery,omitempty"`
 	DegradedPolicies []string `json:"degradedPolicies,omitempty"`
 }

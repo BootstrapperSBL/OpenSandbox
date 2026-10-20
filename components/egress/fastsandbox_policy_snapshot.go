@@ -46,21 +46,13 @@ const maxPolicySnapshotBytes = policy.MaxEncodedPolicyFileBytes
 
 var errPolicySnapshotTooLarge = fmt.Errorf("policy bundle file exceeds %d bytes", maxPolicySnapshotBytes)
 
-// applyPolicyExport copies the subject's recorded policy file into the bundle
-// target and marks the subject sealed. A subject without a policy file just
-// seals. Any failure leaves the subject unsealed and its enforcement
-// unchanged; what the pause flow does with that is the caller's call — the
-// fast-sandbox driver fails the pause checkpoint, so the teardown never runs
-// without a bundle. A retried export re-copies idempotently (while sealed no
-// relay op can change the source).
-//
-// Three phases: guards + a consistent source image under s.mu, the
-// driver-owned copy without the lock (it may be slow; every action and relay
-// op goes through s.mu), then a re-check under the lock — sealed only if the
-// source is still the exact copied image, else 409. The recovery latch
-// rejects the export in both guarded phases: with on-disk state unconfirmed,
-// the copy plus the teardown purge would make uncertain bytes the only
-// surviving recorded policy.
+// applyPolicyExport copies the recorded policy file into the bundle target
+// and seals the subject (a subject without a policy file just seals).
+// Failures leave it unsealed and enforcement unchanged — the driver fails
+// the pause checkpoint and retries. Three phases, the guarded ones
+// serialized with the relay commits: guards + source image, the copy, then
+// re-check + seal (source changed mid-copy → 409; the recovery latch
+// rejects the export in both guarded phases).
 func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope) (int, error) {
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
@@ -205,19 +197,13 @@ func (s *fastSandboxPolicyServer) policyExportSourceImageLocked(subj subject.Sub
 	return snap, 0, nil
 }
 
-// applyPolicyImport lands the bundle file as the subject's policy file,
-// re-stamped with the restored fence from the envelope (restore may land on
-// any Pod, so the recorded incarnation is replaced, not compared). The file
-// goes through the commit protocol and the record materializes from the bundle;
-// the policy activates at the same data-plane-ready barrier as the vault.
-//
-// The bundle is read, decoded, and parsed before the commit serialization.
-// Delivery is at-least-once: a local revision newer than the bundle acks
-// idempotently — relay writes after the first import are never rolled back.
-// Unregistered (before SET_BINDING), only the file lands and the
-// registration-time reload validates it; registered under the envelope
-// fence, the policy installs into the live record and a rejected bundle is
-// a 400 with last-good kept.
+// applyPolicyImport lands the bundle as the subject's policy file,
+// re-stamped with the restored fence from the envelope (the only authorized
+// incarnation transfer) and installs it file-backed. Delivery is
+// at-least-once: a local revision newer than the bundle acks idempotently.
+// Unregistered (before SET_BINDING), only the file lands — the
+// registration-time reload validates it; registered, the policy installs
+// into the live record and a rejected bundle is a 400 with last-good kept.
 func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope) (int, error) {
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)

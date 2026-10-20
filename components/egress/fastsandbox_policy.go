@@ -12,26 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Relay policy surface: /policy/{sandboxUid} terminates the FastPath
-// handler-relay (server → FastPath → Fastlet → this loopback listener) for
-// the subject's recorded egress policy — the runtime twin of the vault relay
-// (fastsandbox_vault.go). The binding input seeds the policy at create; the
-// relay owns every runtime mutation, and the mutation is authoritative over
-// later binding replays (see rehydratePolicyReload).
-//
-// Surface: GET the recorded policy with its revision, PUT a full replace
-// with an optional expectedRevision (412 on mismatch, creates when absent),
-// DELETE reverting the subject to deny-first. POST/PATCH are deliberately
-// absent: creation is unconditional PUT, and a patch composes server-side
-// (relay GET → merge → relay PUT), mirroring the vault relay.
-//
-// Sidecar-parity guards on every op: unregistered subject → 404, never
-// cached; expectedIncarnation mismatch → 412; sealed (exported for a
-// pause checkpoint) → 409; policy persistence recovery latch → 503 on
-// writes (GET keeps serving the in-memory record). Validation failure →
-// 400 NACK keeping last-good. With persistence enabled
-// every write runs the commit protocol — persist → apply → ack — so the ack
-// means durable AND applied (see fastsandbox_policy_persist.go).
+// Relay policy surface: /policy/{sandboxUid} — the runtime twin of the
+// vault relay. The binding input seeds the policy at create; the relay owns
+// every runtime mutation. GET returns the recorded policy + revision; PUT
+// is a full replace (optional expectedRevision); DELETE reverts to
+// default-deny. Every write runs persist → apply → ack.
 package main
 
 import (
@@ -48,12 +33,11 @@ import (
 )
 
 // policyEntry records the per-subject policy bookkeeping: the revision the
-// relay preconditions fence on, the runtime fence the record was
-// materialized under, and the sealed flag. The policy itself lives in the
-// registry (active subjects) or pendingPolicies (denying subjects). A
-// record is authoritative once it exists: the binding input only ever
-// seeds a fresh subject, and every later policy change goes through the
-// relay or the snapshot transfer — exactly like the vault.
+// relay preconditions fence on, the runtime fence, and the state flags. The
+// policy itself lives in the registry (active) or pendingPolicies
+// (denying). A record is authoritative once it exists: the binding input
+// only ever seeds a fresh subject — later changes ride the relay or the
+// snapshot transfer, like the vault.
 type policyEntry struct {
 	revision int64
 	fence    subject.Fencing
@@ -104,20 +88,13 @@ func (s *fastSandboxPolicyServer) handlePolicyRelay(w http.ResponseWriter, r *ht
 	}
 }
 
-// selectRelayPolicy decides registration, the expectedIncarnation
-// precondition, the seal, and the recorded policy. Registry reads happen
-// BEFORE s.mu — the lock order is registry → s.mu everywhere (the takeover
-// path holds the registry write lock while purging subject state under
-// s.mu; the reverse order deadlocks the DNS hot path). A fence change
-// between the read and the lock is bounded: the purge removes the record,
-// and the write paths re-validate the fence at commit time.
+// selectRelayPolicy serves GET: registration, expectedIncarnation, seal,
+// and the recorded policy. Held across the whole read so the policy body
+// and its revision come from the same commit (the server's GET→merge→PUT
+// PATCH uses the revision as its precondition). Lock order:
+// policyCommitMu → registry → s.mu (see fastsandbox_server.go's takeover
+// path; the reverse order deadlocks the DNS hot path).
 func (s *fastSandboxPolicyServer) selectRelayPolicy(r *http.Request, subj subject.Subject) (*policyRelayDocument, int, string) {
-	// Serialized with the policy commits: the policy body and its revision
-	// must come from the SAME commit, or a GET overlapping a PUT would pair
-	// the old policy with the new revision — and the server's GET→merge→PUT
-	// PATCH would then present that revision and overwrite the concurrent
-	// replacement. Lock order: policyCommitMu → registry → s.mu (matches
-	// the commit paths).
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 	fence, ok := s.reg.Fence(subj)
@@ -154,15 +131,9 @@ func (s *fastSandboxPolicyServer) selectRelayPolicy(r *http.Request, subj subjec
 }
 
 // handlePolicyRelayWrite serves PUT (full replace, create-when-absent) and
-// DELETE (revert to deny-first).
-//
-// The body is parsed and the policy validated BEFORE the commit serialization
-// is taken: a stalled or invalid client must never hold it. Guards run under
-// s.mu; the commit protocol itself serializes per process on
-// policyCommitMu (the Fastlet serializes same-UID actions, but relayed
-// writers from server replicas do not serialize with each other), and the
-// apply closures take s.mu only for the bookkeeping maps — never around
-// enforcement, which takes the registry write lock.
+// DELETE (revert to default-deny). The body is parsed and validated before
+// policyCommitMu is taken (a stalled or invalid client must never hold
+// it); the whole write — guards, decision, commit — serializes on it.
 func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, r *http.Request, subj subject.Subject) {
 	var doc policyRelayDocument
 	if r.Method == http.MethodPut {
@@ -204,18 +175,13 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 		return
 	}
 
-	// Serialize the whole write — guards, decision, and commit — per
-	// process on policyCommitMu: the Fastlet serializes same-UID actions,
-	// but relayed writers from server replicas do not serialize with each
-	// other or with a concurrent SET_BINDING commit. The decision must be
-	// commit-atomic or two racing replaces could land the same revision.
-	// The ordering policyCommitMu → s.mu is the commit path's; enforcement
-	// in the apply closures never runs under s.mu.
+	// The decision must be commit-atomic or two racing replaces could land
+	// the same revision. Enforcement in the apply closures never runs
+	// under s.mu (it takes the registry write lock).
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 
-	// Registry reads before s.mu (lock order: registry → s.mu, see
-	// selectRelayPolicy); the commit-time target re-check closes the TOCTOU.
+	// Registry reads before s.mu (lock order: registry → s.mu).
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		http.Error(w, "unknown subject", http.StatusNotFound)
@@ -225,8 +191,6 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 		http.Error(w, "expectedIncarnation mismatch", http.StatusPreconditionFailed)
 		return
 	}
-	// Guards + decision under one s.mu hold, serialized against rebinds and
-	// terminal purges (the whole write already holds policyCommitMu).
 	s.mu.Lock()
 	if !s.fenceMatchesLocked(subj, fence) {
 		s.mu.Unlock()
@@ -293,13 +257,10 @@ func relayPolicyPrecondition(doc *policyRelayDocument) (expected *int64, err err
 	return expected, err
 }
 
-// putRelayPolicy commits a full replace: persist → apply → ack, so the ack
-// means durable AND applied. The caller holds policyCommitMu (the decision
-// and the commit are one serialized unit, and the data-plane-ready hook
-// serializes on the same mutex). The apply closure re-reads the lifecycle
-// state and the registration fence — both can change between the guard
-// phase and this commit (a concurrent hook activation, a rebind) — so the
-// recorded state can never diverge from what was actually enforced.
+// putRelayPolicy commits a full replace: persist → apply → ack. The caller
+// holds policyCommitMu (guards and commit are one serialized unit). The
+// apply closure re-reads the lifecycle state and fence at apply time —
+// both can change between the guards and the commit.
 func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.Request, subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, newRev int64, created bool) {
 	raw, err := json.Marshal(pol)
 	if err != nil {
@@ -322,13 +283,10 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 			}
 		}
 		s.mu.Lock()
-		// The pending slot mirrors what is enforced in BOTH states: on a
-		// denying subject it is the barrier's payload; on an active one it
-		// keeps an at-least-once data-plane-ready replay idempotent (a
-		// stale deny tombstone must never re-enforce over the replacement).
+		// The pending slot mirrors what is enforced, so a replayed
+		// data-plane-ready is idempotent.
 		s.pendingPolicies[subj] = pol
-		// A fresh entry also clears a degraded mark: the successful write
-		// IS the heal.
+		// A fresh entry also clears a degraded mark: the write IS the heal.
 		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}
 		s.mu.Unlock()
 		return nil
@@ -361,12 +319,10 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 	writeJSON(w, putResponseStatus(created), doc)
 }
 
-// policyCommitTarget re-reads the subject's lifecycle state and verifies
-// the registration fence still matches the commit's — the data-plane-ready
-// activation and rebinds run outside the commit serialization, so a stale
-// apply must be aborted (the commit protocol rolls the file back) instead
-// of landing on the wrong identity or state. Registry reads only: no s.mu
-// (lock order: registry → s.mu, see selectRelayPolicy).
+// policyCommitTarget re-reads the lifecycle state and registration fence at
+// apply time: activation and rebinds run outside the commit serialization,
+// so a stale apply aborts (the protocol rolls the file back) instead of
+// landing on the wrong identity or state. Registry reads only — no s.mu.
 func (s *fastSandboxPolicyServer) policyCommitTarget(subj subject.Subject, fence subject.Fencing) (subject.State, error) {
 	regFence, ok := s.reg.Fence(subj)
 	if !ok || regFence != fence {
@@ -385,13 +341,12 @@ func putResponseStatus(created bool) int {
 	return http.StatusOK
 }
 
-// deleteRelayPolicy commits the deletion as an authoritative default-deny
-// tombstone: the record persists at the successor revision (memory + file)
-// and enforcement becomes default-deny — in place on an active subject
-// (which stays active, so a later relay PUT re-enables immediately), held
-// pending on a denying one. An egress restart reloads the tombstone
-// instead of letting the replayed bootstrap binding resurrect the deleted
-// policy. GET serves the deny record. The caller holds policyCommitMu.
+// deleteRelayPolicy commits deletion as an authoritative default-deny
+// tombstone: the record persists at the successor revision, so a restart
+// reloads the deletion instead of letting the replayed bootstrap binding
+// resurrect the removed policy. On an active subject the deny applies in
+// place (stays active, so a later PUT re-enables immediately); on a
+// denying one it is held pending. The caller holds policyCommitMu.
 func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj subject.Subject, fence subject.Fencing, newRev int64) {
 	deny := policy.DefaultDenyPolicy()
 	apply := func() error {
@@ -400,22 +355,16 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 			return err
 		}
 		if state == subject.StateActive {
-			// Enforcement first: the deny tombstone applies IN PLACE — the
-			// subject stays active with default-deny enforced (the operator
-			// always overlay keeps applying), so a later relay PUT
-			// re-enables traffic immediately; the generic handler relay
-			// never replays a data-plane-ready hook to activate a
-			// pending-only replacement. nft commits before the registry
-			// state (fail-closed transition).
+			// Enforcement first (nft commits before the registry state).
+			// The subject stays active, so a later PUT re-enables without
+			// a hook replay.
 			if err := s.applyPolicy(subj, deny); err != nil {
 				return err
 			}
 		}
 		s.mu.Lock()
-		// The activation barrier keeps working across a hook replay: a
-		// replayed data-plane-ready activates the deny record, never a
-		// stale policy. On an active subject the pending deny is
-		// idempotent with what was just enforced.
+		// A replayed data-plane-ready activates the tombstone, never a
+		// stale policy.
 		s.pendingPolicies[subj] = deny
 		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}
 		s.mu.Unlock()

@@ -123,9 +123,8 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 		}
 	}
 
-	// Phase 3: seal only against the exact copied image; the fence is
-	// re-read fresh (registry before s.mu) so a rebind during the copy
-	// fails the export.
+	// Phase 3: re-check + seal; the fence is re-read fresh so a rebind
+	// during the copy fails the export.
 	regFence, registered = s.reg.Fence(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()

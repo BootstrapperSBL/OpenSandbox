@@ -21,13 +21,13 @@
 //
 // Operation mapping:
 //
-//	SET_BINDING        register the subject (deny-first), store the input
-//	                   policy as pending; activate immediately when the
-//	                   subject is already active (a plain input update does
-//	                   not replay Hooks). A JSON-null input removes the
-//	                   policy and reverts to deny-first. A key held by a
-//	                   different live subject is a stale-subject takeover
-//	                   (OSEP-0022): the previous owner goes first.
+//	SET_BINDING        register the subject (deny-first) and seed the input
+//	                   policy on a fresh subject (an existing record
+//	                   supersedes the input); activate immediately when the
+//	                   subject is already active. A JSON-null input removes
+//	                   the policy and reverts to deny-first. A key held by
+//	                   a different live subject is a stale-subject
+//	                   takeover (OSEP-0022): the previous owner goes first.
 //	LIFECYCLE_HOOK     sandbox.runtime-ready only confirms the deny-first
 //	                   install (idempotent); sandbox.data-plane-ready applies
 //	                   the pending policy -> active. Unknown Hooks are
@@ -197,15 +197,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 			return http.StatusBadRequest, fmt.Errorf("invalid binding input policy: %v", err)
 		}
 	}
-	// The WHOLE mutation runs under policyCommitMu — rebind purge,
-	// registration, and the seed/apply are one serialized unit against the
-	// relay commits and the hook activation. Without this, a
-	// predecessor-identity relay write holding policyCommitMu could
-	// straddle the rebind's fence flip: its apply closure passes the fence
-	// checks pre-registration, then its reg.ApplyPolicy lands on the
-	// SUCCESSOR's registry entry after RegisterAndEnforce — the successor
-	// would go active under the predecessor's policy. Lock order:
-	// policyCommitMu → registry → s.mu (matches the commit paths).
+	// The whole mutation holds policyCommitMu — rebind purge, registration,
+	// and seed/apply are one unit against relay commits and hooks.
+	// Otherwise a predecessor-identity relay write could straddle the
+	// fence flip and its reg.ApplyPolicy would activate the successor
+	// under the predecessor's policy. Lock order: policyCommitMu →
+	// registry → s.mu.
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 
