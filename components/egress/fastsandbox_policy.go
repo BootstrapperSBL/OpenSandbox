@@ -194,6 +194,10 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 		http.Error(w, "invalid policy: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if len(doc.Policy) > policy.MaxPolicyBodyBytes {
+		http.Error(w, fmt.Sprintf("policy body exceeds %d bytes", policy.MaxPolicyBodyBytes), http.StatusBadRequest)
+		return
+	}
 	expected, perr := relayPolicyPrecondition(&doc)
 	if perr != nil {
 		http.Error(w, perr.Error(), http.StatusBadRequest)
@@ -444,6 +448,6 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 		http.Error(w, "policy persistence failure", status)
 		return
 	}
-	log.Infof("subject %s: policy deleted (deny-first), record purged", subj)
+	log.Infof("subject %s: policy deleted (deny tombstone enforced and persisted at revision %d)", subj, newRev)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -114,7 +114,7 @@ func prepareStateDir(dir, noun string) error {
 	}
 	// The volume root must pass the atomic machinery's trusted-ancestor
 	// check; kubelet creates emptyDir roots 0777, which fails it.
-	if err := restrictVolumeRoot(dir); err != nil {
+	if err := restrictVolumeRoot(dir, noun); err != nil {
 		return err
 	}
 	if err := sweepStateTempFiles(dir, noun); err != nil {
@@ -143,28 +143,36 @@ func sweepStateTempFiles(dir, noun string) error {
 	return nil
 }
 
-// knownStateDirNames are the per-subject state directories that may share
-// one egress volume root (the vault and the recorded policy). A sibling
-// state directory is ours, not a foreign entry — without this, whichever
-// directory initializes second would see the first as foreign, skip the
-// volume-root restriction, and the atomic machinery would then reject every
-// file op on the untrusted ancestor.
-var knownStateDirNames = map[string]bool{
+// stateDirNames are the basenames of the per-subject state directories that
+// share one egress volume root, registered at assembly from the CONFIGURED
+// paths (the basename is deployment-owned, so it cannot be hardcoded; the
+// conventional names stay pre-seeded). restrictVolumeRoot treats registered
+// siblings as ours — without this, whichever directory initializes second
+// would see the first as foreign, skip the volume-root restriction, and the
+// atomic machinery would then reject every file op on the untrusted
+// ancestor.
+var stateDirNames = map[string]bool{
 	"vault":  true,
 	"policy": true,
 }
 
-// restrictVolumeRoot clears group/world-write bits from the vault volume
-// root (the vault directory's parent): kubelet creates emptyDir roots 0777,
+// registerStateDirName records a configured state directory basename so the
+// volume-root restriction recognizes it as a sibling.
+func registerStateDirName(dir string) {
+	stateDirNames[filepath.Base(filepath.Clean(dir))] = true
+}
+
+// restrictVolumeRoot clears group/world-write bits from the state volume
+// root (the state directory's parent): kubelet creates emptyDir roots 0777,
 // which the atomic machinery rejects as an untrusted ancestor. Sibling
-// state directories (knownStateDirNames) belong to us; a root holding any
+// state directories (stateDirNames) belong to us; a root holding any
 // other entry is left untouched — that is the manifest's job — and
 // already-restrictive roots are a no-op.
-func restrictVolumeRoot(dir string) error {
+func restrictVolumeRoot(dir, noun string) error {
 	parent := filepath.Dir(dir)
 	info, err := os.Stat(parent)
 	if err != nil {
-		return fmt.Errorf("inspect vault volume root %s: %w", parent, err)
+		return fmt.Errorf("inspect %s volume root %s: %w", noun, parent, err)
 	}
 	if !info.IsDir() || info.Mode().Perm()&0o022 == 0 {
 		return nil
@@ -178,16 +186,16 @@ func restrictVolumeRoot(dir string) error {
 	}
 	base := filepath.Base(dir)
 	for _, entry := range entries {
-		if entry.Name() == base || (entry.IsDir() && knownStateDirNames[entry.Name()]) {
+		if entry.Name() == base || (entry.IsDir() && stateDirNames[entry.Name()]) {
 			continue
 		}
-		log.Infof("vault persistence: volume root %s holds foreign entry %q; not restricting (fix permissions in the manifest)", parent, entry.Name())
+		log.Infof("%s persistence: volume root %s holds foreign entry %q; not restricting (fix permissions in the manifest)", noun, parent, entry.Name())
 		return nil
 	}
 	if err := os.Chmod(parent, info.Mode().Perm()&^0o022); err != nil {
-		return fmt.Errorf("restrict vault volume root %s: %w", parent, err)
+		return fmt.Errorf("restrict %s volume root %s: %w", noun, parent, err)
 	}
-	log.Infof("vault persistence: restricted group/world-writable volume root %s (kubelet emptyDir default)", parent)
+	log.Infof("%s persistence: restricted group/world-writable volume root %s (kubelet emptyDir default)", noun, parent)
 	return nil
 }
 

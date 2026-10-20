@@ -187,6 +187,10 @@ func (s *fastSandboxPolicyServer) mitmRedirectRebuild() error {
 // per-subject gateway REDIRECT forwards sandbox DNS here.
 const fastSandboxDNSProxyPort = 15353
 
+// policyApplyTimeout bounds one kernel policy transaction on every path
+// that runs under policyCommitMu (see applyPolicy).
+const policyApplyTimeout = 10 * time.Second
+
 // installGatewayDNSRedirect records a subject's gateway and installs (once)
 // the prerouting REDIRECT for it. Idempotent under at-least-once SET_BINDING
 // delivery: a duplicate registration (or a retried deny-first install) is a
@@ -384,7 +388,14 @@ func (s *fastSandboxPolicyServer) applyPolicy(subj subject.Subject, pol *policy.
 	s.policyMu.Lock()
 	defer s.policyMu.Unlock()
 	eff := s.reg.EffectiveOf(pol)
-	nftCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	// policyApplyTimeout bounds the kernel transaction for every caller
+	// that runs under policyCommitMu (relay commits, the SET_BINDING seed,
+	// and the data-plane-ready hook all serialize on it): an unbounded
+	// deadline would let one slow nft apply head-of-line-block every other
+	// subject's policy write past the listener's write timeout. The
+	// registration deny-first install is NOT under that serialization and
+	// keeps its own 30s budget.
+	nftCtx, cancel := context.WithTimeout(s.ctx, policyApplyTimeout)
 	defer cancel()
 	if err := s.nft.ApplyPolicy(nftCtx, subj, eff); err != nil {
 		return fmt.Errorf("nft policy apply: %w", err)
@@ -636,7 +647,7 @@ func (s *fastSandboxPolicyServer) pendingPolicy(subj subject.Subject) *policy.Ne
 // sandbox must be fully blocked again). nft commits before the registry
 // state, so the transition stays fail-closed.
 func (s *fastSandboxPolicyServer) revertToDenyFirst(subj subject.Subject, att actionhandler.NetworkAttachment) error {
-	nftCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	nftCtx, cancel := context.WithTimeout(s.ctx, policyApplyTimeout)
 	defer cancel()
 	if err := s.nft.ApplyDenyFirst(nftCtx, subj, att); err != nil {
 		return fmt.Errorf("revert to deny-first: %w", err)

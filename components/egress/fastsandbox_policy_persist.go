@@ -172,8 +172,9 @@ func (p *policyPersistence) reservesPath(path string) bool {
 	return reservesPathUnder(p.dir, path)
 }
 
-// SetPolicyFiles wires persistence under the relay handlers; nil (the
-// default) keeps the policy memory-only.
+// SetPolicyFiles wires persistence under the relay handlers. Policy
+// persistence is REQUIRED in the fast-sandbox profile (startup fails
+// without it), so every assembled server carries a store.
 func (s *fastSandboxPolicyServer) SetPolicyFiles(pp *policyPersistence) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -300,10 +301,9 @@ func (s *fastSandboxPolicyServer) policyHealthIssue() string {
 // away policy. A tombstone persist failure latches recovery (writes frozen
 // until restart). Serialized with the relay commits (policyCommitMu) so an
 // in-flight write against the removed binding cannot recreate the record
-// after the purge; callers are never under the registry write lock.
-func (s *fastSandboxPolicyServer) clearPolicyRecord(subj subject.Subject) error {
-	s.policyCommitMu.Lock()
-	defer s.policyCommitMu.Unlock()
+// after the purge. The caller holds policyCommitMu (the SET_BINDING
+// mutation hold); never call under the registry write lock.
+func (s *fastSandboxPolicyServer) clearPolicyRecordLocked(subj subject.Subject) error {
 	s.mu.Lock()
 	entry := s.policies[subj]
 	pp := s.policyFiles
@@ -397,7 +397,17 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 		return
 	}
 	if !snap.Exists() {
-		// Fresh subject: nothing persisted, the binding input seeds.
+		// Fresh subject: nothing persisted, the binding input seeds. A
+		// durable seal marker (an export that sealed a file-less subject)
+		// must still gate the relay ops — the seed entry carries it.
+		if s.policyFiles.isSealed(subj) {
+			s.mu.Lock()
+			s.policies[subj] = &policyEntry{fence: fence, sealed: true}
+			s.pendingPolicies[subj] = policy.DefaultDenyPolicy()
+			s.mu.Unlock()
+			log.Infof("subject %s: seal restored from marker on a file-less subject (binding input seeds pending default-deny)", subj)
+			return
+		}
 		return
 	}
 	pf, body, decErr := policy.DecodePolicyFile(snap.Data())
@@ -449,17 +459,15 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 	log.Infof("subject %s: policy reloaded from file (revision %d, incarnation %s); binding input superseded", subj, pf.Revision, pf.Incarnation)
 }
 
-// applyBindingPolicy seeds the binding's policy for a freshly registered
-// subject (record absent) through the same commit protocol as the relay
-// writes. A subject with an existing record never reads its binding input
-// again: the recorded policy — seeded once, then owned by the relay writes
+// applyBindingPolicyLocked seeds the binding's policy for a freshly
+// registered subject (record absent) through the same commit protocol as
+// the relay writes. The caller holds policyCommitMu (the SET_BINDING
+// mutation hold). A subject with an existing record never reads its
+// binding input again: the recorded policy — seeded once, then owned by the relay writes
 // and the snapshot transfer — is authoritative, exactly like the vault
 // slice. Binding replays (at-least-once delivery, egress restarts, and the
 // superseded CRD-driven update path) are therefore policy no-ops.
-func (s *fastSandboxPolicyServer) applyBindingPolicy(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, stateActive bool) error {
-	s.policyCommitMu.Lock()
-	defer s.policyCommitMu.Unlock()
-
+func (s *fastSandboxPolicyServer) applyBindingPolicyLocked(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, stateActive bool) error {
 	s.mu.Lock()
 	entry := s.policies[subj]
 	if entry != nil && entry.fence != fence {

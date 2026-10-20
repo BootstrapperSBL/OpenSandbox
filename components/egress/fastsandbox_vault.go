@@ -134,19 +134,11 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		http.Error(w, "expectedIncarnation mismatch", http.StatusPreconditionFailed)
 		return
 	}
-	effective := s.reg.EffectivePolicy(subj)
-	if effective == nil {
-		// Pre-read the pending policy and merge the always overlay BEFORE
-		// s.mu (registry → s.mu order): a vault op held to the
-		// data-plane-ready barrier must validate against the SAME policy
-		// the hook will enforce, operator always-rules included.
-		s.mu.Lock()
-		pending := s.pendingPolicies[subj]
-		s.mu.Unlock()
-		if pending != nil {
-			effective = s.reg.EffectiveOf(pending)
-		}
-	}
+	// Pre-compute the validation policy BEFORE s.mu (registry → s.mu
+	// order): a vault op held to the data-plane-ready barrier must validate
+	// against the SAME policy the hook will enforce, operator always-rules
+	// included.
+	effective := s.vaultValidationPolicy(subj)
 
 	// The rest of the mutation holds s.mu, serializing per-subject writers
 	// and fencing rebind/terminal purges. The validation policy was fully

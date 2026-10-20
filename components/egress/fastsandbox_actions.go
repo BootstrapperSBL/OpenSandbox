@@ -197,26 +197,29 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 			return http.StatusBadRequest, fmt.Errorf("invalid binding input policy: %v", err)
 		}
 	}
+	// The WHOLE mutation runs under policyCommitMu — rebind purge,
+	// registration, and the seed/apply are one serialized unit against the
+	// relay commits and the hook activation. Without this, a
+	// predecessor-identity relay write holding policyCommitMu could
+	// straddle the rebind's fence flip: its apply closure passes the fence
+	// checks pre-registration, then its reg.ApplyPolicy lands on the
+	// SUCCESSOR's registry entry after RegisterAndEnforce — the successor
+	// would go active under the predecessor's policy. Lock order:
+	// policyCommitMu → registry → s.mu (matches the commit paths).
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
+
 	// A fence change is a rebind: discard ALL prior per-subject state. The
 	// registry drops its entry inside RegisterAndEnforce; the vault slice
 	// and the recorded policy must go too (memory + persisted files), or the
 	// old instance's credentials and policy would survive into the
-	// successor's flows. Same-UID actions serialize per subject; the vault
-	// and policy relay writes serialize against the same state — the purge
-	// runs under policyCommitMu so an in-flight relay commit against the
-	// OLD fence cannot resurrect a purged record after the rebind (its
-	// commit-time fence re-check aborts it). Callers are never under the
-	// registry write lock here, so taking policyCommitMu is safe (the
-	// takeover path, which IS under the registry lock, purges without it —
-	// its relay races are fenced out by the commit-time re-check).
+	// successor's flows.
 	if old, ok := s.reg.Fence(subj); ok && !old.Matches(fence) {
-		s.policyCommitMu.Lock()
 		s.mu.Lock()
 		s.dropVault(subj)
 		delete(s.policies, subj)
 		s.purgePolicyFile(subj)
 		s.mu.Unlock()
-		s.policyCommitMu.Unlock()
 		log.Infof("subject %s: rebind (%s -> %s), vault slice and policy record purged", subj, old.RuntimeInstanceID, fence.RuntimeInstanceID)
 	}
 	// Egress-restart recovery (OSEP-0022 stage 2): a subject with no live
@@ -244,7 +247,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 		// binding's policy to a policy-less subject) and purge the recorded
 		// policy, so deny-first is also the durable state.
 		s.clearPendingPolicy(subj)
-		if err := s.clearPolicyRecord(subj); err != nil {
+		if err := s.clearPolicyRecordLocked(subj); err != nil {
 			// The durable removal did not confirm: fail the action so the
 			// Fastlet's retry re-runs the purge/tombstone instead of acking
 			// a removal whose file may still carry the removed policy.
@@ -260,7 +263,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 	}
 	// Install the binding policy (or honor the file-backed record that
 	// supersedes it) through the policy commit protocol.
-	if err := s.applyBindingPolicy(subj, fence, pol, state == subject.StateActive); err != nil {
+	if err := s.applyBindingPolicyLocked(subj, fence, pol, state == subject.StateActive); err != nil {
 		log.Errorf("subject %s: binding policy commit failed: %v", subj, err)
 		return http.StatusInternalServerError, fmt.Errorf("binding policy commit: %w", err)
 	}

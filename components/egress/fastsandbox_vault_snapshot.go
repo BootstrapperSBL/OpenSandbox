@@ -179,11 +179,9 @@ func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, 
 	}
 	if !s.fenceMatchesLocked(subj, fence) {
 		// Purged between the pre-read and the lock — the stale envelope
-		// lost the race with a rebind.
+		// lost the race with a rebind. The registered-fence mismatch above
+		// already covers the plain stale case.
 		return nil, http.StatusNotFound, fmt.Errorf("vault export for unknown subject %s", subj)
-	}
-	if !regFence.Matches(fence) {
-		return nil, http.StatusConflict, fmt.Errorf("stale vault export (fence mismatch) for subject %s", subj)
 	}
 	if recovery := s.vaultRecovery.Load(); recovery != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("vault persistence recovery required: %s", recovery.reason)

@@ -170,11 +170,9 @@ func (s *fastSandboxPolicyServer) policyExportSourceImageLocked(subj subject.Sub
 	}
 	if !s.fenceMatchesLocked(subj, fence) {
 		// Purged between the pre-read and the lock — the stale envelope
-		// lost the race with a rebind.
+		// lost the race with a rebind. The registered-fence mismatch above
+		// already covers the plain stale case.
 		return nil, http.StatusNotFound, fmt.Errorf("policy export for unknown subject %s", subj)
-	}
-	if !regFence.Matches(fence) {
-		return nil, http.StatusConflict, fmt.Errorf("stale policy export (fence mismatch) for subject %s", subj)
 	}
 	if recovery := s.policyRecovery.Load(); recovery != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("policy persistence recovery required: %s", recovery.reason)
@@ -311,7 +309,17 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 				s.mu.Unlock()
 				return s.policyFiles.unseal(subj)
 			}
-			return s.installImportedPolicyLocked(subj, fence, pf.Revision, pol, sealed)
+			err := s.installImportedPolicyLocked(subj, fence, pf.Revision, pol, sealed)
+			if err != nil && sealed {
+				// The unseal already happened; restore the durable seal so
+				// disk and memory agree the bundle is still the truth (the
+				// commit protocol rolls the file back to the sealed image;
+				// the in-memory entry was never modified).
+				if sealErr := s.policyFiles.seal(subj); sealErr != nil {
+					log.Errorf("subject %s: policy seal marker restore failed after import apply failure: %v", subj, sealErr)
+				}
+			}
+			return err
 		},
 	)
 	if err != nil {

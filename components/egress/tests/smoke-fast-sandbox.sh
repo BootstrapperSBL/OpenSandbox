@@ -460,6 +460,8 @@ case "${http_code}" in
   301|307|308) ;; # redirects into the /policy/{uid} relay subtree
   *) fail "bare /policy must redirect into the relay subtree, got ${http_code}" ;;
 esac
+location="$(curl -s -o /dev/null -w '%{header_json}' "http://127.0.0.1:${POLICY_PORT}/policy" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("location","")[0])' 2>/dev/null || true)"
+[ "${location}" = "/policy/" ] || fail "bare /policy redirect target must be /policy/, got ${location:-none}"
 pass "superseded proxy-route surfaces removed (relay surfaces only)"
 
 set_up_netns b 10.10.0.6
@@ -488,6 +490,11 @@ info "Test 9: restart recovery (reset -> action replay -> active)"
 # Refresh the DNS-learned dyn lease (1.1.1.1) right before the restart, so
 # the post-restart "stale wiped" assertions are meaningful.
 expect_answers osb-sandbox-a allow.test 1.1.1.1
+# Durability probe: relay a policy DISTINCT from the replayed binding input;
+# after the restart + SET_BINDING replay the recorded file must supersede
+# the input — asserted by the marker target surviving the GET below
+# (vault parity, Test 14e).
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"durability.test"}]}' 
 wait_for 10 "dyn lease present before restart" nft_has '1.1.1.1'
 kill "${EGRESS_PID}" 2>/dev/null
 wait "${EGRESS_PID}" 2>/dev/null || true
@@ -498,7 +505,11 @@ expect_rcode osb-sandbox-a allow.test 3
 # The Fastlet's instanceId replay: SET_BINDING + reached Hooks.
 bind_and_ready a 10.10.0.5 5 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
 expect_answers osb-sandbox-a allow.test 1.1.1.1
-pass "restart recovery (stale wiped, action replay reactivates)"
+# The durability probe's relay write survived the restart: the recorded
+# file superseded the replayed binding input.
+recorded="$(curl -s "http://127.0.0.1:${POLICY_PORT}/policy/a")"
+echo "${recorded}" | grep -q 'durability.test' || fail "the relayed policy must survive the restart (file supersedes the replayed binding input), got: ${recorded}"
+pass "restart durability (recorded policy supersedes the replayed binding input)"
 
 ###############################################################################
 info "Test 10: strict DoH mode (no blocklist) drops all tcp 443 globally"
@@ -857,6 +868,10 @@ else
   wait_for 15 "drop set re-seeded after restart" bash -c \
     "nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2'"
   bind_and_ready a 10.10.0.5 12 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
+  # The default-allow control write (spec 11) survived this restart — the
+  # file supersedes the replayed input — so re-assert the allow-list
+  # through the relay before the containment assertions.
+  relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null --proxytunnel -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
     fail "containment must survive egress restart"
   fi

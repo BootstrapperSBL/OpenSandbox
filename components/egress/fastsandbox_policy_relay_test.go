@@ -15,17 +15,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/policy"
 	"github.com/alibaba/opensandbox/egress/pkg/subject"
 )
 
@@ -299,6 +303,120 @@ func TestPolicyRelayPutReplacesStalePendingTombstone(t *testing.T) {
 	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 	assert.Equal(t, "allow", reg_UserEvaluate(srv, s, "other.example.com"))
 	assert.Equal(t, "deny", reg_UserEvaluate(srv, s, "api.example.com"))
+}
+
+// hookNft forces an interleaving at the relay apply's enforcement step: the
+// injected callback runs while the relay commit holds policyCommitMu, which
+// is exactly the window a concurrent rebind would race through.
+type hookNft struct {
+	fakeNft
+	onPolicy func()
+}
+
+func (h *hookNft) ApplyPolicy(ctx context.Context, s subject.Subject, pol *policy.NetworkPolicy) error {
+	if h.onPolicy != nil {
+		fn := h.onPolicy
+		h.onPolicy = nil
+		fn()
+	}
+	return h.fakeNft.ApplyPolicy(ctx, s, pol)
+}
+
+// TestRelayPutRacingRebindNeverActivatesPredecessorPolicy (review H3): a
+// relay PUT for the PREDECESSOR identity whose apply lands after the
+// rebind's registration must not activate the successor under the
+// predecessor's policy. The rebind runs on another goroutine from inside
+// the relay's enforcement step, forcing the fence flip into the apply
+// window; the fixed serialization (the whole SET_BINDING mutation holds
+// policyCommitMu) makes the rebind wait, the relay commit completes against
+// the old instance, and the purge discards it.
+func TestRelayPutRacingRebindNeverActivatesPredecessorPolicy(t *testing.T) {
+	reg := subject.NewRegistry(nil, nil)
+	hnft := &hookNft{}
+	srv := newFastSandboxPolicyServer(context.Background(), reg, hnft)
+	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
+	srv.dnsRedirectRemove = func() error { return nil }
+	pp, err := newPolicyPersistence(t.TempDir())
+	require.NoError(t, err)
+	files := make(map[string]*fakeVaultFile)
+	pp.newFile = func(path string) (vaultFileStore, error) {
+		f, ok := files[path]
+		if !ok {
+			f = newFakeVaultFile(path)
+			files[path] = f
+		}
+		return f, nil
+	}
+	srv.SetPolicyFiles(pp)
+
+	const uid, ip = "race-u", "10.0.0.5"
+	const oldPolicy = `{"defaultAction":"deny","egress":[{"action":"allow","target":"old.com"}]}`
+	const newPolicy = `{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`
+
+	// Generation one: old fence, active with old policy.
+	rec := doAction(t, srv, bindBody(t, uid, ip, testFenceR, testFenceA, 1, strPtr(oldPolicy)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv, hookBody(t, uid, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv, hookBody(t, uid, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	s := subject.FromSandboxUID(uid)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+
+	// A queued relay PUT for the OLD identity: its apply BLOCKS inside the
+	// enforcement step while the rebind (same UID, new fence) completes on
+	// another goroutine — forcing the fence flip into the apply window. With
+	// the serialization fix the rebind cannot proceed (policyCommitMu is
+	// held by this very commit), so the block times out and the rebind runs
+	// to completion afterwards; either way the successor must converge to
+	// its own policy.
+	started := make(chan struct{})
+	done := make(chan struct{})
+	hnft.onPolicy = func() {
+		close(started)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			// Serialized: the rebind runs after this commit.
+		}
+	}
+	go func() {
+		<-started
+		defer close(done)
+		r := doAction(t, srv, bindBody(t, uid, ip, "runtime-2", "attachment-2", 2, strPtr(newPolicy)))
+		assert.Equal(t, http.StatusOK, r.Code)
+	}()
+
+	// The relay write itself passes its guards (pre-read fence = old) and
+	// must NOT leak its policy into the successor.
+	rec = doPolicy(t, srv, http.MethodPut, uid, policyPutDoc(oldPolicy, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the rebind never completed (serialization deadlock?)")
+	}
+
+	// The successor is deny-first with ITS OWN binding input — never active
+	// under the predecessor's policy, whichever way the interleaving went.
+	state, ok := reg.Get(s)
+	require.True(t, ok)
+	if state == subject.StateActive {
+		// Activated only legitimately: the successor's own policy enforced.
+		assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("new.com"))
+		assert.Equal(t, "deny", reg.UserPolicy(s).Evaluate("old.com"))
+	} else {
+		assert.Equal(t, subject.StateDenying, state)
+		assert.Nil(t, reg.EffectivePolicy(s), "deny-first until the successor's own data-plane-ready")
+	}
+
+	// The successor's own lifecycle completes with its own policy.
+	rec = doAction(t, srv, hookBody(t, uid, "runtime-2", "attachment-2", constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("new.com"))
+	assert.Equal(t, "deny", reg.UserPolicy(s).Evaluate("old.com"), "the predecessor's policy never reaches the successor")
 }
 
 // reg_UserEvaluate evaluates the subject's recorded user policy (test aid to

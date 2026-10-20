@@ -44,7 +44,6 @@ from opensandbox_server.services.fast_sandbox.fastpath_client import (
 from opensandbox_server.services.fast_sandbox.network_policy import (
     delete_policy_rules,
     merge_policy_rules,
-    normalized_policy,
     policy_status,
 )
 from opensandbox_server.services.fast_sandbox.vault import EGRESS_HANDLER
@@ -197,8 +196,3 @@ def relay_delete_rules(service, sandbox_id: str, targets: list[str]) -> dict:
         ack = None
     policy = (ack or {}).get("policy")
     return policy_status(policy if isinstance(policy, dict) else kept)
-
-
-def normalized_for_create(policy) -> dict:
-    """Create-path normalization (the binding input seed)."""
-    return normalized_policy(policy)
