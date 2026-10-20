@@ -181,6 +181,11 @@ jobs:
         working-directory: components/execd
         run: bash tests/mitm_ca_nss.sh
 
+      - name: MITM CA JDK bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        working-directory: components/execd
+        run: python3 tests/test_mitm_ca_jdk.py
+
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
