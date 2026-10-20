@@ -18,7 +18,7 @@
 // runtime teardown and seals the subject; POLICY_IMPORT lands the bundle
 // file re-stamped with the restored fence — the only authorized incarnation
 // transfer — through the same commit protocol as the relay writes, marking
-// the record file-backed so later binding replays never override it. The
+// the recorded policy so later binding replays never override it. The
 // invocation side (driver/Fastlet hooks, snapshot manifest) is platform
 // work in the fast-sandbox repository.
 package main
@@ -187,7 +187,7 @@ func (s *fastSandboxPolicyServer) policyExportSourceImageLocked(subj subject.Sub
 // applyPolicyImport lands the bundle file as the subject's policy file,
 // re-stamped with the restored fence from the envelope (restore may land on
 // any Pod, so the recorded incarnation is replaced, not compared). The file
-// goes through the commit protocol and the record materializes file-backed;
+// goes through the commit protocol and the record materializes from the bundle;
 // the policy activates at the same data-plane-ready barrier as the vault.
 //
 // The bundle is read, decoded, and parsed before the commit serialization.
@@ -327,7 +327,7 @@ func (s *fastSandboxPolicyServer) installImportedPolicyLocked(subj subject.Subje
 	if !stateActive {
 		s.pendingPolicies[subj] = pol
 	}
-	s.policies[subj] = &policyEntry{revision: revision, fence: fence, hydrated: true}
+	s.policies[subj] = &policyEntry{revision: revision, fence: fence}
 	s.mu.Unlock()
 	// Unseal only after the state accepted — a failed apply rolls the file
 	// back and keeps the seal.

@@ -49,16 +49,14 @@ import (
 
 // policyEntry records the per-subject policy bookkeeping: the revision the
 // relay preconditions fence on, the runtime fence the record was
-// materialized under, and the two state flags. The policy itself lives in
-// the registry (active subjects) or pendingPolicies (denying subjects).
+// materialized under, and the sealed flag. The policy itself lives in the
+// registry (active subjects) or pendingPolicies (denying subjects). A
+// record is authoritative once it exists: the binding input only ever
+// seeds a fresh subject, and every later policy change goes through the
+// relay or the snapshot transfer — exactly like the vault.
 type policyEntry struct {
 	revision int64
 	fence    subject.Fencing
-	// hydrated marks a record loaded from the persisted policy file: the
-	// binding input no longer drives this subject's policy — the file (and
-	// the relay writes on top of it) is authoritative, exactly like the
-	// vault slice. Sticky for the record's lifetime.
-	hydrated bool
 	// sealed marks a paused subject whose policy file was exported into the
 	// snapshot bundle: every relay op answers 409; enforcement is unchanged.
 	sealed bool
@@ -248,7 +246,7 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 	}
 	created := entry == nil
 	newRev := cur + 1
-	s.putRelayPolicy(w, r, subj, fence, pol, newRev, created, entry, stateActive)
+	s.putRelayPolicy(w, r, subj, fence, pol, newRev, created, stateActive)
 }
 
 // relayPolicyPrecondition extracts the effective precondition. The revision
@@ -271,9 +269,8 @@ func relayPolicyPrecondition(doc *policyRelayDocument) (expected *int64, err err
 
 // putRelayPolicy commits a full replace: persist → apply → ack, so the ack
 // means durable AND applied. The caller holds policyCommitMu (the decision
-// and the commit are one serialized unit). The live entry keeps its
-// hydrated flag — a relay write on a file-backed record stays file-backed.
-func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.Request, subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, newRev int64, created bool, entry *policyEntry, stateActive bool) {
+// and the commit are one serialized unit).
+func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.Request, subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, newRev int64, created bool, stateActive bool) {
 	raw, err := json.Marshal(pol)
 	if err != nil {
 		log.Errorf("subject %s: policy marshal failed: %v", subj, err)
@@ -294,8 +291,7 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 		if !stateActive {
 			s.pendingPolicies[subj] = pol
 		}
-		hydrated := entry != nil && entry.hydrated
-		s.policies[subj] = &policyEntry{revision: newRev, fence: fence, hydrated: hydrated}
+		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}
 		s.mu.Unlock()
 		return nil
 	}

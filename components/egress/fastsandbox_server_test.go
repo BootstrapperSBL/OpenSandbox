@@ -298,20 +298,31 @@ func TestActionsSetBindingDenyFirstThenHookActivates(t *testing.T) {
 	assert.Equal(t, "allow", eff.Evaluate("example.com"))
 }
 
-func TestActionsSetBindingUpdateWhileActiveDoesNotReplay(t *testing.T) {
+// TestActionsSetBindingReplayNeverMutatesRecordedPolicy: the binding input
+// only seeds a fresh subject's policy. A same-fence SET_BINDING carrying a
+// different input (the superseded CRD-driven update path, or an at-least-once
+// replay) must never mutate the recorded policy — runtime changes go through
+// the relay surface.
+func TestActionsSetBindingReplayNeverMutatesRecordedPolicy(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
+	nft.mu.Lock()
 	denyFirstInstalls := len(nft.denyFirst)
+	appliedAfterSeed := len(nft.policyApplied)
+	nft.mu.Unlock()
 
-	// plain input update (new spec generation, same fence): applied in place
+	// same-fence binding with a different input: the recorded policy wins
 	newInput := `{"defaultAction":"deny","egress":[{"action":"allow","target":"updated.com"}]}`
 	rec := doAction(t, srv, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, &newInput))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
-	require.Equal(t, 2, nft.appliedCount())
-	require.Equal(t, denyFirstInstalls, len(nft.denyFirst), "an update must not re-install deny-first")
-	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("updated.com"))
+	nft.mu.Lock()
+	assert.Equal(t, appliedAfterSeed, len(nft.policyApplied), "a replayed binding must not re-apply a policy")
+	assert.Equal(t, denyFirstInstalls, len(nft.denyFirst), "a replayed binding must not re-install deny-first")
+	nft.mu.Unlock()
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"), "the seeded policy survives the replay")
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("updated.com"))
 }
 
 func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
@@ -364,14 +375,20 @@ func TestActionsRebindDiscardsPolicy(t *testing.T) {
 	require.Equal(t, subject.StateDenying, mustState(reg.Get(s)))
 	assert.Nil(t, reg.EffectivePolicy(s), "old policy must not survive a rebind")
 
-	// the new instance's data-plane-ready activates with its own policy
-	newInput := `{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`
-	rec = doAction(t, srv, bindBody(t, testUID, testIP, "runtime-2", "attachment-2", 6, &newInput))
-	require.Equal(t, http.StatusOK, rec.Code)
+	// the new instance's data-plane-ready activates with its own (re-seeded)
+	// policy
 	rec = doAction(t, srv, hookBody(t, testUID, "runtime-2", "attachment-2", constants.HookDataPlaneReady))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("old.com"))
+
+	// a runtime policy change goes through the relay: the relayed policy is
+	// what the successor enforces
+	rec = doPolicy(t, srv, http.MethodPut, testUID, policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("new.com"))
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("old.com"))
 	require.Greater(t, len(nft.denyFirst), 0)
 }
 
@@ -1016,25 +1033,43 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 
 // TestFastSandboxServerNftFailureKeepsRegistryState: a failed nft apply must leave
 // the registry (DNS dispatch) on the PREVIOUS policy — nft commits before registry
-// state.
+// state, and the relay write NACKs with last-good kept on both sides.
 func TestFastSandboxServerNftFailureKeepsRegistryState(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
 	s := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 
-	// in-place binding update fails at nft: registry must stay on the FIRST
-	// policy
+	// relay write fails at nft: 500, the registry must stay on the FIRST
+	// policy (the record was seeded at revision 1; the write targeted
+	// revision 2)
 	nft.mu.Lock()
 	nft.policyErr = errors.New("nft busy")
 	nft.mu.Unlock()
-	rec := doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 2,
-		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)))
+	rec := doPolicy(t, srv, http.MethodPut, "u-1", policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`, 1, false, true), "")
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	eff := reg.EffectivePolicy(s)
 	require.NotNil(t, eff)
 	assert.Equal(t, "deny", eff.Evaluate("example.com"), "failed nft apply must not publish the new policy")
+
+	// a same-fence binding replay never carries the new policy either
+	rec = doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 2,
+		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	eff = reg.EffectivePolicy(s)
+	require.NotNil(t, eff)
+	assert.Equal(t, "deny", eff.Evaluate("example.com"), "the recorded policy is authoritative over binding replays")
+
+	// the retry with a working nft lands
+	nft.mu.Lock()
+	nft.policyErr = nil
+	nft.mu.Unlock()
+	rec = doPolicy(t, srv, http.MethodPut, "u-1", policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
 }
 
 // TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting REDIRECT

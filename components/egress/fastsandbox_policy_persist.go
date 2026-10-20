@@ -293,7 +293,7 @@ func (s *fastSandboxPolicyServer) clearPolicyRecord(subj subject.Subject) {
 //
 //   - fence match → the file is authoritative — the replayed binding input
 //     carries only the original bootstrap policy, never the relay mutations
-//     recorded since — and the entry materializes file-backed (hydrated)
+//     recorded since — and the record materializes from the file
 //   - mismatch → stale, purged (a reset never inherits the predecessor's
 //     policy)
 //   - unreadable, a newer schema, or content that fails to parse → the file
@@ -365,7 +365,7 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 		log.Warnf("subject %s: policy file content rejected (%v); quarantined, the binding input seeds the subject", subj, parseErr)
 		return
 	}
-	entry := &policyEntry{revision: pf.Revision, fence: fence, hydrated: true}
+	entry := &policyEntry{revision: pf.Revision, fence: fence}
 	// A durable seal marker (export acked, teardown not yet delivered)
 	// restores the sealed entry across a restart: relay ops stay 409 until
 	// REMOVE_BINDING purges or an import unseals.
@@ -378,41 +378,27 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 	log.Infof("subject %s: policy reloaded from file (revision %d, incarnation %s); binding input superseded", subj, pf.Revision, pf.Incarnation)
 }
 
-// applyBindingPolicy installs the binding's policy for a registered subject.
-// It is the SET_BINDING tail counterpart of the relay writes and runs the
-// same commit protocol. The binding input keeps its authority only while the
-// subject's record is not file-backed: once the policy was rehydrated from
-// the persisted file, later binding replays (which carry only the bootstrap
-// input) never override the recorded state, and a sealed record never moves
-// (the bundle copy is taken).
+// applyBindingPolicy seeds the binding's policy for a freshly registered
+// subject (record absent) through the same commit protocol as the relay
+// writes. A subject with an existing record never reads its binding input
+// again: the recorded policy — seeded once, then owned by the relay writes
+// and the snapshot transfer — is authoritative, exactly like the vault
+// slice. Binding replays (at-least-once delivery, egress restarts, and the
+// superseded CRD-driven update path) are therefore policy no-ops.
 func (s *fastSandboxPolicyServer) applyBindingPolicy(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, stateActive bool) error {
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 
 	s.mu.Lock()
 	entry := s.policies[subj]
-	var (
-		rev    int64
-		commit bool
-	)
-	switch {
-	case entry != nil && entry.sealed:
-		// Exported: the bundle copy is taken; the recorded state is frozen.
-	case entry != nil && entry.hydrated:
-		// File-backed: the binding input carries no authority.
-	case entry != nil:
-		rev, commit = entry.revision+1, true
-	default:
-		rev, commit = 1, true
-	}
 	pp := s.policyFiles
 	s.mu.Unlock()
-
-	if !commit {
+	if entry != nil {
 		log.Infof("subject %s: binding input superseded by the recorded policy (revision %d)", subj, entry.revision)
 		return nil
 	}
 
+	const rev = int64(1)
 	raw, err := json.Marshal(pol)
 	if err != nil {
 		return fmt.Errorf("policy marshal: %w", err)
