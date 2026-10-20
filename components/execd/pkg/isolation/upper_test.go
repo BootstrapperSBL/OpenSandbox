@@ -16,6 +16,7 @@ package isolation
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -215,15 +216,16 @@ func TestUpperManager_RecordedReclaimFailureRetainedForGC(t *testing.T) {
 	}
 }
 
-func TestUpperManager_UsageSkipsMissingUpper(t *testing.T) {
+func TestUpperManager_UsageSkipsMissingReleasedUpper(t *testing.T) {
 	mgr := newTestUpperManager(t)
 
 	id, upper, _, err := mgr.Allocate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a partially removed residue entry: the tracked upper dir is
+	// Simulate a partially removed residue entry: the released upper dir is
 	// gone from disk but still registered.
+	mgr.Release(id)
 	if err := os.RemoveAll(filepath.Dir(upper)); err != nil {
 		t.Fatal(err)
 	}
@@ -241,6 +243,90 @@ func TestUpperManager_UsageSkipsMissingUpper(t *testing.T) {
 	mgr.mu.Unlock()
 	if !tracked {
 		t.Fatal("entry should stay tracked for a GC retry")
+	}
+}
+
+func TestUpperManager_UsageRejectsMissingInUseUpper(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	_, upper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(upper); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mgr.Usage(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Usage() error = %v, want missing in-use upper error", err)
+	}
+}
+
+func TestDirSizeWalkErrorOnlySkipsMissingDescendants(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "upper")
+	descendant := filepath.Join(root, "transient")
+	if err := dirSizeWalkError(root, descendant, fs.ErrNotExist); err != nil {
+		t.Fatalf("missing descendant error = %v, want nil", err)
+	}
+	if err := dirSizeWalkError(root, root, fs.ErrNotExist); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing root error = %v, want fs.ErrNotExist", err)
+	}
+	if err := dirSizeWalkError(root, descendant, fs.ErrPermission); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("permission error = %v, want fs.ErrPermission", err)
+	}
+}
+
+func TestDirSizeStillCountsFilesAndRejectsMissingRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "upper")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "payload"), []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if size, err := dirSize(root); err != nil || size != int64(len("payload")) {
+		t.Fatalf("dirSize() = (%d, %v), want (7, nil)", size, err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dirSize(root); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing root error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+func TestUpperManager_AllocateRejectsInvalidUsageWithLimit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "isolation")
+	mgr, err := NewUpperManager(root, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, healthyUpper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, missingUpper, _, err := mgr.Allocate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(healthyUpper, "full.bin"), make([]byte, 100), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(missingUpper); err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown usage must not let new allocations bypass an exhausted quota.
+	if _, _, err := mgr.AllocateN(1); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("AllocateN() error = %v, want missing upper directory error", err)
+	}
+	// Once measurement recovers, the intact upper still consumes the budget.
+	if err := os.MkdirAll(missingUpper, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := mgr.AllocateN(1); !errors.Is(err, ErrUpperLimitExceeded) {
+		t.Fatalf("AllocateN() error = %v, want ErrUpperLimitExceeded", err)
 	}
 }
 
