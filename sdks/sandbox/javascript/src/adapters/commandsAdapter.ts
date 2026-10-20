@@ -25,6 +25,7 @@ import type {
 } from "../models/execd.js";
 import type { ExecdCommands } from "../services/execdCommands.js";
 import type { ExecutionHandlers } from "../models/execution.js";
+import { inferExecutionExitCode } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 
 function joinUrl(baseUrl: string, pathname: string): string {
@@ -90,21 +91,6 @@ function toRunInSessionRequest(
     body.timeout = Math.round(opts.timeoutSeconds * 1000);
   }
   return body;
-}
-
-function inferForegroundExitCode(execution: CommandExecution): number | null {
-  // Prefer the authoritative `error.exit_code`; fall back to parsing `evalue` for older servers.
-  if (typeof execution.error?.exitCode === "number") {
-    return execution.error.exitCode;
-  }
-  const errorValue = execution.error?.value?.trim();
-  const parsedExitCode =
-    errorValue && /^-?\d+$/.test(errorValue) ? Number(errorValue) : Number.NaN;
-  return execution.error != null
-    ? (Number.isFinite(parsedExitCode) ? parsedExitCode : null)
-    : execution.complete
-      ? 0
-      : null;
 }
 
 function assertNonBlank(value: string, field: string): void {
@@ -272,7 +258,7 @@ export class CommandsAdapter implements ExecdCommands {
     }
 
     if (inferExitCode) {
-      execution.exitCode = inferForegroundExitCode(execution);
+      execution.exitCode = inferExecutionExitCode(execution);
     }
 
     return execution;

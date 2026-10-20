@@ -63,6 +63,40 @@ export interface Execution {
   exitCode?: number | null;
 }
 
+/**
+ * Normalizes a wire `error.exit_code` value. Only integers are accepted; anything else
+ * (missing, non-numeric, fractional) yields `undefined` so callers fall back to `evalue`.
+ *
+ * @internal
+ */
+export function normalizeExitCode(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+}
+
+/**
+ * Infers the final exit code of a foreground command execution.
+ *
+ * Prefers the authoritative `error.exitCode` (from `error.exit_code`) and falls back to
+ * parsing `error.value` (`evalue`) for servers that predate `exit_code`. A completed
+ * execution without an error is `0`; anything else is `null`.
+ *
+ * @internal
+ */
+export function inferExecutionExitCode(execution: Pick<Execution, "error" | "complete">): number | null {
+  const error = execution.error;
+  if (error != null) {
+    const exitCode = normalizeExitCode(error.exitCode);
+    if (exitCode !== undefined) {
+      return exitCode;
+    }
+    const errorValue = error.value?.trim();
+    const parsedExitCode =
+      errorValue && /^-?\d+$/.test(errorValue) ? Number(errorValue) : Number.NaN;
+    return Number.isFinite(parsedExitCode) ? parsedExitCode : null;
+  }
+  return execution.complete ? 0 : null;
+}
+
 export interface ExecutionHandlers {
   /**
    * Optional low-level hook for every server-sent event (SSE) received.

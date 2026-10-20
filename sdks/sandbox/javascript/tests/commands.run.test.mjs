@@ -246,10 +246,11 @@ test("CommandsAdapter.runInSession infers non-zero exitCode from final error sta
 });
 
 test("CommandsAdapter.run propagates error.exit_code and prefers it over evalue", async () => {
+  // evalue and exit_code deliberately disagree so the evalue fallback cannot satisfy the test.
   const adapter = createAdapter(
     [
       'data: {"type":"init","text":"cmd-exit","timestamp":1}',
-      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"3","traceback":["exit status 3"],"exit_code":3},"timestamp":2}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"9","traceback":["exit status 3"],"exit_code":3},"timestamp":2}',
       "",
     ].join("\n"),
   );
@@ -264,7 +265,7 @@ test("CommandsAdapter.run reports a signal kill (exit_code -1) as a failure", as
   const adapter = createAdapter(
     [
       'data: {"type":"init","text":"cmd-sig","timestamp":1}',
-      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1},"timestamp":2}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"signal: terminated","traceback":["signal: terminated"],"exit_code":-1},"timestamp":2}',
       "",
     ].join("\n"),
   );
@@ -295,7 +296,7 @@ test("CommandsAdapter.runInSession propagates error.exit_code", async () => {
   const adapter = createAdapter(
     [
       'data: {"type":"init","text":"sess-exit","timestamp":1}',
-      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: killed"],"exit_code":-1},"timestamp":2}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"signal: killed","traceback":["signal: killed"],"exit_code":-1},"timestamp":2}',
       "",
     ].join("\n"),
   );
@@ -304,6 +305,36 @@ test("CommandsAdapter.runInSession propagates error.exit_code", async () => {
 
   assert.equal(execution.error?.exitCode, -1);
   assert.equal(execution.exitCode, -1);
+});
+
+test("CommandsAdapter.run ignores a non-integer exit_code and falls back to evalue", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-frac","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"7","traceback":["exit status 7"],"exit_code":3.5},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("exit 7");
+
+  assert.equal(execution.error?.exitCode, undefined);
+  assert.equal(execution.exitCode, 7);
+});
+
+test("CommandsAdapter.run ignores a string exit_code and leaves exitCode null without a numeric evalue", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-str","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"signal: killed","traceback":["signal: killed"],"exit_code":"3"},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("kill -KILL $$");
+
+  assert.equal(execution.error?.exitCode, undefined);
+  assert.equal(execution.exitCode, null);
 });
 
 test("execd client error message carries unstructured JSON error body", async () => {
