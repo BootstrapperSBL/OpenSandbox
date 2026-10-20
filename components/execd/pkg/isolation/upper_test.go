@@ -16,6 +16,7 @@ package isolation
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -258,6 +259,39 @@ func TestUpperManager_UsageRejectsMissingInUseUpper(t *testing.T) {
 
 	if _, err := mgr.Usage(); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("Usage() error = %v, want missing in-use upper error", err)
+	}
+}
+
+func TestDirSizeWalkErrorOnlySkipsMissingDescendants(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "upper")
+	descendant := filepath.Join(root, "transient")
+	if err := dirSizeWalkError(root, descendant, fs.ErrNotExist); err != nil {
+		t.Fatalf("missing descendant error = %v, want nil", err)
+	}
+	if err := dirSizeWalkError(root, root, fs.ErrNotExist); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing root error = %v, want fs.ErrNotExist", err)
+	}
+	if err := dirSizeWalkError(root, descendant, fs.ErrPermission); !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("permission error = %v, want fs.ErrPermission", err)
+	}
+}
+
+func TestDirSizeStillCountsFilesAndRejectsMissingRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "upper")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "payload"), []byte("payload"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if size, err := dirSize(root); err != nil || size != int64(len("payload")) {
+		t.Fatalf("dirSize() = (%d, %v), want (7, nil)", size, err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dirSize(root); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing root error = %v, want fs.ErrNotExist", err)
 	}
 }
 
