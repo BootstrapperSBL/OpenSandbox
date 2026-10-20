@@ -98,14 +98,6 @@ func TestPolicySnapshotExportUnregisteredSubjectIsNoOp(t *testing.T) {
 }
 
 func TestPolicySnapshotExportGuards(t *testing.T) {
-	t.Run("persistence disabled", func(t *testing.T) {
-		srv, reg, _ := fastSandboxTestServer(t)
-		setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))
-		rec := doAction(t, srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", "/tmp/bundle.json"))
-		assert.Equal(t, http.StatusInternalServerError, rec.Code)
-		rec = doAction(t, srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_IMPORT", "/tmp/bundle.json"))
-		assert.Equal(t, http.StatusInternalServerError, rec.Code)
-	})
 	t.Run("stale fence", func(t *testing.T) {
 		h := newPolicyPersistHarness(t)
 		h.readySubject(t, policyTestUID, vaultTestIP)

@@ -62,9 +62,6 @@ var errPolicySnapshotTooLarge = fmt.Errorf("policy bundle file exceeds %d bytes"
 // the copy plus the teardown purge would make uncertain bytes the only
 // surviving recorded policy.
 func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope) (int, error) {
-	if s.policyFiles == nil {
-		return http.StatusInternalServerError, errors.New("policy export requires policy persistence (OPENSANDBOX_EGRESS_POLICY_DIR)")
-	}
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	target := strings.TrimSpace(env.Snapshot.Path)
@@ -224,9 +221,6 @@ func (s *fastSandboxPolicyServer) policyExportSourceImageLocked(subj subject.Sub
 // fence, the policy installs into the live record and a rejected bundle is
 // a 400 with last-good kept.
 func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope) (int, error) {
-	if s.policyFiles == nil {
-		return http.StatusInternalServerError, errors.New("policy import requires policy persistence (OPENSANDBOX_EGRESS_POLICY_DIR)")
-	}
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	source := strings.TrimSpace(env.Snapshot.Path)

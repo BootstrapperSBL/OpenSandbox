@@ -320,16 +320,6 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 		return nil
 	}
 
-	if s.policyFiles == nil {
-		// Memory-only (persistence disabled): direct commit.
-		if err := apply(); err != nil {
-			log.Errorf("subject %s: policy relay write failed: %v", subj, err)
-			http.Error(w, "policy commit failure", http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, putResponseStatus(created), doc)
-		return
-	}
 	payload, err := policy.EncodePolicyFile(fence.RuntimeInstanceID, fence.AttachmentID, newRev, raw)
 	if err != nil {
 		log.Errorf("subject %s: policy file encode failed: %v", subj, err)
@@ -418,15 +408,6 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 		return nil
 	}
 
-	if s.policyFiles == nil {
-		if err := apply(); err != nil {
-			log.Errorf("subject %s: policy relay delete failed: %v", subj, err)
-			http.Error(w, "policy commit failure", http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	raw, err := json.Marshal(deny)
 	if err != nil {
 		http.Error(w, "policy persistence failure", http.StatusInternalServerError)

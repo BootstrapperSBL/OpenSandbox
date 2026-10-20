@@ -95,7 +95,43 @@ func fastSandboxTestServer(t *testing.T) (*fastSandboxPolicyServer, *subject.Mem
 	// no-op the gateway DNS redirect (no iptables/nft in unit tests)
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
 	srv.dnsRedirectRemove = func() error { return nil }
+	// Policy persistence is REQUIRED in the fast-sandbox profile — every
+	// test server carries a store, mirroring the production posture (no
+	// memory-only mode). The file seam defaults to a cross-platform fake
+	// keyed by path (the atomic machinery itself is Linux-only); tests that
+	// need real files or outcome injection build their own harness.
+	pp, err := newPolicyPersistence(t.TempDir())
+	require.NoError(t, err)
+	files := make(map[string]*fakeVaultFile)
+	pp.newFile = func(path string) (vaultFileStore, error) {
+		f, ok := files[path]
+		if !ok {
+			f = newFakeVaultFile(path)
+			files[path] = f
+		}
+		return f, nil
+	}
+	srv.SetPolicyFiles(pp)
 	return srv, reg, nft
+}
+
+// wireTestPolicyPersistence attaches the required temp-dir-backed policy
+// persistence to a server constructed directly (bypassing
+// fastSandboxTestServer).
+func wireTestPolicyPersistence(t *testing.T, srv *fastSandboxPolicyServer) {
+	t.Helper()
+	pp, err := newPolicyPersistence(t.TempDir())
+	require.NoError(t, err)
+	files := make(map[string]*fakeVaultFile)
+	pp.newFile = func(path string) (vaultFileStore, error) {
+		f, ok := files[path]
+		if !ok {
+			f = newFakeVaultFile(path)
+			files[path] = f
+		}
+		return f, nil
+	}
+	srv.SetPolicyFiles(pp)
 }
 
 func doRequest(t *testing.T, srv *fastSandboxPolicyServer, method, path, body string) *httptest.ResponseRecorder {
@@ -627,6 +663,7 @@ func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -1022,6 +1059,7 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	reg := subject.NewRegistry([]policy.EgressRule{alwaysDeny}, []policy.EgressRule{alwaysAllow})
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
 	srv.dnsRedirectRemove = func() error { return nil }
 
@@ -1089,6 +1127,7 @@ func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -1218,6 +1257,7 @@ func TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent(t *testin
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -1238,6 +1278,7 @@ func TestFastSandboxServerGatewayRedirectRebindMovesGateway(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }

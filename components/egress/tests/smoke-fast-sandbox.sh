@@ -66,6 +66,12 @@ HOSTS_BACKUP=""
 VAULT_DIR=""
 VAULT_BODY=""
 
+# Per-subject policy files (egress-held policy): REQUIRED by the fast-sandbox
+# profile — the recorded policy is egress-held state, so a fresh directory
+# per run keeps the seeding assertions meaningful while surviving the in-run
+# restarts (Test 9/14 durability).
+POLICY_DIR=""
+
 info() { echo "[$(date +%H:%M:%S)] $*"; }
 pass() { info "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -104,6 +110,7 @@ cleanup() {
   [ -n "${SSL_DIR:-}" ] && rm -rf "${SSL_DIR}" 2>/dev/null
   [ -n "${CA_SEED_DIR}" ] && rm -rf "${CA_SEED_DIR}" 2>/dev/null
   [ -n "${VAULT_DIR}" ] && rm -rf "${VAULT_DIR}" 2>/dev/null
+  [ -n "${POLICY_DIR}" ] && rm -rf "${POLICY_DIR}" 2>/dev/null
   [ -n "${VAULT_BODY}" ] && rm -f "${VAULT_BODY}" 2>/dev/null
   nft delete table inet opensandbox-fast-sandbox 2>/dev/null
 }
@@ -272,6 +279,7 @@ start_egress() {
   OPENSANDBOX_EGRESS_BLOCK_DOH_443="${block_doh}" \
   OPENSANDBOX_EGRESS_DOH_BLOCKLIST="${doh_blocklist}" \
   OPENSANDBOX_EGRESS_VAULT_DIR="${VAULT_DIR}" \
+  OPENSANDBOX_EGRESS_POLICY_DIR="${POLICY_DIR}" \
   "${mitm_env[@]}" \
   "${upstream_env[@]}" \
   "${EGRESS_BIN}" >"${EGRESS_LOG}" 2>&1 &
@@ -338,6 +346,7 @@ printf '%s\n' '10.99.0.9' > "${ALWAYS_RULES_DIR}/deny.always"
 # writes run the commit protocol and the ack means durable (exercised by the
 # Test 14 restart reload).
 VAULT_DIR="$(mktemp -d -t fast-sandbox-vault.XXXXXX)"
+POLICY_DIR="$(mktemp -d -t fast-sandbox-policy.XXXXXX)"
 VAULT_BODY="$(mktemp -t fast-sandbox-vault-body.XXXXXX)"
 
 info "Building egress binary"
@@ -1014,6 +1023,9 @@ else
   # credential while a keeps a separate one.
   VB_BODY='{"credentials":[{"name":"smoke-b-token","source":{"type":"inline","value":"smoke-b-secret"}}],"bindings":[{"name":"ext-bearer","match":{"hosts":["ext.test"],"schemes":["http"],"paths":["/private*"]},"auth":{"type":"bearer","credential":"smoke-b-token"}}]}'
   set_binding b 10.10.0.6 3 runtime-b att-b "${VAULT_POLICY_B}"
+  # b's record survived the restarts (MITM section) and supersedes the
+  # binding input — the vault validation policy rides the relay.
+  relay_put_policy b "${VAULT_POLICY_B}"
   code="$(vault_relay b POST "${VB_BODY}")"
   [ "${code}" = "201" ] || fail "relay POST must accept a denying subject (pending-policy validation), got ${code}: $(cat "${VAULT_BODY}")"
   lifecycle_hook b runtime-b att-b sandbox.runtime-ready

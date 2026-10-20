@@ -552,13 +552,22 @@ func TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration(t *testing.T) 
 // ---------------------------------------------------------------------------
 
 func TestPolicyPersistCapabilityFlag(t *testing.T) {
+	// Policy persistence is required in the profile: every server advertises
+	// the capability.
 	h := newPolicyPersistHarness(t)
 	status := mustStatus(t, h.srv)
 	assert.True(t, status.PolicyTransfer, "policy persistence configured: the Fastlet's transfer capability")
 
 	srv, _, _ := fastSandboxTestServer(t)
+	status = mustStatus(t, srv)
+	assert.True(t, status.PolicyTransfer)
+	assert.NotContains(t, mustStatusBodyJSON(t, srv), "policyRecovery", "healthy posture omits the recovery flag")
+}
+
+// mustStatusBodyJSON returns the raw actions status body.
+func mustStatusBodyJSON(t *testing.T, srv *fastSandboxPolicyServer) string {
+	t.Helper()
 	rec := doRequest(t, srv, http.MethodGet, constants.ActionsStatusPath, "")
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.NotContains(t, rec.Body.String(), "policyTransfer", "the capability stays omitted when false")
-	assert.NotContains(t, rec.Body.String(), "policyRecovery")
+	return rec.Body.String()
 }

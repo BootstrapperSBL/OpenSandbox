@@ -129,22 +129,24 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		log.Infof("fast-sandbox vault persistence enabled at %s (one file per subject, atomic commit protocol)", vaultDir)
 	}
 
-	// Policy persistence: per-subject policy files under
-	// OPENSANDBOX_EGRESS_POLICY_DIR so an egress restart recovers the
-	// recorded policy locally at SET_BINDING replay (the committed file
-	// supersedes the replayed binding input) and the POLICY_EXPORT /
-	// POLICY_IMPORT snapshot transfer can carry it across pause/resume.
-	// Empty/unset keeps the policy memory-only. Fail fast on an unusable
-	// directory: silently serving memory-only would break the acked ⇒
-	// durable contract.
-	if policyDir := strings.TrimSpace(os.Getenv(constants.EnvEgressPolicyDir)); policyDir != "" {
-		pp, err := newPolicyPersistence(policyDir)
-		if err != nil {
-			log.Fatalf("fast-sandbox policy persistence: %v", err)
-		}
-		fastSandboxSrv.SetPolicyFiles(pp)
-		log.Infof("fast-sandbox policy persistence enabled at %s (one file per subject, atomic commit protocol)", policyDir)
+	// Policy persistence: REQUIRED for the fast-sandbox profile. Per-subject
+	// policy files under OPENSANDBOX_EGRESS_POLICY_DIR make the recorded
+	// policy egress-held state — an egress restart recovers it locally at
+	// SET_BINDING replay (the committed file supersedes the replayed binding
+	// input) and the POLICY_EXPORT / POLICY_IMPORT snapshot transfer carries
+	// it across pause/resume. There is no memory-only posture: the binding
+	// input must never become a policy recovery source, so an unusable
+	// directory fails startup.
+	policyDir := strings.TrimSpace(os.Getenv(constants.EnvEgressPolicyDir))
+	if policyDir == "" {
+		log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR is required (the recorded policy is egress-held state)")
 	}
+	pp, err := newPolicyPersistence(policyDir)
+	if err != nil {
+		log.Fatalf("fast-sandbox policy persistence: %v", err)
+	}
+	fastSandboxSrv.SetPolicyFiles(pp)
+	log.Infof("fast-sandbox policy persistence enabled at %s (one file per subject, atomic commit protocol)", policyDir)
 
 	// Shared mitmproxy (OSEP-0022 A1): one mitmdump in the Pod netns serving
 	// every sandbox. Started BEFORE the HTTP listener so subjects can never

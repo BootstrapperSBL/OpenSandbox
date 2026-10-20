@@ -186,13 +186,12 @@ func (s *fastSandboxPolicyServer) SetPolicyFiles(pp *policyPersistence) {
 // other kind's directory could clobber its state (the rehydrate would then
 // quarantine the corrupted file).
 func (s *fastSandboxPolicyServer) reservesStatePath(path string) bool {
-	if s.vaultFiles != nil && s.vaultFiles.reservesPath(path) {
+	// Policy persistence is required in this profile; vault persistence
+	// stays optional.
+	if s.policyFiles.reservesPath(path) {
 		return true
 	}
-	if s.policyFiles != nil && s.policyFiles.reservesPath(path) {
-		return true
-	}
-	return false
+	return s.vaultFiles != nil && s.vaultFiles.reservesPath(path)
 }
 
 // purgePolicyFile removes the subject's persisted policy (rebind or terminal
@@ -331,9 +330,6 @@ func (s *fastSandboxPolicyServer) clearPolicyRecord(subj subject.Subject) {
 // a failed registration leaves the reloaded pending policy on a denying
 // subject, which the Fastlet's retry converges.
 func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fence subject.Fencing) {
-	if s.policyFiles == nil {
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.policies[subj]; e != nil {
@@ -434,7 +430,6 @@ func (s *fastSandboxPolicyServer) applyBindingPolicy(subj subject.Subject, fence
 		s.mu.Lock()
 		entry = nil
 	}
-	pp := s.policyFiles
 	s.mu.Unlock()
 	if entry != nil {
 		log.Infof("subject %s: binding input superseded by the recorded policy (revision %d)", subj, entry.revision)
@@ -462,10 +457,6 @@ func (s *fastSandboxPolicyServer) applyBindingPolicy(subj subject.Subject, fence
 		s.policies[subj] = &policyEntry{revision: rev, fence: fence}
 		s.mu.Unlock()
 		return nil
-	}
-	if pp == nil {
-		// Memory-only: direct commit.
-		return apply()
 	}
 	payload, err := policy.EncodePolicyFile(fence.RuntimeInstanceID, fence.AttachmentID, rev, raw)
 	if err != nil {

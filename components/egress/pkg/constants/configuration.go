@@ -77,9 +77,10 @@ const (
 // vault files on the Pod-scoped emptyDir volume. Empty/unset keeps the vault
 // memory-only; the sidecar profile never persists.
 //
-// EnvEgressPolicyDir (fast-sandbox profile): directory for the per-subject
-// policy files with the same semantics. Persistence is required for the
-// POLICY_EXPORT / POLICY_IMPORT snapshot transfer.
+// EnvEgressPolicyDir (fast-sandbox profile): REQUIRED — directory for the
+// per-subject policy files. The recorded policy is egress-held state; there
+// is no memory-only posture (the profile fails startup without it), so the
+// binding input never becomes a policy recovery source.
 const (
 	EnvEgressVaultDir  = "OPENSANDBOX_EGRESS_VAULT_DIR"
 	EnvEgressPolicyDir = "OPENSANDBOX_EGRESS_POLICY_DIR"
