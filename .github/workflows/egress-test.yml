@@ -31,6 +31,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/egress/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -280,6 +281,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/egress/go.sum
 
       - name: Install nftables
         run: sudo apt-get update && sudo apt-get install -y nftables
