@@ -32,14 +32,14 @@ from typing import Optional
 
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.services.fast_sandbox.network_policy import normalized_policy
+from opensandbox_server.services.fast_sandbox.generated import (
+    fastpath_pb2 as pb2,
+)
+
 # The egress binding input seeded for a sandbox created without a
 # networkPolicy: default-allow (behavior identical to a policy-less
 # sandbox) — the binding's point is subject registration, not enforcement.
 DEFAULT_ALLOW_POLICY = {"defaultAction": "allow", "egress": []}
-
-from opensandbox_server.services.fast_sandbox.generated import (
-    fastpath_pb2 as pb2,
-)
 
 SUPPORTED_EXTENSION_KEYS = frozenset({"poolRef"})
 

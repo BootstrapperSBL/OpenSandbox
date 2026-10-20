@@ -518,9 +518,10 @@ pass "restart durability (recorded policy supersedes the replayed binding input,
 # starts from the recorded policy — put back what the binding inputs intend.
 relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
 # DELETE tombstone across a restart, and the revision precondition: a
-# stale expectedRevision is a 409 on the public contract.
+# stale expectedRevision is a 412 on the handler contract (the server
+# remaps it to 409 on the public API).
 http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT "http://127.0.0.1:${POLICY_PORT}/policy/a" -d '{"policy":{"defaultAction":"deny","egress":[]},"expectedRevision":99}')"
-[ "${http_code}" = "409" ] || fail "stale expectedRevision must be 409, got ${http_code}"
+[ "${http_code}" = "412" ] || fail "stale expectedRevision must be 412, got ${http_code}"
 
 ###############################################################################
 info "Test 10: strict DoH mode (no blocklist) drops all tcp 443 globally"
