@@ -292,7 +292,7 @@ func TestPolicyPersistStaleIncarnationDiscarded(t *testing.T) {
 	assert.Equal(t, http.StatusPreconditionFailed, rec.Code)
 }
 
-func TestPolicyPersistUnusableFilesFallBackToInput(t *testing.T) {
+func TestPolicyPersistUnusableFilesDegradeFailClosed(t *testing.T) {
 	cases := []struct {
 		name string
 		data []byte
@@ -311,18 +311,33 @@ func TestPolicyPersistUnusableFilesFallBackToInput(t *testing.T) {
 			f.data = tc.data
 			f.exists = true
 
-			// Registration succeeds; the binding input seeds the subject.
+			// Registration succeeds; the subject degrades FAIL CLOSED — the
+			// bootstrap input must not seed (it may be more permissive than
+			// the unreadable runtime change), the pending policy is
+			// default-deny.
 			h.readySubject(t, policyTestUID, vaultTestIP)
 			rec := doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
 			rev, doc := mustPolicyRevision(t, rec)
+			assert.Equal(t, int64(0), rev)
+			assert.Contains(t, string(doc.Policy), `"defaultAction":"deny"`)
+
+			// The degraded mark surfaces on the actions status.
+			status := mustStatus(t, h.srv)
+			assert.Equal(t, []string{policyTestUID}, status.DegradedPolicies)
+			assert.True(t, status.Ready, "a per-subject degradation never flips process readiness")
+
+			// A relay PUT heals the subject: the degraded mark clears and
+			// the written policy takes over at revision 1.
+			// The degraded record exists at revision 0, so the healing PUT
+			// is a replace (200), not a create.
+			rec = doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllow(), 0, false, false), "")
+			require.Equal(t, http.StatusOK, rec.Code)
+			rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+			rev, doc = mustPolicyRevision(t, rec)
 			assert.Equal(t, int64(1), rev)
 			assert.Contains(t, string(doc.Policy), "api.example.com")
-
-			// The unusable file was quarantined, then replaced by the
-			// seeded record's own file.
-			assert.True(t, f.exists, "the seeded record persists its own file")
-			pf, _ := decodePolicyFile(t, f)
-			assert.Equal(t, int64(1), pf.Revision)
+			status = mustStatus(t, h.srv)
+			assert.Empty(t, status.DegradedPolicies)
 		})
 	}
 }

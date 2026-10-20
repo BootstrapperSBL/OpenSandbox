@@ -135,11 +135,30 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		return
 	}
 	effective := s.reg.EffectivePolicy(subj)
+	if effective == nil {
+		// Pre-read the pending policy and merge the always overlay BEFORE
+		// s.mu (registry → s.mu order): a vault op held to the
+		// data-plane-ready barrier must validate against the SAME policy
+		// the hook will enforce, operator always-rules included.
+		s.mu.Lock()
+		pending := s.pendingPolicies[subj]
+		s.mu.Unlock()
+		if pending != nil {
+			effective = s.reg.EffectiveOf(pending)
+		}
+	}
 
 	// The rest of the mutation holds s.mu, serializing per-subject writers
-	// and fencing rebind/terminal purges.
+	// and fencing rebind/terminal purges. The validation policy was fully
+	// pre-computed above — nothing inside the lock touches the registry.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Commit-time fence re-validation: the pre-read above cannot see a
+	// rebind that completed after it (see subjFence).
+	if !s.fenceMatchesLocked(subj, fence) {
+		http.Error(w, "unknown subject", http.StatusNotFound)
+		return
+	}
 	if s.vaultSealedLocked(subj) {
 		http.Error(w, "subject vault is sealed (paused); the bundle copy is already taken", http.StatusConflict)
 		return
@@ -149,7 +168,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		return
 	}
 	store := s.vaultForLocked(subj, fence)
-	pol := s.vaultValidationPolicyLocked(effective, subj)
+	pol := effective
 
 	var (
 		candidate *credentialvault.MutationCandidate
@@ -283,6 +302,9 @@ func (s *fastSandboxPolicyServer) selectRelayVault(r *http.Request, subj subject
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.fenceMatchesLocked(subj, fence) {
+		return nil, http.StatusNotFound, "unknown subject"
+	}
 	if s.vaultSealedLocked(subj) {
 		return nil, http.StatusConflict, "subject vault is sealed (paused); the bundle copy is already taken"
 	}
@@ -296,19 +318,24 @@ func (s *fastSandboxPolicyServer) vaultSealedLocked(subj subject.Subject) bool {
 	return ok && e.sealed
 }
 
-// vaultValidationPolicyLocked returns the policy a vault op validates
-// against: the effective policy of an active subject, or — while the subject
-// is still denying — its pending binding policy (the op is held to the
-// data-plane-ready barrier, so validation must not depend on hook timing).
-// The effective policy is PRE-READ by the caller before s.mu (lock order:
-// registry → s.mu, see handleVaultRelayWrite); the pending fallback uses
-// the raw user policy — the always overlay is enforcement-side and
-// validation only needs the explicit allow cover. Callers hold s.mu.
-func (s *fastSandboxPolicyServer) vaultValidationPolicyLocked(effective *policy.NetworkPolicy, subj subject.Subject) *policy.NetworkPolicy {
+// vaultValidationPolicy returns the policy a vault op validates against:
+// the effective policy of an active subject, or — while the subject is
+// still denying — its pending binding policy MERGED with the always
+// overlay (the op is held to the data-plane-ready barrier, so validation
+// must not depend on hook timing). Call this BEFORE s.mu — it reads the
+// registry (lock order: registry → s.mu, see handleVaultRelayWrite).
+func (s *fastSandboxPolicyServer) vaultValidationPolicy(subj subject.Subject) *policy.NetworkPolicy {
+	effective := s.reg.EffectivePolicy(subj)
 	if effective != nil {
 		return effective
 	}
-	return s.pendingPolicies[subj]
+	s.mu.Lock()
+	pending := s.pendingPolicies[subj]
+	s.mu.Unlock()
+	if pending != nil {
+		return s.reg.EffectiveOf(pending)
+	}
+	return nil
 }
 
 // writeVaultRelayError maps store errors onto the relay contract: revision

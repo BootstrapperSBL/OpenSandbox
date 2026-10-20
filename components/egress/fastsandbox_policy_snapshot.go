@@ -171,6 +171,14 @@ func (s *fastSandboxPolicyServer) policyExportSourceImageLocked(subj subject.Sub
 	if !regFence.Matches(fence) {
 		return nil, http.StatusConflict, fmt.Errorf("stale policy export (fence mismatch) for subject %s", subj)
 	}
+	if !s.fenceMatchesLocked(subj, fence) {
+		// Purged between the pre-read and the lock — the stale envelope
+		// lost the race with a rebind.
+		return nil, http.StatusNotFound, fmt.Errorf("policy export for unknown subject %s", subj)
+	}
+	if !regFence.Matches(fence) {
+		return nil, http.StatusConflict, fmt.Errorf("stale policy export (fence mismatch) for subject %s", subj)
+	}
 	if recovery := s.policyRecovery.Load(); recovery != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("policy persistence recovery required: %s", recovery.reason)
 	}
@@ -257,9 +265,12 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 
-	// Registry reads before s.mu (lock order: registry → policyCommitMu →
-	// s.mu, see applyPolicyExport).
-	regFence, registered := s.reg.Fence(subj)
+	// The registration fence re-validation happens under s.mu against our
+	// own recorded fence (subjFence) — no registry read is needed in this
+	// section, so the registry → policyCommitMu → s.mu order is preserved
+	// trivially (see applyPolicyExport). An unknown fence (no record) means
+	// the subject is not registered: the bundle lands for the next
+	// registration.
 	s.mu.Lock()
 	// The latch freezes every policy file mutation; only a restart
 	// reconciles (relay-write parity).
@@ -282,7 +293,8 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 			}
 		}
 	}
-	if registered && !regFence.Matches(fence) {
+	registered := s.fenceMatchesLocked(subj, fence)
+	if _, known := s.subjFence[subj]; known && !registered {
 		s.mu.Unlock()
 		return http.StatusConflict, fmt.Errorf("stale policy import (fence mismatch) for subject %s", subj)
 	}

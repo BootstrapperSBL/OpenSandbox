@@ -307,6 +307,9 @@ type StatusResponse struct {
 	PolicyTransfer bool `json:"policyTransfer,omitempty"`
 	// PolicyRecovery is true while the policy persistence recovery latch
 	// freezes policy relay writes until restart (same mechanics as
-	// vaultRecovery).
-	PolicyRecovery bool `json:"policyRecovery,omitempty"`
+	// vaultRecovery); DegradedPolicies lists subjects whose persisted
+	// policy failed to load (default-deny fail closed for them; a
+	// successful relay write clears it).
+	PolicyRecovery   bool     `json:"policyRecovery,omitempty"`
+	DegradedPolicies []string `json:"degradedPolicies,omitempty"`
 }

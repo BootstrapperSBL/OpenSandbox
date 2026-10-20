@@ -69,6 +69,13 @@ type fastSandboxPolicyServer struct {
 	// cleanup (gateway refcounts) even when the REMOVE_BINDING envelope omits
 	// the attachment block.
 	subjAtt map[subject.Subject]actionhandler.NetworkAttachment
+	// subjFence records the registered fence per subject. It is the
+	// commit-time re-validation for the relay paths, whose registry reads
+	// happen BEFORE s.mu (lock order: registry → s.mu): a rebind that
+	// completed between the pre-read and the lock updates this map, so the
+	// in-lock comparison rejects the stale request without touching the
+	// registry under s.mu.
+	subjFence map[subject.Subject]subject.Fencing
 
 	// vaultFiles owns the per-subject vault files; nil keeps the vault
 	// memory-only (the default, and the sidecar posture).
@@ -136,6 +143,7 @@ func newFastSandboxPolicyServer(ctx context.Context, reg *subject.MemoryRegistry
 		pendingPolicies:    make(map[subject.Subject]*policy.NetworkPolicy),
 		policies:           make(map[subject.Subject]*policyEntry),
 		subjAtt:            make(map[subject.Subject]actionhandler.NetworkAttachment),
+		subjFence:          make(map[subject.Subject]subject.Fencing),
 		gatewayDNSRefs:     make(map[subject.Subject]netip.Addr),
 		dnsRedirectInstall: iptables.SetupGatewayDNSRedirect,
 		dnsRedirectRemove:  iptables.RemoveGatewayDNSRedirect,
@@ -561,18 +569,30 @@ func (s *fastSandboxPolicyServer) dropSubjectState(subj subject.Subject) {
 	delete(s.policies, subj)
 	delete(s.pendingPolicies, subj)
 	delete(s.subjAtt, subj)
+	delete(s.subjFence, subj)
 	s.purgeVaultFile(subj)
 	s.purgePolicyFile(subj)
 	s.mu.Unlock()
 }
 
 // recordBindingState stores the SET_BINDING bookkeeping for a registered
-// subject: the network attachment (terminal cleanup). Called after the
+// subject: the network attachment (terminal cleanup) and the registered
+// fence (relay commit-time re-validation, see subjFence). Called after the
 // registry lock is released.
-func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment) {
+func (s *fastSandboxPolicyServer) recordBindingState(subj subject.Subject, att actionhandler.NetworkAttachment, fence subject.Fencing) {
 	s.mu.Lock()
 	s.subjAtt[subj] = att
+	s.subjFence[subj] = fence
 	s.mu.Unlock()
+}
+
+// fenceMatchesLocked reports whether the subject's recorded registration
+// fence equals the request fence. Callers hold s.mu. A false return means
+// the pre-read (registry → s.mu window) went stale: the subject was purged
+// or rebound, and the request must not touch its state.
+func (s *fastSandboxPolicyServer) fenceMatchesLocked(subj subject.Subject, fence subject.Fencing) bool {
+	got, ok := s.subjFence[subj]
+	return ok && got == fence
 }
 
 // attachment returns the last observed network attachment for a registered

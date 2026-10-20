@@ -41,7 +41,6 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/alibaba/opensandbox/egress/pkg/actionhandler"
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
 	"github.com/alibaba/opensandbox/egress/pkg/log"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
@@ -61,6 +60,10 @@ type policyEntry struct {
 	// sealed marks a paused subject whose policy file was exported into the
 	// snapshot bundle: every relay op answers 409; enforcement is unchanged.
 	sealed bool
+	// degraded is non-empty while the persisted policy could not be
+	// reloaded: the record stays default-deny (fail closed) until a
+	// successful relay write heals it.
+	degraded string
 }
 
 // policyRelayDocument is the GET response and PUT body of the relay
@@ -119,6 +122,9 @@ func (s *fastSandboxPolicyServer) selectRelayPolicy(r *http.Request, subj subjec
 	pol := s.reg.UserPolicy(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.fenceMatchesLocked(subj, fence) {
+		return nil, http.StatusNotFound, "unknown subject"
+	}
 	if e := s.policies[subj]; e != nil && e.sealed {
 		return nil, http.StatusConflict, "subject policy is sealed (paused); the bundle copy is already taken"
 	}
@@ -210,6 +216,11 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 	// Guards + decision under one s.mu hold, serialized against rebinds and
 	// terminal purges (the whole write already holds policyCommitMu).
 	s.mu.Lock()
+	if !s.fenceMatchesLocked(subj, fence) {
+		s.mu.Unlock()
+		http.Error(w, "unknown subject", http.StatusNotFound)
+		return
+	}
 	entry := s.policies[subj]
 	if entry != nil && entry.sealed {
 		s.mu.Unlock()
@@ -225,7 +236,6 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 	if entry != nil {
 		cur = entry.revision
 	}
-	att, attOK := s.subjAtt[subj]
 	s.mu.Unlock()
 
 	if r.Method == http.MethodDelete {
@@ -234,7 +244,7 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 			return
 		}
 		// Deletion is an authoritative tombstone at the successor revision.
-		s.deleteRelayPolicy(w, subj, fence, att, attOK, cur+1)
+		s.deleteRelayPolicy(w, subj, fence, cur+1)
 		return
 	}
 
@@ -303,6 +313,8 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 		if state != subject.StateActive {
 			s.pendingPolicies[subj] = pol
 		}
+		// A fresh entry also clears a degraded mark: the successful write
+		// IS the heal.
 		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}
 		s.mu.Unlock()
 		return nil
@@ -370,12 +382,13 @@ func putResponseStatus(created bool) int {
 }
 
 // deleteRelayPolicy commits the deletion as an authoritative default-deny
-// tombstone: enforcement reverts to deny-first AND the record persists at
-// the successor revision (memory + file), so an egress restart reloads the
-// deletion instead of letting the replayed bootstrap binding resurrect the
-// deleted policy. GET serves the deny record; a later PUT replaces it at
-// the successor revision. The caller holds policyCommitMu.
-func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj subject.Subject, fence subject.Fencing, att actionhandler.NetworkAttachment, attOK bool, newRev int64) {
+// tombstone: the record persists at the successor revision (memory + file)
+// and enforcement becomes default-deny — in place on an active subject
+// (which stays active, so a later relay PUT re-enables immediately), held
+// pending on a denying one. An egress restart reloads the tombstone
+// instead of letting the replayed bootstrap binding resurrect the deleted
+// policy. GET serves the deny record. The caller holds policyCommitMu.
+func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj subject.Subject, fence subject.Fencing, newRev int64) {
 	deny := policy.DefaultDenyPolicy()
 	apply := func() error {
 		state, err := s.policyCommitTarget(subj, fence)
@@ -383,19 +396,22 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 			return err
 		}
 		if state == subject.StateActive {
-			// Enforcement first: nft deny-first commits before the registry
-			// state (fail-closed transition), mirroring SET_BINDING removal.
-			if !attOK {
-				return fmt.Errorf("subject %s has no recorded attachment for the deny-first revert", subj)
-			}
-			if err := s.revertToDenyFirst(subj, att); err != nil {
+			// Enforcement first: the deny tombstone applies IN PLACE — the
+			// subject stays active with default-deny enforced (the operator
+			// always overlay keeps applying), so a later relay PUT
+			// re-enables traffic immediately; the generic handler relay
+			// never replays a data-plane-ready hook to activate a
+			// pending-only replacement. nft commits before the registry
+			// state (fail-closed transition).
+			if err := s.applyPolicy(subj, deny); err != nil {
 				return err
 			}
 		}
 		s.mu.Lock()
 		// The activation barrier keeps working across a hook replay: a
 		// replayed data-plane-ready activates the deny record, never a
-		// stale policy.
+		// stale policy. On an active subject the pending deny is
+		// idempotent with what was just enforced.
 		s.pendingPolicies[subj] = deny
 		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}
 		s.mu.Unlock()

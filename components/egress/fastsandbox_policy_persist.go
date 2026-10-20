@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/alibaba/opensandbox/egress/pkg/log"
@@ -315,12 +316,12 @@ func (s *fastSandboxPolicyServer) clearPolicyRecord(subj subject.Subject) {
 //     recorded since — and the record materializes from the file
 //   - mismatch → stale, purged (a reset never inherits the predecessor's
 //     policy)
-//   - unreadable, a newer schema, or content that fails to parse → the file
-//     is quarantined and the binding input seeds the subject. Unlike the
-//     vault (whose content has no fallback source), a policy this egress
-//     cannot read has a safe fallback: the replayed binding input is the
-//     create-time bootstrap, so it can never grant post-create relay
-//     mutations
+//   - unreadable, a newer schema, or content that fails to parse → the
+//     subject DEGRADES fail-closed: the pending policy becomes default-deny
+//     and the degraded mark surfaces on the actions status (a successful
+//     relay PUT heals it). The file may carry an acknowledged runtime
+//     change this egress can no longer read — the bootstrap input could be
+//     more permissive, so it must not seed
 //
 // Removal SET_BINDINGS skip the reload (clearPolicyRecord handles them).
 // A live record for this exact fence wins (duplicate SET_BINDING); one left
@@ -343,12 +344,12 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 	}
 	fs, err := s.policyFiles.storeFor(subj)
 	if err != nil {
-		log.Warnf("subject %s: policy file store unavailable (%v); the binding input seeds the subject", subj, err)
+		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file store unavailable: %v", err))
 		return
 	}
 	snap, err := fs.Snapshot()
 	if err != nil {
-		log.Warnf("subject %s: policy file unreadable (%v); the binding input seeds the subject", subj, err)
+		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file unreadable: %v", err))
 		return
 	}
 	if !snap.Exists() {
@@ -357,11 +358,17 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 	}
 	pf, body, decErr := policy.DecodePolicyFile(snap.Data())
 	if decErr != nil {
-		if _, delErr := fs.Delete(); delErr != nil {
-			log.Errorf("subject %s: unreadable policy file quarantine failed (file left in place): %v", subj, delErr)
-			return
+		// Fail closed: the file may carry an acknowledged runtime change
+		// (e.g. a tightening) that this egress can no longer read — seeding
+		// the bootstrap input would silently undo it. Corrupt files are
+		// quarantined; newer-schema files stay for the newer writer. A
+		// relay PUT heals the subject.
+		if !errors.Is(decErr, policy.ErrUnsupportedPolicyFileVersion) {
+			if _, delErr := fs.Delete(); delErr != nil {
+				log.Errorf("subject %s: unreadable policy file quarantine failed (file left in place): %v", subj, delErr)
+			}
 		}
-		log.Warnf("subject %s: policy file unusable (%v); quarantined, the binding input seeds the subject", subj, decErr)
+		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file unusable (%v)", decErr))
 		return
 	}
 	recorded := subject.Fencing{RuntimeInstanceID: pf.Incarnation, AttachmentID: pf.AttachmentID}
@@ -379,9 +386,10 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 	if parseErr != nil {
 		if _, delErr := fs.Delete(); delErr != nil {
 			log.Errorf("subject %s: unparseable policy file quarantine failed (file left in place): %v", subj, delErr)
+			s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file quarantine failed: %v", delErr))
 			return
 		}
-		log.Warnf("subject %s: policy file content rejected (%v); quarantined, the binding input seeds the subject", subj, parseErr)
+		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file content rejected (%v)", parseErr))
 		return
 	}
 	entry := &policyEntry{revision: pf.Revision, fence: fence}
@@ -470,4 +478,36 @@ func (s *fastSandboxPolicyServer) applyBindingPolicy(subj subject.Subject, fence
 		},
 		apply,
 	)
+}
+
+// degradePolicyReloadLocked materializes the subject's record as a degraded
+// default-deny entry: the pending policy is default-deny (the
+// data-plane-ready barrier activates deny, never a stale or permissive
+// policy) and the degraded mark surfaces on the actions status until a
+// successful relay write heals it. Callers hold s.mu — the reload runs
+// inside rehydratePolicyReload, before RegisterAndEnforce (same point as
+// the healthy reload).
+func (s *fastSandboxPolicyServer) degradePolicyReloadLocked(subj subject.Subject, fence subject.Fencing, reason string) {
+	entry := &policyEntry{fence: fence, degraded: reason}
+	if s.policyFiles.isSealed(subj) {
+		entry.sealed = true
+	}
+	s.policies[subj] = entry
+	s.pendingPolicies[subj] = policy.DefaultDenyPolicy()
+	log.Warnf("subject %s: policy degraded fail-closed (%s); default-deny pending until a relay write heals it", subj, reason)
+}
+
+// degradedPolicyUIDs lists the subjects with a degraded policy record, as
+// raw sandbox UIDs, sorted for stable surfacing.
+func (s *fastSandboxPolicyServer) degradedPolicyUIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for subj, e := range s.policies {
+		if e.degraded != "" {
+			out = append(out, vaultFileUID(subj))
+		}
+	}
+	sort.Strings(out)
+	return out
 }

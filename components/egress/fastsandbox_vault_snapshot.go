@@ -177,6 +177,14 @@ func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, 
 	if !regFence.Matches(fence) {
 		return nil, http.StatusConflict, fmt.Errorf("stale vault export (fence mismatch) for subject %s", subj)
 	}
+	if !s.fenceMatchesLocked(subj, fence) {
+		// Purged between the pre-read and the lock — the stale envelope
+		// lost the race with a rebind.
+		return nil, http.StatusNotFound, fmt.Errorf("vault export for unknown subject %s", subj)
+	}
+	if !regFence.Matches(fence) {
+		return nil, http.StatusConflict, fmt.Errorf("stale vault export (fence mismatch) for subject %s", subj)
+	}
 	if recovery := s.vaultRecovery.Load(); recovery != nil {
 		return nil, http.StatusServiceUnavailable, fmt.Errorf("vault persistence recovery required: %s", recovery.reason)
 	}
@@ -255,8 +263,9 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 	}
 
 	// Registry reads before s.mu (lock order: registry → s.mu, see
-	// handleVaultRelayWrite).
-	effective := s.reg.EffectivePolicy(subj)
+	// handleVaultRelayWrite); the validation policy merges the always
+	// overlay for the pending fallback (barrier semantics).
+	validation := s.vaultValidationPolicy(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// The latch freezes every vault file mutation; only a restart
@@ -278,14 +287,17 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 			}
 		}
 	}
-	regFence, registered := s.reg.Fence(subj)
+	// Commit-time fence re-validation against our own record (subjFence —
+	// see fenceMatchesLocked): an unknown fence means unregistered (the
+	// bundle lands for the next registration), a mismatched one is stale.
+	registered := s.fenceMatchesLocked(subj, fence)
+	if _, known := s.subjFence[subj]; known && !registered {
+		return http.StatusConflict, fmt.Errorf("stale vault import (fence mismatch) for subject %s", subj)
+	}
 	if registered {
-		if !regFence.Matches(fence) {
-			return http.StatusConflict, fmt.Errorf("stale vault import (fence mismatch) for subject %s", subj)
-		}
 		// Validate before any durable effect — a permanently broken bundle
 		// is a 400 with last-good kept, never half-open.
-		if err := validateImportedVault(vf, body, s.vaultValidationPolicyLocked(effective, subj)); err != nil {
+		if err := validateImportedVault(vf, body, validation); err != nil {
 			return http.StatusBadRequest, fmt.Errorf("vault bundle rejected: %v", err)
 		}
 	}
@@ -299,7 +311,7 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 				// Before SET_BINDING: registration reloads and validates.
 				return s.vaultFiles.unseal(subj)
 			}
-			return s.installImportedVaultLocked(subj, fence, vf, body, effective)
+			return s.installImportedVaultLocked(subj, fence, vf, body, validation)
 		},
 	)
 	if err != nil {
@@ -324,10 +336,10 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 // per-subject slice under the restored fence, replacing any stale entry.
 // The slice is only replaced once Reload accepts — a failure leaves the live
 // entry untouched while the commit protocol rolls the file back.
-// effective is the caller's pre-read of the subject's effective policy
-// (lock order: registry → s.mu, see handleVaultRelayWrite).
-func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subject, fence subject.Fencing, vf credentialvault.VaultFile, body credentialvault.VaultFileBody, effective *policy.NetworkPolicy) error {
-	pol := s.vaultValidationPolicyLocked(effective, subj)
+// validation is the caller's pre-computed vault validation policy
+// (lock order: registry → s.mu, see vaultValidationPolicy).
+func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subject, fence subject.Fencing, vf credentialvault.VaultFile, body credentialvault.VaultFileBody, validation *policy.NetworkPolicy) error {
+	pol := validation
 	entry, ok := s.vaults[subj]
 	if !ok || entry.fence != fence {
 		entry = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence}

@@ -197,18 +197,23 @@ func TestPolicyRelayInvalidPolicyKeepsLastGood(t *testing.T) {
 	assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("other.example.com"), "last-good policy untouched")
 }
 
-func TestPolicyRelayDeleteRevertsDenyFirst(t *testing.T) {
+func TestPolicyRelayDeleteEnforcesDenyTombstone(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 
 	// DELETE removes the seeded policy (revision 1 → tombstone at 2) and
-	// reverts the subject to deny-first.
+	// enforces default-deny IN PLACE: the subject stays active (a later
+	// relay PUT re-enables immediately — the generic relay never replays a
+	// data-plane-ready hook).
 	rec := doPolicy(t, srv, http.MethodDelete, policyTestUID, "", "")
 	require.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, subject.StateDenying, mustState(reg.Get(s)))
-	assert.Nil(t, reg.UserPolicy(s))
-	assert.Nil(t, reg.EffectivePolicy(s))
+	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "deny", reg_UserEvaluate(srv, s, "api.example.com"))
+	nft.mu.Lock()
+	require.NotNil(t, nft.lastPolicy)
+	assert.Equal(t, "deny", nft.lastPolicy.Evaluate("api.example.com"), "the deny tombstone is enforced")
+	nft.mu.Unlock()
 
 	// The tombstone is authoritative: GET serves the default-deny record at
 	// the successor revision, and a binding replay cannot resurrect the
@@ -225,17 +230,6 @@ func TestPolicyRelayDeleteRevertsDenyFirst(t *testing.T) {
 	assert.Equal(t, int64(2), rev, "the tombstone survives the binding replay")
 	assert.NotContains(t, string(doc.Policy), "api.example.com")
 
-	// A replayed data-plane-ready activates the deny record (the barrier
-	// consumes the tombstone's pending policy) — never a stale policy.
-	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
-	nft.mu.Lock()
-	last := nft.lastPolicy
-	nft.mu.Unlock()
-	require.NotNil(t, last)
-	assert.Equal(t, "deny", last.Evaluate("api.example.com"), "the enforced policy is the deny tombstone")
-
 	// DELETE is idempotent (the tombstone replaces itself at the successor
 	// revision).
 	rec = doPolicy(t, srv, http.MethodDelete, policyTestUID, "", "")
@@ -243,16 +237,12 @@ func TestPolicyRelayDeleteRevertsDenyFirst(t *testing.T) {
 	rev, _ = mustPolicyRevision(t, doPolicy(t, srv, http.MethodGet, policyTestUID, "", ""))
 	assert.Equal(t, int64(3), rev)
 
-	// Re-add goes through the relay: the PUT replaces the tombstone. The
-	// subject was reverted to deny-first by the second DELETE, so the write
-	// is held pending until a data-plane-ready replay activates it.
+	// Re-add goes through the relay: the PUT replaces the tombstone and
+	// re-enables immediately on the still-active subject.
 	rec = doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllow(), 3, false, true), "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	rev, doc = mustPolicyRevision(t, rec)
 	assert.Equal(t, int64(4), rev)
-	assert.Equal(t, subject.StateDenying, mustState(reg.Get(s)))
-	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
-	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 	assert.Equal(t, "allow", reg_UserEvaluate(srv, s, "api.example.com"))
 }

@@ -113,9 +113,10 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 		// Capability signal for the Fastlet's policy transfer: without policy
 		// persistence there is no recorded policy to hand off, so the
 		// transfer degrades (skips) rather than failing the checkpoint.
-		PolicyTransfer: s.policyFiles != nil,
-		PolicyRecovery: policyRecovery,
-		DegradedVaults: degraded,
+		PolicyTransfer:   s.policyFiles != nil,
+		PolicyRecovery:   policyRecovery,
+		DegradedPolicies: s.degradedPolicyUIDs(),
+		DegradedVaults:   degraded,
 	}
 	if s.mitmGate != nil {
 		resp.MitmCaFingerprint = s.mitmGate.CAFingerprint()
@@ -236,7 +237,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 	if err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("deny-first install: %w", err)
 	}
-	s.recordBindingState(subj, att)
+	s.recordBindingState(subj, att, fence)
 	if env.Binding.IsRemoval() {
 		// Binding removed from a still-live sandbox: drop the pending policy
 		// (a re-added binding gets a fresh input — never apply the removed
