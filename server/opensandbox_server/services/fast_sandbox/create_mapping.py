@@ -133,9 +133,21 @@ def map_create_request(
     if request.metadata:
         create.metadata.update(request.metadata)
 
+    # Every fsb sandbox registers an egress subject at create: the binding
+    # is what makes the Fastlet run SET_BINDING (deny-first install, network
+    # attachment) — the handler-relay surfaces (/policy/{uid},
+    # /vault/{uid}) and the pause/resume state transfer attach to it. A
+    # sandbox created without a networkPolicy seeds a no-op default-allow
+    # record (the registration is the point — the sandbox behaves exactly
+    # like today's policy-less one), and runtime changes ride the relay.
     if request.network_policy is not None:
         create.action_bindings.add(
             handler="egress", input=json.dumps(normalized_policy(request.network_policy))
+        )
+    else:
+        create.action_bindings.add(
+            handler="egress",
+            input=json.dumps({"defaultAction": "allow", "egress": []}),
         )
 
     extensions = request.extensions or {}
@@ -193,9 +205,21 @@ def map_template_create_request(
     if request.metadata:
         create.metadata.update(request.metadata)
 
+    # Every fsb sandbox registers an egress subject at create: the binding
+    # is what makes the Fastlet run SET_BINDING (deny-first install, network
+    # attachment) — the handler-relay surfaces (/policy/{uid},
+    # /vault/{uid}) and the pause/resume state transfer attach to it. A
+    # sandbox created without a networkPolicy seeds a no-op default-allow
+    # record (the registration is the point — the sandbox behaves exactly
+    # like today's policy-less one), and runtime changes ride the relay.
     if request.network_policy is not None:
         create.action_bindings.add(
             handler="egress", input=json.dumps(normalized_policy(request.network_policy))
+        )
+    else:
+        create.action_bindings.add(
+            handler="egress",
+            input=json.dumps({"defaultAction": "allow", "egress": []}),
         )
 
     extensions = request.extensions or {}

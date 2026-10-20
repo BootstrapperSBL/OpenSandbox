@@ -2358,6 +2358,11 @@ components:
             Optional outbound network policy for the sandbox.
             Shape matches the sidecar `/policy` endpoint. If omitted or empty,
             the sidecar starts in allow-all mode until updated.
+            For Fsb, an omitted policy still registers an egress binding,
+            seeded with a no-op default-allow record (the sandbox behaves
+            like a policy-less one until changed): runtime changes go
+            through the networkpolicy endpoints (handler relay), which
+            require that registration.
             Not supported together with `extensions.poolRef`; pooled pods are
             pre-created, so the server rejects this combination instead of
             silently ignoring the requested policy.

@@ -856,6 +856,35 @@ def test_upstream_proxy_config_allows_delete_network_policy_rules(persisted_fsb)
     assert fake.last_relay is not None and fake.last_relay.path.startswith("/policy/")
 
 
+def test_create_without_network_policy_still_registers_egress_binding(persisted_fsb):
+    """Every fsb sandbox registers an egress subject at create — the relay
+    surfaces (/policy/{uid}, /vault/{uid}) attach to it. A sandbox created
+    without a networkPolicy seeds default-deny and can adopt a policy later
+    through the relay."""
+    client, fake, _, sandbox_id = persisted_fsb
+    url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
+
+    # The create-time binding seeded a no-op default-allow record: GET
+    # serves it, and the CR carries the egress binding.
+    assert client.get(url).json()["policy"] == {"defaultAction": "allow", "egress": []}
+    cr = fake.crs[("ns-1", sandbox_id)]
+    bindings = cr["spec"]["actionBindings"]
+    assert [b["handler"] for b in bindings] == ["egress"]
+    assert json.loads(bindings[0]["input"]) == {"defaultAction": "allow", "egress": []}
+
+    # The sandbox can adopt a policy later through the relay.
+    policy = {"defaultAction": "allow", "egress": [{"action": "allow", "target": "a.com"}]}
+    response = client.put(url, json=policy)
+    assert response.status_code == 200
+    assert response.json()["policy"] == policy
+    assert client.get(url).json()["policy"] == policy
+    # The CR binding input stays the create-time bootstrap.
+    assert json.loads(cr["spec"]["actionBindings"][0]["input"]) == {
+        "defaultAction": "allow",
+        "egress": [],
+    }
+
+
 def test_upstream_proxy_config_allows_create_without_network_policy(http_fsb):
     client, fake, service = http_fsb
     service._app_config.egress = EgressConfig(
@@ -883,8 +912,9 @@ def test_http_policy_replace_relays_and_leaves_bindings_untouched(persisted_fsb)
     the create-time bootstrap only, and a relay PUT never rewrites it."""
     client, fake, _, sandbox_id = persisted_fsb
     url = f"/v1/sandboxes/{sandbox_id}/networkpolicy"
-    # The create-time egress binding seeds the record (default deny here).
-    assert client.get(url).json()["policy"] == {"defaultAction": "deny", "egress": []}
+    # The create-time egress binding seeds the record (a no-op
+    # default-allow for a create without networkPolicy).
+    assert client.get(url).json()["policy"] == {"defaultAction": "allow", "egress": []}
     bindings_before = [
         {"handler": "audit", "input": '{"enabled":true}'},
         {"handler": "egress", "input": '{"defaultAction":"deny"}'},
