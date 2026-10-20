@@ -32,6 +32,12 @@ export interface ExecutionError {
   value: string;
   timestamp: number;
   traceback: string[];
+  /**
+   * Exit status reported by execd for a `CommandExecError` when the command ran and finished
+   * with a non-zero status (-1 when it was terminated by a signal). Absent when the process
+   * failed to start, for non-command errors, and on servers that predate `error.exit_code`.
+   */
+  exitCode?: number;
 }
 
 export interface ExecutionComplete {

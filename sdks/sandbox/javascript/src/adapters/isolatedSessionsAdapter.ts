@@ -59,6 +59,10 @@ function utf8ByteLength(text: string): number {
 }
 
 function inferExitCode(execution: CommandExecution): number | null {
+  // Prefer the authoritative `error.exit_code`; fall back to parsing `evalue` for older servers.
+  if (typeof execution.error?.exitCode === "number") {
+    return execution.error.exitCode;
+  }
   const errorValue = execution.error?.value?.trim();
   const parsedExitCode =
     errorValue && /^-?\d+$/.test(errorValue) ? Number(errorValue) : Number.NaN;

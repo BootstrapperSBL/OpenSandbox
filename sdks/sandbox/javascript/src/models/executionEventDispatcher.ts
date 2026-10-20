@@ -89,6 +89,9 @@ export class ExecutionEventDispatcher {
             timestamp: ts,
             traceback: Array.isArray(e.traceback) ? e.traceback.map(String) : [],
           };
+          if (typeof e.exit_code === "number" && Number.isInteger(e.exit_code)) {
+            err.exitCode = e.exit_code;
+          }
           this.execution.error = err;
           await this.handlers?.onError?.(err);
         }

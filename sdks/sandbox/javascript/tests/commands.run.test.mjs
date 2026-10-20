@@ -245,6 +245,67 @@ test("CommandsAdapter.runInSession infers non-zero exitCode from final error sta
   assert.equal(execution.exitCode, 7);
 });
 
+test("CommandsAdapter.run propagates error.exit_code and prefers it over evalue", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-exit","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"3","traceback":["exit status 3"],"exit_code":3},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("exit 3");
+
+  assert.equal(execution.error?.exitCode, 3);
+  assert.equal(execution.exitCode, 3);
+});
+
+test("CommandsAdapter.run reports a signal kill (exit_code -1) as a failure", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-sig","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("kill -TERM $$");
+
+  assert.equal(execution.error?.exitCode, -1);
+  assert.equal(execution.exitCode, -1);
+  assert.equal(execution.complete, undefined);
+});
+
+test("CommandsAdapter.run leaves exitCode null for start failures without exit_code", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"cmd-start","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"fork/exec /bin/sh: argument list too long","traceback":["fork/exec /bin/sh: argument list too long"]},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.run("huge");
+
+  assert.equal(execution.error?.exitCode, undefined);
+  assert.equal(execution.exitCode, null);
+});
+
+test("CommandsAdapter.runInSession propagates error.exit_code", async () => {
+  const adapter = createAdapter(
+    [
+      'data: {"type":"init","text":"sess-exit","timestamp":1}',
+      'data: {"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: killed"],"exit_code":-1},"timestamp":2}',
+      "",
+    ].join("\n"),
+  );
+
+  const execution = await adapter.runInSession("sess-3", "kill -KILL $$");
+
+  assert.equal(execution.error?.exitCode, -1);
+  assert.equal(execution.exitCode, -1);
+});
+
 test("execd client error message carries unstructured JSON error body", async () => {
   const adapter = new CommandsAdapter(
     createExecdClient({

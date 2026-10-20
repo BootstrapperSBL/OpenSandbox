@@ -357,6 +357,14 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 		log.Error("bash session: wait: %v (command: %q)", waitErr, log.SanitizeCommand(request.Code))
 		return waitErr
 	}
+	// A shell terminated by a signal (e.g. `kill -TERM $$`) never prints the
+	// exit marker and reports ExitCode() == -1, which the >= 0 check above
+	// skips. Take the code from the wait error so the run is reported as a
+	// failure (exit_code -1) rather than as a successful completion.
+	if exitCode == nil && exitCodeErr != nil {
+		code := exitCodeErr.ExitCode()
+		exitCode = &code
+	}
 
 	userExitCode := 0
 	if exitCode != nil {

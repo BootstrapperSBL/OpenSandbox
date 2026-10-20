@@ -2495,6 +2495,56 @@ func TestExecution_ErrorEvent(t *testing.T) {
 	}
 }
 
+func TestExecution_ErrorEventExitCode(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	tests := []struct {
+		name          string
+		data          string
+		wantErrorCode *int
+		wantExitCode  *int
+	}{
+		{
+			name:          "exit_code is authoritative",
+			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"3","traceback":["exit status 3"],"exit_code":3}}`,
+			wantErrorCode: intPtr(3),
+			wantExitCode:  intPtr(3),
+		},
+		{
+			name:          "signal kill reports -1",
+			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1}}`,
+			wantErrorCode: intPtr(-1),
+			wantExitCode:  intPtr(-1),
+		},
+		{
+			name: "start failure has no exit code",
+			data: `{"type":"error","error":{"ename":"CommandExecError","evalue":"fork/exec /bin/sh: argument list too long"}}`,
+		},
+		{
+			name:         "older server falls back to evalue",
+			data:         `{"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}`,
+			wantExitCode: intPtr(7),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &Execution{}
+			var handled *ExecutionError
+			handlers := &ExecutionHandlers{
+				OnError: func(e ExecutionError) error { handled = &e; return nil },
+			}
+			require.NoError(t, processStreamEvent(exec, StreamEvent{Event: "error", Data: tc.data}, handlers))
+
+			require.NotNil(t, exec.Error)
+			require.NotNil(t, handled)
+			require.Equal(t, tc.wantErrorCode, exec.Error.ExitCode)
+			require.Equal(t, tc.wantErrorCode, handled.ExitCode)
+			require.Equal(t, tc.wantExitCode, exec.ExitCode)
+			require.True(t, exec.Complete == nil, "error event must not mark the execution complete")
+		})
+	}
+}
+
 func TestExecution_HandlersInvoked(t *testing.T) {
 	exec := &Execution{}
 	var initCalled, stdoutCalled, stderrCalled, resultCalled, completeCalled bool
