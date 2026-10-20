@@ -179,6 +179,21 @@ func (s *fastSandboxPolicyServer) SetPolicyFiles(pp *policyPersistence) {
 	s.policyFiles = pp
 }
 
+// reservesStatePath reports whether a driver-provided snapshot path
+// resolves inside ANY per-subject state directory — the vault and policy
+// directories are siblings on one volume, and an export target under the
+// other kind's directory could clobber its state (the rehydrate would then
+// quarantine the corrupted file).
+func (s *fastSandboxPolicyServer) reservesStatePath(path string) bool {
+	if s.vaultFiles != nil && s.vaultFiles.reservesPath(path) {
+		return true
+	}
+	if s.policyFiles != nil && s.policyFiles.reservesPath(path) {
+		return true
+	}
+	return false
+}
+
 // purgePolicyFile removes the subject's persisted policy (rebind or terminal
 // cleanup). Best effort: a failed purge leaves a file that its recorded
 // fence keeps out of every later registration.
@@ -279,8 +294,12 @@ func (s *fastSandboxPolicyServer) policyHealthIssue() string {
 // on a still-live sandbox): the entry goes and the persisted file is purged,
 // so the deny-first state is also the durable state — a restart cannot
 // resurrect a removed policy, and a later registration starts from its own
-// binding input.
+// input. Serialized with the relay commits (policyCommitMu) so an in-flight
+// write against the removed binding cannot recreate the record after the
+// purge; callers are never under the registry write lock.
 func (s *fastSandboxPolicyServer) clearPolicyRecord(subj subject.Subject) {
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
 	s.mu.Lock()
 	delete(s.policies, subj)
 	s.mu.Unlock()
@@ -391,6 +410,22 @@ func (s *fastSandboxPolicyServer) applyBindingPolicy(subj subject.Subject, fence
 
 	s.mu.Lock()
 	entry := s.policies[subj]
+	if entry != nil && entry.fence != fence {
+		// A stale record (its purge outcome was uncertain, or a rebind
+		// interleaved the purge) must never supersede the fresh
+		// registration's input: purge it durably and seed from the input.
+		delete(s.policies, subj)
+		pp := s.policyFiles
+		s.mu.Unlock()
+		if pp != nil {
+			if err := pp.purge(subj); err != nil {
+				log.Errorf("subject %s: stale policy record purge failed (leftover stays fenced out): %v", subj, err)
+			}
+		}
+		log.Infof("subject %s: stale policy record discarded (fence mismatch), binding input seeds", subj)
+		s.mu.Lock()
+		entry = nil
+	}
 	pp := s.policyFiles
 	s.mu.Unlock()
 	if entry != nil {

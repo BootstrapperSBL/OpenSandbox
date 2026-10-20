@@ -114,7 +114,7 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 		// persistence there is no recorded policy to hand off, so the
 		// transfer degrades (skips) rather than failing the checkpoint.
 		PolicyTransfer: s.policyFiles != nil,
-		PolicyRecovery: s.policyRecoveryActive(),
+		PolicyRecovery: policyRecovery,
 		DegradedVaults: degraded,
 	}
 	if s.mitmGate != nil {
@@ -201,13 +201,21 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 	// and the recorded policy must go too (memory + persisted files), or the
 	// old instance's credentials and policy would survive into the
 	// successor's flows. Same-UID actions serialize per subject; the vault
-	// and policy relay writes serialize against the same state.
+	// and policy relay writes serialize against the same state — the purge
+	// runs under policyCommitMu so an in-flight relay commit against the
+	// OLD fence cannot resurrect a purged record after the rebind (its
+	// commit-time fence re-check aborts it). Callers are never under the
+	// registry write lock here, so taking policyCommitMu is safe (the
+	// takeover path, which IS under the registry lock, purges without it —
+	// its relay races are fenced out by the commit-time re-check).
 	if old, ok := s.reg.Fence(subj); ok && !old.Matches(fence) {
+		s.policyCommitMu.Lock()
 		s.mu.Lock()
 		s.dropVault(subj)
 		delete(s.policies, subj)
 		s.purgePolicyFile(subj)
 		s.mu.Unlock()
+		s.policyCommitMu.Unlock()
 		log.Infof("subject %s: rebind (%s -> %s), vault slice and policy record purged", subj, old.RuntimeInstanceID, fence.RuntimeInstanceID)
 	}
 	// Egress-restart recovery (OSEP-0022 stage 2): a subject with no live

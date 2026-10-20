@@ -123,8 +123,8 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 	// The body has been consumed; a late response must not try to read it.
 	r.Body.Close()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Registry reads before s.mu (lock order: registry → s.mu, see
+	// selectRelayVault).
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		http.Error(w, "unknown subject", http.StatusNotFound)
@@ -134,6 +134,12 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		http.Error(w, "expectedIncarnation mismatch", http.StatusPreconditionFailed)
 		return
 	}
+	effective := s.reg.EffectivePolicy(subj)
+
+	// The rest of the mutation holds s.mu, serializing per-subject writers
+	// and fencing rebind/terminal purges.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.vaultSealedLocked(subj) {
 		http.Error(w, "subject vault is sealed (paused); the bundle copy is already taken", http.StatusConflict)
 		return
@@ -143,7 +149,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		return
 	}
 	store := s.vaultForLocked(subj, fence)
-	pol := s.vaultValidationPolicyLocked(subj)
+	pol := s.vaultValidationPolicyLocked(effective, subj)
 
 	var (
 		candidate *credentialvault.MutationCandidate
@@ -260,15 +266,14 @@ func writeVaultRelayWriteResponse(w http.ResponseWriter, r *http.Request, state 
 }
 
 // selectRelayVault decides registration, the expectedIncarnation
-// precondition, and the fence-bound store selection under one s.mu hold
-// (see vaultForLocked). A concurrent rebind then either purges before
-// selection — the stale incarnation mismatches the successor's fresh fence —
-// or purges after — the stale request holds the old store, which the purge
-// discards. Either way a stale writer never reaches the successor's store.
+// precondition, and the fence-bound store selection. Registry reads happen
+// BEFORE s.mu (lock order: registry → s.mu, see handleVaultRelayWrite); a
+// concurrent rebind then either purges before selection — the stale
+// incarnation mismatches the successor's fresh fence — or purges after —
+// the stale request holds the old store, which the purge discards. Either
+// way a stale writer never reaches the successor's store.
 // A nil store means the caller must write (status, msg).
 func (s *fastSandboxPolicyServer) selectRelayVault(r *http.Request, subj subject.Subject) (*credentialvault.Store, int, string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		return nil, http.StatusNotFound, "unknown subject"
@@ -276,6 +281,8 @@ func (s *fastSandboxPolicyServer) selectRelayVault(r *http.Request, subj subject
 	if inc := strings.TrimSpace(r.Header.Get(constants.EgressVaultIncarnationHeader)); inc != "" && inc != fence.RuntimeInstanceID {
 		return nil, http.StatusPreconditionFailed, "expectedIncarnation mismatch"
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.vaultSealedLocked(subj) {
 		return nil, http.StatusConflict, "subject vault is sealed (paused); the bundle copy is already taken"
 	}
@@ -293,15 +300,15 @@ func (s *fastSandboxPolicyServer) vaultSealedLocked(subj subject.Subject) bool {
 // against: the effective policy of an active subject, or — while the subject
 // is still denying — its pending binding policy (the op is held to the
 // data-plane-ready barrier, so validation must not depend on hook timing).
-// Callers hold s.mu.
-func (s *fastSandboxPolicyServer) vaultValidationPolicyLocked(subj subject.Subject) *policy.NetworkPolicy {
-	if pol := s.reg.EffectivePolicy(subj); pol != nil {
-		return pol
+// The effective policy is PRE-READ by the caller before s.mu (lock order:
+// registry → s.mu, see handleVaultRelayWrite); the pending fallback uses
+// the raw user policy — the always overlay is enforcement-side and
+// validation only needs the explicit allow cover. Callers hold s.mu.
+func (s *fastSandboxPolicyServer) vaultValidationPolicyLocked(effective *policy.NetworkPolicy, subj subject.Subject) *policy.NetworkPolicy {
+	if effective != nil {
+		return effective
 	}
-	if pending := s.pendingPolicies[subj]; pending != nil {
-		return s.reg.EffectiveOf(pending)
-	}
-	return nil
+	return s.pendingPolicies[subj]
 }
 
 // writeVaultRelayError maps store errors onto the relay contract: revision

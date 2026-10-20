@@ -27,8 +27,9 @@
 //
 // Sidecar-parity guards on every op: unregistered subject → 404, never
 // cached; expectedIncarnation mismatch → 412; sealed (exported for a
-// pause checkpoint) → 409; policy persistence recovery latch → 503.
-// Validation failure → 400 NACK keeping last-good. With persistence enabled
+// pause checkpoint) → 409; policy persistence recovery latch → 503 on
+// writes (GET keeps serving the in-memory record). Validation failure →
+// 400 NACK keeping last-good. With persistence enabled
 // every write runs the commit protocol — persist → apply → ack — so the ack
 // means durable AND applied (see fastsandbox_policy_persist.go).
 package main
@@ -101,11 +102,13 @@ func (s *fastSandboxPolicyServer) handlePolicyRelay(w http.ResponseWriter, r *ht
 }
 
 // selectRelayPolicy decides registration, the expectedIncarnation
-// precondition, the seal, and the recorded policy under one s.mu hold. A
-// status other than zero means the caller must write (status, msg).
+// precondition, the seal, and the recorded policy. Registry reads happen
+// BEFORE s.mu — the lock order is registry → s.mu everywhere (the takeover
+// path holds the registry write lock while purging subject state under
+// s.mu; the reverse order deadlocks the DNS hot path). A fence change
+// between the read and the lock is bounded: the purge removes the record,
+// and the write paths re-validate the fence at commit time.
 func (s *fastSandboxPolicyServer) selectRelayPolicy(r *http.Request, subj subject.Subject) (*policyRelayDocument, int, string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		return nil, http.StatusNotFound, "unknown subject"
@@ -113,10 +116,12 @@ func (s *fastSandboxPolicyServer) selectRelayPolicy(r *http.Request, subj subjec
 	if inc := strings.TrimSpace(r.Header.Get(constants.EgressVaultIncarnationHeader)); inc != "" && inc != fence.RuntimeInstanceID {
 		return nil, http.StatusPreconditionFailed, "expectedIncarnation mismatch"
 	}
+	pol := s.reg.UserPolicy(subj)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if e := s.policies[subj]; e != nil && e.sealed {
 		return nil, http.StatusConflict, "subject policy is sealed (paused); the bundle copy is already taken"
 	}
-	pol := s.reg.UserPolicy(subj)
 	if pol == nil {
 		pol = s.pendingPolicies[subj]
 	}
@@ -191,20 +196,20 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 
-	// Guards + decision under one s.mu hold, serialized against rebinds and
-	// terminal purges.
-	s.mu.Lock()
+	// Registry reads before s.mu (lock order: registry → s.mu, see
+	// selectRelayPolicy); the commit-time target re-check closes the TOCTOU.
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
-		s.mu.Unlock()
 		http.Error(w, "unknown subject", http.StatusNotFound)
 		return
 	}
 	if inc := strings.TrimSpace(r.Header.Get(constants.EgressVaultIncarnationHeader)); inc != "" && inc != fence.RuntimeInstanceID {
-		s.mu.Unlock()
 		http.Error(w, "expectedIncarnation mismatch", http.StatusPreconditionFailed)
 		return
 	}
+	// Guards + decision under one s.mu hold, serialized against rebinds and
+	// terminal purges (the whole write already holds policyCommitMu).
+	s.mu.Lock()
 	entry := s.policies[subj]
 	if entry != nil && entry.sealed {
 		s.mu.Unlock()
@@ -306,7 +311,8 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 	if s.policyFiles == nil {
 		// Memory-only (persistence disabled): direct commit.
 		if err := apply(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Errorf("subject %s: policy relay write failed: %v", subj, err)
+			http.Error(w, "policy commit failure", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, putResponseStatus(created), doc)
@@ -339,14 +345,13 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 	writeJSON(w, putResponseStatus(created), doc)
 }
 
-// policyCommitTarget re-reads the subject's lifecycle state under s.mu and
-// verifies the registration fence still matches the commit's — the
-// data-plane-ready activation and rebinds run outside the commit
-// serialization, so a stale apply must be aborted (the commit protocol
-// rolls the file back) instead of landing on the wrong identity or state.
+// policyCommitTarget re-reads the subject's lifecycle state and verifies
+// the registration fence still matches the commit's — the data-plane-ready
+// activation and rebinds run outside the commit serialization, so a stale
+// apply must be aborted (the commit protocol rolls the file back) instead
+// of landing on the wrong identity or state. Registry reads only: no s.mu
+// (lock order: registry → s.mu, see selectRelayPolicy).
 func (s *fastSandboxPolicyServer) policyCommitTarget(subj subject.Subject, fence subject.Fencing) (subject.State, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	regFence, ok := s.reg.Fence(subj)
 	if !ok || regFence != fence {
 		return subject.StateAbsent, fmt.Errorf("stale policy commit (fence changed) for subject %s", subj)
@@ -399,7 +404,8 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 
 	if s.policyFiles == nil {
 		if err := apply(); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Errorf("subject %s: policy relay delete failed: %v", subj, err)
+			http.Error(w, "policy commit failure", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -433,18 +439,4 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 	}
 	log.Infof("subject %s: policy deleted (deny-first), record purged", subj)
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// writePolicyRelayWriteResponse maps the committed mutation onto the relay
-// contract: PUT → 200 (201 when it created), DELETE → 204.
-func writePolicyRelayWriteResponse(w http.ResponseWriter, r *http.Request, revision int64, created bool) {
-	if r.Method == http.MethodDelete {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-	status := http.StatusOK
-	if created {
-		status = http.StatusCreated
-	}
-	writeJSON(w, status, policyRelayDocument{Revision: revision, Policy: json.RawMessage("null")})
 }

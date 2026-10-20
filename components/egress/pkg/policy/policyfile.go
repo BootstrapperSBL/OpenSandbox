@@ -93,6 +93,11 @@ func EncodePolicyFile(incarnation, attachmentID string, revision int64, body []b
 	if err != nil {
 		return nil, fmt.Errorf("encode policy file envelope: %w", err)
 	}
+	if len(out)+1 > MaxEncodedPolicyFileBytes {
+		// Enforce the cap at encode time: an oversized fence field or body
+		// must not produce a file our own importer would reject.
+		return nil, fmt.Errorf("encoded policy file exceeds %d bytes", MaxEncodedPolicyFileBytes)
+	}
 	return append(out, '\n'), nil
 }
 

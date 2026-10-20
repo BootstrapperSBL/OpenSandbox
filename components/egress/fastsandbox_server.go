@@ -405,12 +405,16 @@ type vaultEntry struct {
 // A store is only valid under the fence it was created with: a mismatch
 // (same-UID rebind without REMOVE_BINDING, or a TOCTOU store materialized
 // against an unregistered subject) is dropped, never inherited — a reset
-// never carries old credentials into a new sandbox (OSEP-0022). The fence is
-// read under s.mu, serialized with the rebind purge in applySetBinding.
+// never carries old credentials into a new sandbox (OSEP-0022). The fence
+// is PRE-READ by the caller (lock order: registry → s.mu); a fence change
+// between the read and the lock is bounded by the rebind purge — the stale
+// store is dropped on the next selection either way.
 func (s *fastSandboxPolicyServer) vaultFor(subj subject.Subject) *credentialvault.Store {
+	// Registry read before s.mu (lock order: registry → s.mu, see
+	// handleVaultRelayWrite).
+	fence, _ := s.reg.Fence(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fence, _ := s.reg.Fence(subj)
 	return s.vaultForLocked(subj, fence)
 }
 
@@ -545,6 +549,12 @@ func (s *fastSandboxPolicyServer) takeoverStaleSubject(stale subject.Subject) er
 // policy record, pending policy, attachment) plus the persisted vault and
 // policy files — terminal cleanup (OSEP-0022: REMOVE_BINDING purges memory +
 // file).
+//
+// Deliberately WITHOUT policyCommitMu: one caller (takeoverStaleSubject)
+// runs under the registry WRITE lock, and taking policyCommitMu there would
+// invert against relay commits (policyCommitMu → registry via applyPolicy).
+// Safety comes from the commit paths' fence re-check (policyCommitTarget)
+// and the recorded fence fencing out stale files at rehydration.
 func (s *fastSandboxPolicyServer) dropSubjectState(subj subject.Subject) {
 	s.mu.Lock()
 	delete(s.vaults, subj)

@@ -696,21 +696,31 @@ func TestActionsInvalidEnvelopesRejected(t *testing.T) {
 // must stay gone.
 func TestFastSandboxServerSupersededRoutesGone(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
+	// The bare /policy path redirects into the relay subtree; the old
+	// UID-header surface stays gone. The exact 3xx code varies by method
+	// (and Go version) — assert the redirect class and the Location target.
 	for _, tc := range []struct {
 		method, path string
-		want         int
 	}{
-		{http.MethodGet, "/policy", http.StatusTemporaryRedirect},
-		{http.MethodPut, "/policy", http.StatusTemporaryRedirect},
-		{http.MethodPost, "/policy", http.StatusTemporaryRedirect},
-		{http.MethodDelete, "/policy", http.StatusTemporaryRedirect},
-		{http.MethodGet, "/credential-vault", http.StatusNotFound},
-		{http.MethodPost, "/credential-vault", http.StatusNotFound},
-		{http.MethodPatch, "/credential-vault", http.StatusNotFound},
-		{http.MethodDelete, "/credential-vault", http.StatusNotFound},
+		{http.MethodGet, "/policy"},
+		{http.MethodPut, "/policy"},
+		{http.MethodPost, "/policy"},
+		{http.MethodDelete, "/policy"},
 	} {
 		rec := doRequest(t, srv, tc.method, tc.path, `{}`)
-		require.Equal(t, tc.want, rec.Code, "%s %s", tc.method, tc.path)
+		require.True(t, rec.Code >= 300 && rec.Code < 400, "%s %s: want a redirect, got %d", tc.method, tc.path, rec.Code)
+		assert.Equal(t, "/policy/", rec.Header().Get("Location"), "%s %s", tc.method, tc.path)
+	}
+	for _, tc := range []struct {
+		method, path string
+	}{
+		{http.MethodGet, "/credential-vault"},
+		{http.MethodPost, "/credential-vault"},
+		{http.MethodPatch, "/credential-vault"},
+		{http.MethodDelete, "/credential-vault"},
+	} {
+		rec := doRequest(t, srv, tc.method, tc.path, `{}`)
+		require.Equal(t, http.StatusNotFound, rec.Code, "%s %s must be gone", tc.method, tc.path)
 	}
 }
 

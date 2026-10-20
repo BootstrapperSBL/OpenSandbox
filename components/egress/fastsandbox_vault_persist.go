@@ -143,11 +143,23 @@ func sweepStateTempFiles(dir, noun string) error {
 	return nil
 }
 
+// knownStateDirNames are the per-subject state directories that may share
+// one egress volume root (the vault and the recorded policy). A sibling
+// state directory is ours, not a foreign entry — without this, whichever
+// directory initializes second would see the first as foreign, skip the
+// volume-root restriction, and the atomic machinery would then reject every
+// file op on the untrusted ancestor.
+var knownStateDirNames = map[string]bool{
+	"vault":  true,
+	"policy": true,
+}
+
 // restrictVolumeRoot clears group/world-write bits from the vault volume
 // root (the vault directory's parent): kubelet creates emptyDir roots 0777,
-// which the atomic machinery rejects as an untrusted ancestor. A parent
-// holding foreign entries is left untouched — that is the manifest's job —
-// and already-restrictive roots are a no-op.
+// which the atomic machinery rejects as an untrusted ancestor. Sibling
+// state directories (knownStateDirNames) belong to us; a root holding any
+// other entry is left untouched — that is the manifest's job — and
+// already-restrictive roots are a no-op.
 func restrictVolumeRoot(dir string) error {
 	parent := filepath.Dir(dir)
 	info, err := os.Stat(parent)
@@ -166,22 +178,17 @@ func restrictVolumeRoot(dir string) error {
 	}
 	base := filepath.Base(dir)
 	for _, entry := range entries {
-		if entry.Name() != base {
-			log.Infof("vault persistence: volume root %s holds foreign entry %q; not restricting (fix permissions in the manifest)", parent, entry.Name())
-			return nil
+		if entry.Name() == base || (entry.IsDir() && knownStateDirNames[entry.Name()]) {
+			continue
 		}
+		log.Infof("vault persistence: volume root %s holds foreign entry %q; not restricting (fix permissions in the manifest)", parent, entry.Name())
+		return nil
 	}
 	if err := os.Chmod(parent, info.Mode().Perm()&^0o022); err != nil {
 		return fmt.Errorf("restrict vault volume root %s: %w", parent, err)
 	}
 	log.Infof("vault persistence: restricted group/world-writable volume root %s (kubelet emptyDir default)", parent)
 	return nil
-}
-
-// sweepVaultTempFiles unlinks staging files a crashed writer left behind
-// (rename never attempted — unconfirmed candidate state).
-func sweepVaultTempFiles(dir string) error {
-	return sweepStateTempFiles(dir, "vault")
 }
 
 // vaultFileUID strips the internal "s-" prefix: the file contract names files

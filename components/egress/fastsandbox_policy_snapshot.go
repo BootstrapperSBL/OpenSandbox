@@ -68,14 +68,17 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	target := strings.TrimSpace(env.Snapshot.Path)
-	if s.policyFiles.reservesPath(target) {
-		return http.StatusBadRequest, fmt.Errorf("policy bundle target %q must not live under the policy persistence directory", target)
+	if s.reservesStatePath(target) {
+		return http.StatusBadRequest, fmt.Errorf("policy bundle target %q must not live under a per-subject state directory", target)
 	}
 	// A subject that never registered (a sandbox created without an egress
 	// binding, or after terminal cleanup) has no policy to carry: 200 so the
 	// checkpoint proceeds — a 404 would fail every pause of a binding-less
 	// sandbox. A registered subject under a stale fence still fails below.
-	if _, ok := s.reg.Fence(subj); !ok {
+	// Registry reads before the lock acquisitions (lock order: registry →
+	// policyCommitMu → s.mu, see selectRelayPolicy).
+	regFence, registered := s.reg.Fence(subj)
+	if !registered {
 		log.Infof("policy export: subject %s not registered; no policy to carry, checkpoint proceeds without it", subj)
 		return http.StatusOK, nil
 	}
@@ -87,7 +90,7 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 	// commit "under" the seal.
 	s.policyCommitMu.Lock()
 	s.mu.Lock()
-	snap, status, err := s.policyExportSourceImageLocked(subj, fence)
+	snap, status, err := s.policyExportSourceImageLocked(subj, fence, regFence, registered)
 	s.mu.Unlock()
 	s.policyCommitMu.Unlock()
 	if err != nil {
@@ -110,12 +113,15 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 
 	// Phase 3: seal only against the exact copied image, again serialized
 	// with the relay commits — between the re-check and the seal no writer
-	// can pass the guards (they now observe the seal) or commit.
+	// can pass the guards (they now observe the seal) or commit. The fence
+	// is re-read fresh (registry before s.mu) so a rebind during the copy
+	// fails the export instead of sealing the wrong subject's bytes.
+	regFence, registered = s.reg.Fence(subj)
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live, status, err := s.policyExportSourceImageLocked(subj, fence)
+	live, status, err := s.policyExportSourceImageLocked(subj, fence, regFence, registered)
 	if err != nil {
 		return status, err
 	}
@@ -155,10 +161,11 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 }
 
 // policyExportSourceImageLocked runs the export guards and returns a
-// consistent image of the subject's policy file. Callers hold s.mu.
-func (s *fastSandboxPolicyServer) policyExportSourceImageLocked(subj subject.Subject, fence subject.Fencing) (*policy.PolicyFileSnapshot, int, error) {
-	regFence, ok := s.reg.Fence(subj)
-	if !ok {
+// consistent image of the subject's policy file. regFence/registered are
+// the caller's pre-read of the registration (lock order: registry →
+// policyCommitMu → s.mu, see applyPolicyExport). Callers hold s.mu.
+func (s *fastSandboxPolicyServer) policyExportSourceImageLocked(subj subject.Subject, fence subject.Fencing, regFence subject.Fencing, registered bool) (*policy.PolicyFileSnapshot, int, error) {
+	if !registered {
 		return nil, http.StatusNotFound, fmt.Errorf("policy export for unknown subject %s", subj)
 	}
 	if !regFence.Matches(fence) {
@@ -215,8 +222,8 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	source := strings.TrimSpace(env.Snapshot.Path)
-	if s.policyFiles.reservesPath(source) {
-		return http.StatusBadRequest, fmt.Errorf("policy bundle source %q must not live under the policy persistence directory", source)
+	if s.reservesStatePath(source) {
+		return http.StatusBadRequest, fmt.Errorf("policy bundle source %q must not live under a per-subject state directory", source)
 	}
 
 	// Read before locking; a missing/oversized/unreadable source is
@@ -250,6 +257,9 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 
+	// Registry reads before s.mu (lock order: registry → policyCommitMu →
+	// s.mu, see applyPolicyExport).
+	regFence, registered := s.reg.Fence(subj)
 	s.mu.Lock()
 	// The latch freezes every policy file mutation; only a restart
 	// reconciles (relay-write parity).
@@ -272,7 +282,6 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 			}
 		}
 	}
-	regFence, registered := s.reg.Fence(subj)
 	if registered && !regFence.Matches(fence) {
 		s.mu.Unlock()
 		return http.StatusConflict, fmt.Errorf("stale policy import (fence mismatch) for subject %s", subj)

@@ -183,6 +183,20 @@ bind_and_ready() {
   lifecycle_hook "${uid}" "${runtime}" "${att}" sandbox.data-plane-ready
 }
 
+# relay_put_policy <uid> <input>: a runtime policy change through the
+# handler-relay surface (/policy/{uid}). The binding input only ever seeds a
+# fresh subject's policy — every later change rides this surface, which
+# applies in place on an active subject and holds pending on a denying one.
+relay_put_policy() {
+  local uid="$1" input="$2" code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT \
+    "http://127.0.0.1:${POLICY_PORT}/policy/${uid}" -d "{\"policy\":${input}}")"
+  case "${code}" in
+    200|201) ;;
+    *) fail "relay PUT /policy/${uid} failed: ${code}" ;;
+  esac
+}
+
 dns_query() {
   # dns_query <netns-or-host> <name>
   local where="$1" name="$2"
@@ -374,10 +388,13 @@ expect_rcode osb-sandbox-a allow.test 3
 pass "deny-first registered (nft + NXDOMAIN, policy pending)"
 
 ###############################################################################
-info "Test 2: data-plane-ready activates the subject (dns+nft)"
-set_binding a 10.10.0.5 2 runtime-a att-a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"10.99.0.2"}]}'
+info "Test 2: data-plane-ready activates the subject; the relay owns runtime changes"
 lifecycle_hook a runtime-a att-a sandbox.runtime-ready
 lifecycle_hook a runtime-a att-a sandbox.data-plane-ready
+# The binding input seeded deny at spec 1; the allow policy is a RUNTIME
+# change through the handler-relay surface, applied in place on the active
+# subject. A same-fence SET_BINDING with a new input would be superseded.
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"10.99.0.2"}]}'
 expect_answers osb-sandbox-a allow.test 1.1.1.1
 expect_answers osb-sandbox-a other.test 1.1.1.2
 expect_rcode osb-sandbox-a nope.test 3
@@ -410,8 +427,8 @@ fi
 pass "forward drop (default deny)"
 
 ###############################################################################
-info "Test 4: deny CIDR overrides allow (nft layer, in-place update)"
-set_binding a 10.10.0.5 3 runtime-a att-a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"deny","target":"10.99.0.0/24"}]}'
+info "Test 4: deny CIDR overrides allow (nft layer, relay update)"
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"deny","target":"10.99.0.0/24"}]}'
 if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null http://10.99.0.2:8080/ 2>/dev/null; then
   fail "deny CIDR must block 10.99.0.2"
 fi
@@ -430,8 +447,11 @@ http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPOST \
   "http://127.0.0.1:${POLICY_PORT}/credential-vault" -d '{}')"
 [ "${http_code}" = "404" ] || fail "superseded /credential-vault must be gone (404), got ${http_code}"
 http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${POLICY_PORT}/policy")"
-[ "${http_code}" = "404" ] || fail "superseded /policy must be gone (404), got ${http_code}"
-pass "superseded proxy-route surfaces removed (policy rides the binding only)"
+case "${http_code}" in
+  301|307|308) ;; # redirects into the /policy/{uid} relay subtree
+  *) fail "bare /policy must redirect into the relay subtree, got ${http_code}" ;;
+esac
+pass "superseded proxy-route surfaces removed (relay surfaces only)"
 
 set_up_netns b 10.10.0.6
 bind_and_ready b 10.10.0.6 1 runtime-b att-b '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
@@ -592,8 +612,10 @@ else
   # rejected), so the sandbox curls the ext netns with an explicit Host
   # header; the policy keeps allowing the real daddr 10.99.0.2 so the nft
   # layers pass the packet.
-  set_binding a 10.10.0.5 8 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   lifecycle_hook a runtime-a-2 att-a-2 sandbox.runtime-ready
+  # A relay write while denying is held to the data-plane-ready barrier
+  # (pending-policy validation semantics, same as the vault).
+  relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   lifecycle_hook a runtime-a-2 att-a-2 sandbox.data-plane-ready
   code="$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "${ACTIVE_SOCK}" 'http://localhost/credential-vault/_active?clientIp=10.10.0.5')"
   [ "${code}" = "404" ] || fail "active API: subject a has no vault yet (relay not wired), got ${code}"
@@ -803,10 +825,9 @@ else
   # Default-allow subject: still dropped — the containment is profile-wide,
   # above every per-subject rule. Control first: non-proxy traffic flows, so
   # only the proxy endpoint is unreachable. Subject a is still active, so
-  # this in-place binding update applies immediately — no data-plane-ready
-  # replay (the protocol sends no Hook for updates; a redundant one 409s on
-  # the fail-closed "no pending policy" guard).
-  set_binding a 10.10.0.5 11 runtime-a-2 att-a-2 '{"defaultAction":"allow"}'
+  # this relay update applies immediately (no data-plane-ready replay —
+  # relay writes apply in place on an active subject).
+  relay_put_policy a '{"defaultAction":"allow"}'
   out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' http://10.99.0.2:8080/)"
   echo "${out}" | grep -qi "client=10.10.0.5" || fail "default-allow control request failed (subject inactive?); got: ${out}"
   if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null --proxytunnel -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then

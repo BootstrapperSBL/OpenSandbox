@@ -502,6 +502,36 @@ func TestPolicyPersistDeleteTombstoneSurvivesRestart(t *testing.T) {
 	assert.Equal(t, "deny", last.Evaluate("other.example.com"))
 }
 
+// TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration: a leftover
+// record under a foreign fence (purge outcome uncertain) must not make
+// applyBindingPolicy supersede the fresh registration's binding input.
+func TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+
+	// A stale record under a foreign fence survives on disk (its purge
+	// failed) and in memory.
+	h.readySubject(t, policyTestUID, vaultTestIP)
+	rec := doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllowAlt(), 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	h.fileFor(policyTestUID).failFirstDelete = errors.New("unlink EIO")
+	// Rebind with an uncertain purge outcome: the relayed policy must not
+	// leak into the successor.
+	const newRuntime = "runtime-2"
+	rec = doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, newRuntime, "attachment-2", 2, strPtr(policyAllow())))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, h.srv, hookBody(t, policyTestUID, newRuntime, "attachment-2", constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// The successor was seeded from its OWN binding input at revision 1.
+	rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(1), rev)
+	assert.Contains(t, string(doc.Policy), "api.example.com")
+	assert.NotContains(t, string(doc.Policy), "other.example.com", "the foreign-fence record must not supersede the fresh input")
+	pf, _ := decodePolicyFile(t, h.fileFor(policyTestUID))
+	assert.Equal(t, newRuntime, pf.Incarnation)
+}
+
 // ---------------------------------------------------------------------------
 // Capability + healthy posture
 // ---------------------------------------------------------------------------

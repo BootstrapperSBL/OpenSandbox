@@ -87,21 +87,24 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	target := strings.TrimSpace(env.Snapshot.Path)
-	if s.vaultFiles.reservesPath(target) {
-		return http.StatusBadRequest, fmt.Errorf("vault bundle target %q must not live under the vault persistence directory", target)
+	if s.reservesStatePath(target) {
+		return http.StatusBadRequest, fmt.Errorf("vault bundle target %q must not live under a per-subject state directory", target)
 	}
 	// A subject that never registered (a sandbox created without an egress
 	// binding, or after terminal cleanup) has no vault to carry: 200 so the
 	// checkpoint proceeds — a 404 would fail every pause of a binding-less
 	// sandbox. A registered subject under a stale fence still fails below.
-	if _, ok := s.reg.Fence(subj); !ok {
+	// Registry reads before the lock acquisitions (lock order: registry →
+	// s.mu, see handleVaultRelayWrite).
+	regFence, registered := s.reg.Fence(subj)
+	if !registered {
 		log.Infof("vault export: subject %s not registered; no vault to carry, checkpoint proceeds without it", subj)
 		return http.StatusOK, nil
 	}
 
 	// Phase 1: guards + consistent source image.
 	s.mu.Lock()
-	snap, status, err := s.exportSourceImageLocked(subj, fence)
+	snap, status, err := s.exportSourceImageLocked(subj, fence, regFence, registered)
 	if err != nil {
 		s.mu.Unlock()
 		return status, err
@@ -120,10 +123,13 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 		}
 	}
 
-	// Phase 3: seal only against the exact copied image.
+	// Phase 3: seal only against the exact copied image; the fence is
+	// re-read fresh (registry before s.mu) so a rebind during the copy
+	// fails the export.
+	regFence, registered = s.reg.Fence(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	live, status, err := s.exportSourceImageLocked(subj, fence)
+	live, status, err := s.exportSourceImageLocked(subj, fence, regFence, registered)
 	if err != nil {
 		return status, err
 	}
@@ -161,10 +167,11 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 }
 
 // exportSourceImageLocked runs the export guards and returns a consistent
-// image of the subject's vault file. Callers hold s.mu.
-func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, fence subject.Fencing) (*policy.PolicyFileSnapshot, int, error) {
-	regFence, ok := s.reg.Fence(subj)
-	if !ok {
+// image of the subject's vault file. regFence/registered are the caller's
+// pre-read of the registration (lock order: registry → s.mu, see
+// applyVaultExport). Callers hold s.mu.
+func (s *fastSandboxPolicyServer) exportSourceImageLocked(subj subject.Subject, fence subject.Fencing, regFence subject.Fencing, registered bool) (*policy.PolicyFileSnapshot, int, error) {
+	if !registered {
 		return nil, http.StatusNotFound, fmt.Errorf("vault export for unknown subject %s", subj)
 	}
 	if !regFence.Matches(fence) {
@@ -221,8 +228,8 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 	subj := subject.FromSandboxUID(env.Sandbox.UID)
 	fence := subject.FromRevision(env)
 	source := strings.TrimSpace(env.Snapshot.Path)
-	if s.vaultFiles.reservesPath(source) {
-		return http.StatusBadRequest, fmt.Errorf("vault bundle source %q must not live under the vault persistence directory", source)
+	if s.reservesStatePath(source) {
+		return http.StatusBadRequest, fmt.Errorf("vault bundle source %q must not live under a per-subject state directory", source)
 	}
 
 	// Read before locking; a missing/oversized/unreadable source is
@@ -247,6 +254,9 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 		return http.StatusInternalServerError, fmt.Errorf("vault bundle re-stamp failed: %w", err)
 	}
 
+	// Registry reads before s.mu (lock order: registry → s.mu, see
+	// handleVaultRelayWrite).
+	effective := s.reg.EffectivePolicy(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// The latch freezes every vault file mutation; only a restart
@@ -275,7 +285,7 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 		}
 		// Validate before any durable effect — a permanently broken bundle
 		// is a 400 with last-good kept, never half-open.
-		if err := validateImportedVault(vf, body, s.vaultValidationPolicyLocked(subj)); err != nil {
+		if err := validateImportedVault(vf, body, s.vaultValidationPolicyLocked(effective, subj)); err != nil {
 			return http.StatusBadRequest, fmt.Errorf("vault bundle rejected: %v", err)
 		}
 	}
@@ -289,7 +299,7 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 				// Before SET_BINDING: registration reloads and validates.
 				return s.vaultFiles.unseal(subj)
 			}
-			return s.installImportedVaultLocked(subj, fence, vf, body)
+			return s.installImportedVaultLocked(subj, fence, vf, body, effective)
 		},
 	)
 	if err != nil {
@@ -314,8 +324,10 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 // per-subject slice under the restored fence, replacing any stale entry.
 // The slice is only replaced once Reload accepts — a failure leaves the live
 // entry untouched while the commit protocol rolls the file back.
-func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subject, fence subject.Fencing, vf credentialvault.VaultFile, body credentialvault.VaultFileBody) error {
-	pol := s.vaultValidationPolicyLocked(subj)
+// effective is the caller's pre-read of the subject's effective policy
+// (lock order: registry → s.mu, see handleVaultRelayWrite).
+func (s *fastSandboxPolicyServer) installImportedVaultLocked(subj subject.Subject, fence subject.Fencing, vf credentialvault.VaultFile, body credentialvault.VaultFileBody, effective *policy.NetworkPolicy) error {
+	pol := s.vaultValidationPolicyLocked(effective, subj)
 	entry, ok := s.vaults[subj]
 	if !ok || entry.fence != fence {
 		entry = vaultEntry{store: credentialvault.NewStore(nil, func() bool { return true }), fence: fence}
