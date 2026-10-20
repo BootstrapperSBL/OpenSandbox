@@ -510,6 +510,9 @@ expect_answers osb-sandbox-a allow.test 1.1.1.1
 recorded="$(curl -s "http://127.0.0.1:${POLICY_PORT}/policy/a")"
 echo "${recorded}" | grep -q 'durability.test' || fail "the relayed policy must survive the restart (file supersedes the replayed binding input), got: ${recorded}"
 pass "restart durability (recorded policy supersedes the replayed binding input)"
+# Restore the lineage: under file-supersedes-input, every later section
+# starts from the recorded policy — put back what the binding inputs intend.
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}' 
 
 ###############################################################################
 info "Test 10: strict DoH mode (no blocklist) drops all tcp 443 globally"
@@ -914,6 +917,7 @@ else
   EGRESS_PID=""
   EGRESS_MITM=1 start_egress
   bind_and_ready a 10.10.0.5 13 runtime-a-2 att-a-2 "${VAULT_POLICY_A}"
+  relay_put_policy a "${VAULT_POLICY_A}"
   wait_for 15 "per-subject DNAT (vault preamble)" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '"
 
   # vault_relay <subject> <method> [body] [incarnation]: one relay op;
