@@ -39,12 +39,17 @@ if operation in ("-list", "-exportcert"):
     if not store.read_text():
         sys.exit(1)
     if operation == "-exportcert":
+        if store.read_text() == "SecretKeyEntry":
+            sys.exit(1)
         print(store.read_text(), end="")
 elif operation == "-delete":
     store.write_text("")
 elif operation == "-importcert":
     if "reject-import" in sys.argv[0]:
         sys.exit(1)
+    # keytool can report success without replacing an existing secret key.
+    if store.read_text() == "SecretKeyEntry":
+        sys.exit(0)
     cert = pathlib.Path(args[args.index("-file") + 1])
     store.write_text(cert.read_text())
 else:
@@ -115,13 +120,23 @@ class JDKTrustTests(unittest.TestCase):
         )
         self.assertEqual(store.read_text(), CERT_B)
 
+    def test_secret_key_alias_is_replaced_before_shared_store_is_cached(self):
+        store = self.store("shared/cacerts", "SecretKeyEntry")
+        calls = self.run_helpers(self.jdk("jdk-one", store), self.jdk("jdk-two", store))
+        self.assertEqual(store.read_text(), CERT_A)
+        self.assertEqual(
+            [c["op"] for c in calls], ["-exportcert", "-list", "-delete", "-importcert"]
+        )
+
     def test_four_jdks_sharing_store_import_once(self):
         store = self.store("shared/cacerts")
         homes = [
             self.jdk("jdk-" + str(v), store, java8=v == 8) for v in (8, 11, 17, 21)
         ]
         calls = self.run_helpers(*homes)
-        self.assertEqual([c["op"] for c in calls], ["-exportcert", "-importcert"])
+        self.assertEqual(
+            [c["op"] for c in calls], ["-exportcert", "-list", "-importcert"]
+        )
         self.assertEqual(store.read_text(), CERT_A)
 
     def test_independent_stores_are_both_updated(self):
@@ -141,7 +156,9 @@ class JDKTrustTests(unittest.TestCase):
             self.jdk("jdk latest", store),
         ]
         calls = self.run_helpers(*homes)
-        self.assertEqual([c["op"] for c in calls], ["-exportcert", "-importcert"])
+        self.assertEqual(
+            [c["op"] for c in calls], ["-exportcert", "-list", "-importcert"]
+        )
 
     def test_pem_line_wrapping_and_crlf_do_not_trigger_reimport(self):
         store = self.store("store", CERT_A)

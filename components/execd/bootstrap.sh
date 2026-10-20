@@ -371,6 +371,9 @@ $ks
 			return 0
 		fi
 		_sudo "$kt" -delete -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1
+	elif "$kt" -list -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1; then
+		# An alias can exist without an exportable certificate (e.g. SecretKeyEntry).
+		_sudo "$kt" -delete -alias "$alias_name" -keystore "$ks" -storepass changeit >/dev/null 2>&1
 	fi
 
 	if _sudo "$kt" -importcert -noprompt -trustcacerts \
