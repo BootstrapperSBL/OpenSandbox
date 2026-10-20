@@ -277,6 +277,15 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 	case constants.HookRuntimeReady:
 		return http.StatusOK, nil
 	case constants.HookDataPlaneReady:
+		// Serialized with the policy relay commits (policyCommitMu): a
+		// relay write that passed its guards before this hook must either
+		// land first (the activation below then applies the relayed
+		// pending policy) or after (its apply-time state re-read then sees
+		// Active and updates enforcement in place) — it can never land
+		// after the activation as a pending-only write that nothing will
+		// ever consume.
+		s.policyCommitMu.Lock()
+		defer s.policyCommitMu.Unlock()
 		// Peek, do not consume: a transient nft failure must leave the
 		// pending policy in place so the Fastlet's retry of the same Hook
 		// succeeds instead of 409-ing forever with the subject deny-first.

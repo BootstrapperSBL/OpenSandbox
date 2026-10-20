@@ -220,8 +220,6 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 	if entry != nil {
 		cur = entry.revision
 	}
-	state, _ := s.reg.Get(subj)
-	stateActive := state == subject.StateActive
 	att, attOK := s.subjAtt[subj]
 	s.mu.Unlock()
 
@@ -230,7 +228,8 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 			http.Error(w, "subject has no recorded policy", http.StatusNotFound)
 			return
 		}
-		s.deleteRelayPolicy(w, subj, fence, att, attOK, stateActive)
+		// Deletion is an authoritative tombstone at the successor revision.
+		s.deleteRelayPolicy(w, subj, fence, att, attOK, cur+1)
 		return
 	}
 
@@ -246,7 +245,7 @@ func (s *fastSandboxPolicyServer) handlePolicyRelayWrite(w http.ResponseWriter, 
 	}
 	created := entry == nil
 	newRev := cur + 1
-	s.putRelayPolicy(w, r, subj, fence, pol, newRev, created, stateActive)
+	s.putRelayPolicy(w, r, subj, fence, pol, newRev, created)
 }
 
 // relayPolicyPrecondition extracts the effective precondition. The revision
@@ -269,8 +268,12 @@ func relayPolicyPrecondition(doc *policyRelayDocument) (expected *int64, err err
 
 // putRelayPolicy commits a full replace: persist → apply → ack, so the ack
 // means durable AND applied. The caller holds policyCommitMu (the decision
-// and the commit are one serialized unit).
-func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.Request, subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, newRev int64, created bool, stateActive bool) {
+// and the commit are one serialized unit, and the data-plane-ready hook
+// serializes on the same mutex). The apply closure re-reads the lifecycle
+// state and the registration fence — both can change between the guard
+// phase and this commit (a concurrent hook activation, a rebind) — so the
+// recorded state can never diverge from what was actually enforced.
+func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.Request, subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, newRev int64, created bool) {
 	raw, err := json.Marshal(pol)
 	if err != nil {
 		log.Errorf("subject %s: policy marshal failed: %v", subj, err)
@@ -280,7 +283,11 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 	doc := policyRelayDocument{Revision: newRev, Policy: raw}
 
 	apply := func() error {
-		if stateActive {
+		state, err := s.policyCommitTarget(subj, fence)
+		if err != nil {
+			return err
+		}
+		if state == subject.StateActive {
 			// Enforcement first: a failed apply leaves the record untouched
 			// (the commit protocol rolls the file back).
 			if err := s.applyPolicy(subj, pol); err != nil {
@@ -288,7 +295,7 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 			}
 		}
 		s.mu.Lock()
-		if !stateActive {
+		if state != subject.StateActive {
 			s.pendingPolicies[subj] = pol
 		}
 		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}
@@ -299,7 +306,7 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 	if s.policyFiles == nil {
 		// Memory-only (persistence disabled): direct commit.
 		if err := apply(); err != nil {
-			http.Error(w, "policy apply failure", http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, putResponseStatus(created), doc)
@@ -332,6 +339,22 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 	writeJSON(w, putResponseStatus(created), doc)
 }
 
+// policyCommitTarget re-reads the subject's lifecycle state under s.mu and
+// verifies the registration fence still matches the commit's — the
+// data-plane-ready activation and rebinds run outside the commit
+// serialization, so a stale apply must be aborted (the commit protocol
+// rolls the file back) instead of landing on the wrong identity or state.
+func (s *fastSandboxPolicyServer) policyCommitTarget(subj subject.Subject, fence subject.Fencing) (subject.State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	regFence, ok := s.reg.Fence(subj)
+	if !ok || regFence != fence {
+		return subject.StateAbsent, fmt.Errorf("stale policy commit (fence changed) for subject %s", subj)
+	}
+	state, _ := s.reg.Get(subj)
+	return state, nil
+}
+
 // putResponseStatus maps the committed replace onto the relay contract:
 // 201 when it created the record, 200 otherwise.
 func putResponseStatus(created bool) int {
@@ -341,12 +364,20 @@ func putResponseStatus(created bool) int {
 	return http.StatusOK
 }
 
-// deleteRelayPolicy commits the revert to deny-first: memory and file go
-// together, so a restart cannot resurrect a deleted policy. The caller
-// holds policyCommitMu.
-func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj subject.Subject, fence subject.Fencing, att actionhandler.NetworkAttachment, attOK, stateActive bool) {
+// deleteRelayPolicy commits the deletion as an authoritative default-deny
+// tombstone: enforcement reverts to deny-first AND the record persists at
+// the successor revision (memory + file), so an egress restart reloads the
+// deletion instead of letting the replayed bootstrap binding resurrect the
+// deleted policy. GET serves the deny record; a later PUT replaces it at
+// the successor revision. The caller holds policyCommitMu.
+func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj subject.Subject, fence subject.Fencing, att actionhandler.NetworkAttachment, attOK bool, newRev int64) {
+	deny := policy.DefaultDenyPolicy()
 	apply := func() error {
-		if stateActive {
+		state, err := s.policyCommitTarget(subj, fence)
+		if err != nil {
+			return err
+		}
+		if state == subject.StateActive {
 			// Enforcement first: nft deny-first commits before the registry
 			// state (fail-closed transition), mirroring SET_BINDING removal.
 			if !attOK {
@@ -357,8 +388,11 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 			}
 		}
 		s.mu.Lock()
-		delete(s.pendingPolicies, subj)
-		delete(s.policies, subj)
+		// The activation barrier keeps working across a hook replay: a
+		// replayed data-plane-ready activates the deny record, never a
+		// stale policy.
+		s.pendingPolicies[subj] = deny
+		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}
 		s.mu.Unlock()
 		return nil
 	}
@@ -371,10 +405,20 @@ func (s *fastSandboxPolicyServer) deleteRelayPolicy(w http.ResponseWriter, subj 
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	err := s.persistPolicyCandidateLocked(
+	raw, err := json.Marshal(deny)
+	if err != nil {
+		http.Error(w, "policy persistence failure", http.StatusInternalServerError)
+		return
+	}
+	payload, err := policy.EncodePolicyFile(fence.RuntimeInstanceID, fence.AttachmentID, newRev, raw)
+	if err != nil {
+		http.Error(w, "policy persistence failure", http.StatusInternalServerError)
+		return
+	}
+	err = s.persistPolicyCandidateLocked(
 		subj,
 		func(fs vaultFileStore) (policy.FileMutationState, error) {
-			return fs.Delete()
+			return fs.SaveRaw(payload)
 		},
 		apply,
 	)

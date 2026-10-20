@@ -78,6 +78,14 @@ spec:
         # keep the vault memory-only (lost on egress restart).
         - name: OPENSANDBOX_EGRESS_VAULT_DIR
           value: /var/lib/opensandbox-egress/vault
+        # Policy persistence: one per-subject file under this directory backs
+        # the /policy/{uid} relay ack the same way (persist → apply → ack)
+        # and carries the POLICY_EXPORT / POLICY_IMPORT snapshot transfer.
+        # Lives on the same Pod-scoped volume as the vault files. Unset
+        # would keep the recorded policy memory-only and omit the
+        # policyTransfer capability.
+        - name: OPENSANDBOX_EGRESS_POLICY_DIR
+          value: /var/lib/opensandbox-egress/policy
         volumeMounts:
         - name: egress-vault
           # Plaintext v1 posture: the vault volume joins the credential

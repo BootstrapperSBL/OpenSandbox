@@ -160,18 +160,19 @@ func TestPolicyRelayPreconditions(t *testing.T) {
 	rec = doPolicy(t, srv, http.MethodPut, policyTestUID, `{"policy":`+policyAllow()+`,"revision":1,"expectedRevision":2}`, "")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 
-	// DELETE, then a conditional PUT against the missing record: 412, not a
-	// create.
+	// DELETE lands a deny tombstone at the successor revision; a conditional
+	// PUT against the pre-delete revision is a 412.
 	rec = doPolicy(t, srv, http.MethodDelete, policyTestUID, "", "")
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	rec = doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllow(), 4, false, true), "")
 	require.Equal(t, http.StatusPreconditionFailed, rec.Code)
 
-	// Unconditional PUT recreates from scratch at revision 1.
+	// Unconditional PUT replaces the tombstone at the successor revision.
 	rec = doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllow(), 0, false, false), "")
-	require.Equal(t, http.StatusCreated, rec.Code)
-	rev, _ = mustPolicyRevision(t, rec)
-	assert.Equal(t, int64(1), rev)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(6), rev)
+	assert.Contains(t, string(doc.Policy), "api.example.com")
 }
 
 func TestPolicyRelayInvalidPolicyKeepsLastGood(t *testing.T) {
@@ -197,30 +198,63 @@ func TestPolicyRelayInvalidPolicyKeepsLastGood(t *testing.T) {
 }
 
 func TestPolicyRelayDeleteRevertsDenyFirst(t *testing.T) {
-	srv, reg, _ := fastSandboxTestServer(t)
+	srv, reg, nft := fastSandboxTestServer(t)
 	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 
-	// DELETE removes the seeded record and reverts the subject to deny-first
-	// — the binding policy goes with it (runtime truth is relay-owned).
+	// DELETE removes the seeded policy (revision 1 → tombstone at 2) and
+	// reverts the subject to deny-first.
 	rec := doPolicy(t, srv, http.MethodDelete, policyTestUID, "", "")
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, subject.StateDenying, mustState(reg.Get(s)))
 	assert.Nil(t, reg.UserPolicy(s))
 	assert.Nil(t, reg.EffectivePolicy(s))
+
+	// The tombstone is authoritative: GET serves the default-deny record at
+	// the successor revision, and a binding replay cannot resurrect the
+	// deleted policy.
 	rec = doPolicy(t, srv, http.MethodGet, policyTestUID, "", "")
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-
-	// Duplicate DELETE is a 404.
-	rec = doPolicy(t, srv, http.MethodDelete, policyTestUID, "", "")
-	assert.Equal(t, http.StatusNotFound, rec.Code)
-
-	// A re-add via SET_BINDING + data-plane-ready reactivates.
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(2), rev)
+	assert.Contains(t, string(doc.Policy), `"defaultAction":"deny"`)
+	assert.NotContains(t, string(doc.Policy), "api.example.com")
 	rec = doAction(t, srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 2, strPtr(policyAllow())))
 	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doPolicy(t, srv, http.MethodGet, policyTestUID, "", "")
+	rev, doc = mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(2), rev, "the tombstone survives the binding replay")
+	assert.NotContains(t, string(doc.Policy), "api.example.com")
+
+	// A replayed data-plane-ready activates the deny record (the barrier
+	// consumes the tombstone's pending policy) — never a stale policy.
 	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	nft.mu.Lock()
+	last := nft.lastPolicy
+	nft.mu.Unlock()
+	require.NotNil(t, last)
+	assert.Equal(t, "deny", last.Evaluate("api.example.com"), "the enforced policy is the deny tombstone")
+
+	// DELETE is idempotent (the tombstone replaces itself at the successor
+	// revision).
+	rec = doPolicy(t, srv, http.MethodDelete, policyTestUID, "", "")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	rev, _ = mustPolicyRevision(t, doPolicy(t, srv, http.MethodGet, policyTestUID, "", ""))
+	assert.Equal(t, int64(3), rev)
+
+	// Re-add goes through the relay: the PUT replaces the tombstone. The
+	// subject was reverted to deny-first by the second DELETE, so the write
+	// is held pending until a data-plane-ready replay activates it.
+	rec = doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllow(), 3, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	rev, doc = mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(4), rev)
+	assert.Equal(t, subject.StateDenying, mustState(reg.Get(s)))
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg_UserEvaluate(srv, s, "api.example.com"))
 }
 
 func TestPolicyRelayDenyingSubjectHoldsPending(t *testing.T) {

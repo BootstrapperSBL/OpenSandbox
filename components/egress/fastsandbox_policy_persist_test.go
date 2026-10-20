@@ -453,6 +453,55 @@ func mustReadRevision(t *testing.T, h *policyPersistHarness, uid string) int64 {
 	return rev
 }
 
+// TestPolicyPersistDeleteTombstoneSurvivesRestart: a relay DELETE persists
+// an authoritative default-deny record, so an egress restart's binding
+// replay loads the tombstone instead of resurrecting the deleted policy —
+// and a replayed data-plane-ready activates the deny record.
+func TestPolicyPersistDeleteTombstoneSurvivesRestart(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+	h.readySubject(t, policyTestUID, vaultTestIP)
+
+	// Runtime mutation to rev 2, then delete → deny tombstone at rev 3.
+	rec := doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllowAlt(), 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doPolicy(t, h.srv, http.MethodDelete, policyTestUID, "", "")
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	pf, body := decodePolicyFile(t, h.fileFor(policyTestUID))
+	assert.Equal(t, int64(3), pf.Revision)
+	assert.Contains(t, string(body), `"defaultAction":"deny"`)
+
+	// Fresh server over the same persistence state: the binding replay must
+	// load the tombstone, not reseed the bootstrap policy.
+	srv2, reg2, nft2 := fastSandboxTestServer(t)
+	pp2, err := newPolicyPersistence(h.dir)
+	require.NoError(t, err)
+	pp2.newFile = h.pp.newFile
+	srv2.SetPolicyFiles(pp2)
+
+	rec = doAction(t, srv2, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyAllow())))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = doPolicy(t, srv2, http.MethodGet, policyTestUID, "", "")
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(3), rev)
+	assert.Contains(t, string(doc.Policy), `"defaultAction":"deny"`)
+	assert.NotContains(t, string(doc.Policy), "api.example.com", "the deleted policy must not resurrect")
+
+	// Enforcement is the deny tombstone, not the bootstrap policy.
+	s := subject.FromSandboxUID(policyTestUID)
+	assert.Equal(t, subject.StateActive, mustState(reg2.Get(s)))
+	nft2.mu.Lock()
+	last := nft2.lastPolicy
+	nft2.mu.Unlock()
+	require.NotNil(t, last)
+	assert.Equal(t, "deny", last.Evaluate("api.example.com"))
+	assert.Equal(t, "deny", last.Evaluate("other.example.com"))
+}
+
 // ---------------------------------------------------------------------------
 // Capability + healthy posture
 // ---------------------------------------------------------------------------

@@ -80,16 +80,23 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 		return http.StatusOK, nil
 	}
 
-	// Phase 1: guards + consistent source image.
+	// Phase 1: guards + consistent source image, serialized with the policy
+	// relay commits (policyCommitMu). A relay writer that passed its guards
+	// but has not committed yet is either flushed before the snapshot (the
+	// copy carries its write) or blocked until phase 3 — it can never
+	// commit "under" the seal.
+	s.policyCommitMu.Lock()
 	s.mu.Lock()
 	snap, status, err := s.policyExportSourceImageLocked(subj, fence)
+	s.mu.Unlock()
+	s.policyCommitMu.Unlock()
 	if err != nil {
-		s.mu.Unlock()
 		return status, err
 	}
-	s.mu.Unlock()
 
-	// Phase 2: no lock held across the driver-owned write.
+	// Phase 2: no lock held across the driver-owned write. A relay commit
+	// here is caught by the phase-3 re-check (the copied image no longer
+	// matches the live file → 409, no seal).
 	if snap.Exists() {
 		bundle, err := s.policyFiles.newFile(target)
 		if err != nil {
@@ -101,7 +108,11 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 		}
 	}
 
-	// Phase 3: seal only against the exact copied image.
+	// Phase 3: seal only against the exact copied image, again serialized
+	// with the relay commits — between the re-check and the seal no writer
+	// can pass the guards (they now observe the seal) or commit.
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	live, status, err := s.policyExportSourceImageLocked(subj, fence)
@@ -266,8 +277,6 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 		s.mu.Unlock()
 		return http.StatusConflict, fmt.Errorf("stale policy import (fence mismatch) for subject %s", subj)
 	}
-	state, _ := s.reg.Get(subj)
-	stateActive := state == subject.StateActive
 	sealed := false
 	if e := s.policies[subj]; e != nil && e.sealed {
 		sealed = true
@@ -287,7 +296,7 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 				s.mu.Unlock()
 				return s.policyFiles.unseal(subj)
 			}
-			return s.installImportedPolicyLocked(subj, fence, pf.Revision, pol, stateActive, sealed)
+			return s.installImportedPolicyLocked(subj, fence, pf.Revision, pol, sealed)
 		},
 	)
 	if err != nil {
@@ -310,32 +319,35 @@ func (s *fastSandboxPolicyServer) applyPolicyImport(env *actionhandler.Envelope)
 
 // installImportedPolicyLocked binds the imported revision into the live
 // per-subject record under the restored fence, replacing any stale record,
-// and unseals it. The record is only replaced once enforcement (or the
-// pending store) accepted — a failure leaves the live state untouched while
-// the commit protocol rolls the file back. Enforcement runs WITHOUT s.mu
-// (it takes the registry write lock); the s.mu suffix is the docstring's
-// "Locked" sense: map mutations under s.mu, unseal after acceptance.
-func (s *fastSandboxPolicyServer) installImportedPolicyLocked(subj subject.Subject, fence subject.Fencing, revision int64, pol *policy.NetworkPolicy, stateActive, wasSealed bool) error {
-	if stateActive {
-		// Enforcement first: a failed apply leaves the record untouched
-		// (the commit protocol rolls the file back and keeps the seal).
-		if err := s.applyPolicy(subj, pol); err != nil {
-			return err
-		}
-	}
-	s.mu.Lock()
-	if !stateActive {
-		s.pendingPolicies[subj] = pol
-	}
-	s.policies[subj] = &policyEntry{revision: revision, fence: fence}
-	s.mu.Unlock()
-	// Unseal only after the state accepted — a failed apply rolls the file
-	// back and keeps the seal.
+// and unseals it. Ordering inside the commit protocol's apply step: the
+// durable unseal FIRST (a failure here mutates nothing live — the commit
+// protocol rolls the file back and the seal stays), then the state/fence
+// re-read, then enforcement, then the record. Enforcement runs WITHOUT
+// s.mu (it takes the registry write lock); the s.mu suffix is the
+// docstring's "Locked" sense: map mutations under s.mu.
+func (s *fastSandboxPolicyServer) installImportedPolicyLocked(subj subject.Subject, fence subject.Fencing, revision int64, pol *policy.NetworkPolicy, wasSealed bool) error {
 	if wasSealed {
 		if err := s.policyFiles.unseal(subj); err != nil {
 			return err
 		}
 	}
+	state, err := s.policyCommitTarget(subj, fence)
+	if err != nil {
+		return err
+	}
+	if state == subject.StateActive {
+		// Enforcement first: a failed apply leaves the record untouched
+		// (the commit protocol rolls the file back).
+		if err := s.applyPolicy(subj, pol); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	if state != subject.StateActive {
+		s.pendingPolicies[subj] = pol
+	}
+	s.policies[subj] = &policyEntry{revision: revision, fence: fence}
+	s.mu.Unlock()
 	return nil
 }
 
