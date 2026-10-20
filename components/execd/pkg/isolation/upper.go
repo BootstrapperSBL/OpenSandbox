@@ -483,9 +483,9 @@ func dirExists(path string) bool {
 
 func dirSize(path string) (int64, error) {
 	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	err := filepath.Walk(path, func(walkedPath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return dirSizeWalkError(path, walkedPath, walkErr)
 		}
 		if !info.IsDir() {
 			size += info.Size()
@@ -493,4 +493,13 @@ func dirSize(path string) (int64, error) {
 		return nil
 	})
 	return size, err
+}
+
+// Missing descendants can disappear during a live walk; only a missing root
+// invalidates the upper measurement. Other I/O failures remain fatal.
+func dirSizeWalkError(root, walkedPath string, walkErr error) error {
+	if errors.Is(walkErr, fs.ErrNotExist) && walkedPath != root {
+		return nil
+	}
+	return walkErr
 }
