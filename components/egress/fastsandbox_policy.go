@@ -112,6 +112,14 @@ func (s *fastSandboxPolicyServer) handlePolicyRelay(w http.ResponseWriter, r *ht
 // between the read and the lock is bounded: the purge removes the record,
 // and the write paths re-validate the fence at commit time.
 func (s *fastSandboxPolicyServer) selectRelayPolicy(r *http.Request, subj subject.Subject) (*policyRelayDocument, int, string) {
+	// Serialized with the policy commits: the policy body and its revision
+	// must come from the SAME commit, or a GET overlapping a PUT would pair
+	// the old policy with the new revision — and the server's GET→merge→PUT
+	// PATCH would then present that revision and overwrite the concurrent
+	// replacement. Lock order: policyCommitMu → registry → s.mu (matches
+	// the commit paths).
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		return nil, http.StatusNotFound, "unknown subject"
@@ -310,9 +318,11 @@ func (s *fastSandboxPolicyServer) putRelayPolicy(w http.ResponseWriter, r *http.
 			}
 		}
 		s.mu.Lock()
-		if state != subject.StateActive {
-			s.pendingPolicies[subj] = pol
-		}
+		// The pending slot mirrors what is enforced in BOTH states: on a
+		// denying subject it is the barrier's payload; on an active one it
+		// keeps an at-least-once data-plane-ready replay idempotent (a
+		// stale deny tombstone must never re-enforce over the replacement).
+		s.pendingPolicies[subj] = pol
 		// A fresh entry also clears a degraded mark: the successful write
 		// IS the heal.
 		s.policies[subj] = &policyEntry{revision: newRev, fence: fence}

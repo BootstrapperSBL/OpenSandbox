@@ -951,7 +951,8 @@ def test_http_policy_patch_and_delete_match_sidecar_semantics(persisted_fsb):
     # Conflict protection still applies to merged commits: the merged PUT
     # carries the read revision as expectedRevision — a concurrent relay
     # write landing between the merge-read and the commit turns the stale
-    # merge into a 412.
+    # merge into a 409 (the egress 412 is remapped to the public conflict
+    # status).
     from opensandbox_server.services.fast_sandbox import policy_relay as policy_relay_module
 
     real_get_full = policy_relay_module._relay_get_full
@@ -966,7 +967,7 @@ def test_http_policy_patch_and_delete_match_sidecar_semantics(persisted_fsb):
         response = client.patch(url, json=[{"action": "deny", "target": "d.com"}])
     finally:
         policy_relay_module._relay_get_full = real_get_full
-    assert response.status_code == 412
+    assert response.status_code == 409
 
 
 def test_policy_rejects_invalid_input_and_other_tenant(persisted_fsb):

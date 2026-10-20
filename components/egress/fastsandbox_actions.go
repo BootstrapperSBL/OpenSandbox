@@ -244,7 +244,12 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 		// binding's policy to a policy-less subject) and purge the recorded
 		// policy, so deny-first is also the durable state.
 		s.clearPendingPolicy(subj)
-		s.clearPolicyRecord(subj)
+		if err := s.clearPolicyRecord(subj); err != nil {
+			// The durable removal did not confirm: fail the action so the
+			// Fastlet's retry re-runs the purge/tombstone instead of acking
+			// a removal whose file may still carry the removed policy.
+			return http.StatusInternalServerError, fmt.Errorf("policy record removal: %w", err)
+		}
 		if state == subject.StateActive {
 			if err := s.revertToDenyFirst(subj, att); err != nil {
 				return http.StatusInternalServerError, err

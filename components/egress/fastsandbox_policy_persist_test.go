@@ -547,6 +547,38 @@ func TestPolicyPersistStaleRecordNeverSupersedesFreshRegistration(t *testing.T) 
 	assert.Equal(t, newRuntime, pf.Incarnation)
 }
 
+// TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone (review F3): a
+// binding removal whose durable purge fails must not leave the removed
+// policy's file recoverable — a deny tombstone lands instead, so a later
+// same-fence registration loads deny, never the removed policy.
+func TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+	h.readySubject(t, policyTestUID, vaultTestIP)
+
+	// Runtime mutation to rev 2, then a removal whose unlink fails.
+	rec := doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllowAlt(), 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	h.fileFor(policyTestUID).failFirstDelete = errors.New("unlink EIO")
+
+	rec = doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 2, nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// The tombstone replaced the removed policy durably.
+	pf, body := decodePolicyFile(t, h.fileFor(policyTestUID))
+	assert.Equal(t, int64(3), pf.Revision)
+	assert.Contains(t, string(body), `"defaultAction":"deny"`)
+	assert.NotContains(t, string(body), "other.example.com", "the removed policy must not survive the removal")
+
+	// A later same-fence registration loads the tombstone — never the
+	// removed policy.
+	rec = doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 3, strPtr(policyAllow())))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(3), rev)
+	assert.Contains(t, string(doc.Policy), `"defaultAction":"deny"`)
+}
+
 // ---------------------------------------------------------------------------
 // Capability + healthy posture
 // ---------------------------------------------------------------------------

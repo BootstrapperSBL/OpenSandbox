@@ -358,9 +358,9 @@ func (s *fastSandboxPolicyServer) installImportedPolicyLocked(subj subject.Subje
 		}
 	}
 	s.mu.Lock()
-	if state != subject.StateActive {
-		s.pendingPolicies[subj] = pol
-	}
+	// The pending slot mirrors what is enforced (same rationale as the
+	// relay PUT: a replayed data-plane-ready must be idempotent).
+	s.pendingPolicies[subj] = pol
 	s.policies[subj] = &policyEntry{revision: revision, fence: fence}
 	s.mu.Unlock()
 	return nil

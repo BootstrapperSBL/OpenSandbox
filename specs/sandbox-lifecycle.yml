@@ -59,15 +59,10 @@ paths:
       operationId: getSandboxNetworkPolicy
       summary: Read sandbox network policy
       description: |
-        Fsb reads the egress-held record — the response reflects exactly what
-        the egress enforces, not the create-time binding input. Other backends
-        proxy the sandbox-side egress service.
-      description: |
-        For Fsb, reads persisted egress Action Binding intent in the tenant's
-        Sandbox CR, not live enforcement state. An absent binding defaults to
-        deny-first when an egress handler is configured; this is not proof of
-        enforcement on a pool without that handler. Other backends proxy the
-        sandbox-side egress service. Requires lifecycle API authentication.
+        Fsb reads the egress-held policy record — the response reflects
+        exactly what the egress enforces, not the create-time binding input.
+        Other backends proxy the sandbox-side egress service. Requires
+        lifecycle API authentication.
       responses:
         '200':
           description: Policy intent (Fsb) or sidecar policy (other backends).

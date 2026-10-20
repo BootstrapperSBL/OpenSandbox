@@ -291,19 +291,67 @@ func (s *fastSandboxPolicyServer) policyHealthIssue() string {
 }
 
 // clearPolicyRecord removes the subject's recorded policy (binding removal
-// on a still-live sandbox): the entry goes and the persisted file is purged,
-// so the deny-first state is also the durable state — a restart cannot
-// resurrect a removed policy, and a later registration starts from its own
-// input. Serialized with the relay commits (policyCommitMu) so an in-flight
-// write against the removed binding cannot recreate the record after the
-// purge; callers are never under the registry write lock.
-func (s *fastSandboxPolicyServer) clearPolicyRecord(subj subject.Subject) {
+// on a still-live sandbox): the in-memory record and pending policy go, and
+// the persisted file is purged so the deny-first state is also the durable
+// state. An uncertain/failed purge falls back to persisting a default-deny
+// tombstone at the successor revision — a leftover file whose recorded
+// content still matches the removed policy would otherwise be loaded by a
+// later same-fence registration or restart, resurrecting an acknowledged-
+// away policy. A tombstone persist failure latches recovery (writes frozen
+// until restart). Serialized with the relay commits (policyCommitMu) so an
+// in-flight write against the removed binding cannot recreate the record
+// after the purge; callers are never under the registry write lock.
+func (s *fastSandboxPolicyServer) clearPolicyRecord(subj subject.Subject) error {
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
 	s.mu.Lock()
-	delete(s.policies, subj)
+	entry := s.policies[subj]
+	pp := s.policyFiles
 	s.mu.Unlock()
-	s.purgePolicyFile(subj)
+	if entry == nil {
+		return nil
+	}
+	s.mu.Lock()
+	delete(s.policies, subj)
+	delete(s.pendingPolicies, subj)
+	s.mu.Unlock()
+	if pp == nil {
+		return nil
+	}
+	if err := pp.purge(subj); err == nil {
+		return nil
+	} else {
+		log.Warnf("subject %s: policy file purge failed (%v); persisting a deny tombstone instead", subj, err)
+	}
+	deny := policy.DefaultDenyPolicy()
+	raw, err := json.Marshal(deny)
+	if err != nil {
+		return fmt.Errorf("deny tombstone marshal: %w", err)
+	}
+	rev := entry.revision + 1
+	payload, err := policy.EncodePolicyFile(entry.fence.RuntimeInstanceID, entry.fence.AttachmentID, rev, raw)
+	if err != nil {
+		return fmt.Errorf("deny tombstone encode: %w", err)
+	}
+	err = s.persistPolicyCandidateLocked(
+		subj,
+		func(fs vaultFileStore) (policy.FileMutationState, error) {
+			return fs.SaveRaw(payload)
+		},
+		func() error {
+			s.mu.Lock()
+			s.pendingPolicies[subj] = deny
+			s.policies[subj] = &policyEntry{revision: rev, fence: entry.fence}
+			s.mu.Unlock()
+			return nil
+		},
+	)
+	if err != nil {
+		log.Errorf("subject %s: deny tombstone persist failed: %v", subj, err)
+		return fmt.Errorf("deny tombstone persist: %w", err)
+	}
+	log.Infof("subject %s: deny tombstone persisted after purge failure (revision %d)", subj, rev)
+	return nil
 }
 
 // rehydratePolicyReload is the egress-restart recovery path: at

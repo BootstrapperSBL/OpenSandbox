@@ -276,6 +276,31 @@ func TestPolicyRelayDenyingSubjectHoldsPending(t *testing.T) {
 	assert.Equal(t, "allow", reg_UserEvaluate(srv, s, "other.example.com"))
 }
 
+// TestPolicyRelayPutReplacesStalePendingTombstone (review F4): after a
+// DELETE on an active subject, the pending slot holds the deny tombstone; a
+// later relay PUT must replace it, so an at-least-once data-plane-ready
+// replay re-applies the REPLACEMENT, never the stale deny.
+func TestPolicyRelayPutReplacesStalePendingTombstone(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))
+
+	// DELETE lands the deny tombstone (active, enforced in place).
+	rec := doPolicy(t, srv, http.MethodDelete, policyTestUID, "", "")
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	// The relay PUT applies in place AND replaces the pending tombstone.
+	rec = doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllowAlt(), 2, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// A replayed data-plane-ready consumes the pending policy: it must be
+	// the replacement, not the stale deny.
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg_UserEvaluate(srv, s, "other.example.com"))
+	assert.Equal(t, "deny", reg_UserEvaluate(srv, s, "api.example.com"))
+}
+
 // reg_UserEvaluate evaluates the subject's recorded user policy (test aid to
 // keep assertions readable).
 func reg_UserEvaluate(srv *fastSandboxPolicyServer, s subject.Subject, domain string) string {

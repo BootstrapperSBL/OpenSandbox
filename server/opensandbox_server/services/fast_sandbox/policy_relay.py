@@ -56,7 +56,18 @@ _POLICY_PATH_PREFIX = "/policy/"
 
 
 def policy_relay_error(status_code: int, message: str) -> HTTPException:
-    """Map an egress relay status onto the public HTTP contract."""
+    """Map an egress relay status onto the public HTTP contract.
+
+    The egress reports revision conflicts as 412 (handler-relay internal
+    contract); the public network-policy operations declare 409, so the
+    conflict is remapped here instead of leaking an undocumented status to
+    generated clients.
+    """
+    if status_code == status.HTTP_412_PRECONDITION_FAILED:
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": SandboxErrorCodes.FSB_API_ERROR, "message": message},
+        )
     if status_code == 400:
         return HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
