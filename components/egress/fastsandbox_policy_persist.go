@@ -21,6 +21,11 @@
 // POLICY_IMPORT snapshot transfer. Ordering is persist → apply → ack
 // (acked ⇒ durable and applied), with the same three-state classification,
 // snapshot restore, and recovery latch as the vault files.
+//
+// TODO(encryption-at-rest): template-borne state blobs are stored as-is.
+// When encryption lands it protects the store-side reader only — CLONE
+// ISOLATION is determined by KEY SCOPING (per-tenant/pool keys), so design
+// the key hierarchy with the template-distribution flow in mind.
 package main
 
 import (
@@ -370,24 +375,27 @@ func (s *fastSandboxPolicyServer) clearPolicyRecordLocked(subj subject.Subject) 
 // Removal SET_BINDINGS skip the reload (clearPolicyRecordLocked). A live
 // record for this exact fence wins (duplicate SET_BINDING). Runs BEFORE
 // RegisterAndEnforce, mirroring rehydrateVaultReload.
-func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fence subject.Fencing) {
+// Returns the policy the subject must run per the reload: the file-backed
+// policy, default-deny when degraded, or nil when the binding input seeds
+// (fresh subject).
+func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fence subject.Fencing) *policy.NetworkPolicy {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.policies[subj]; e != nil {
 		if e.fence == fence {
-			return
+			return nil
 		}
 		delete(s.policies, subj)
 	}
 	fs, err := s.policyFiles.storeFor(subj)
 	if err != nil {
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file store unavailable: %v", err))
-		return
+		return policy.DefaultDenyPolicy()
 	}
 	snap, err := fs.Snapshot()
 	if err != nil {
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file unreadable: %v", err))
-		return
+		return policy.DefaultDenyPolicy()
 	}
 	if !snap.Exists() {
 		// Fresh subject: the binding input seeds. A durable seal marker (an
@@ -397,9 +405,9 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 			s.policies[subj] = &policyEntry{fence: fence, sealed: true}
 			s.pendingPolicies[subj] = policy.DefaultDenyPolicy()
 			log.Infof("subject %s: seal restored from marker (file-less subject)", subj)
-			return
+			return policy.DefaultDenyPolicy()
 		}
-		return
+		return nil
 	}
 	pf, body, decErr := policy.DecodePolicyFile(snap.Data())
 	if decErr != nil {
@@ -414,7 +422,7 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 			}
 		}
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file unusable (%v)", decErr))
-		return
+		return policy.DefaultDenyPolicy()
 	}
 	recorded := subject.Fencing{RuntimeInstanceID: pf.Incarnation, AttachmentID: pf.AttachmentID}
 	if !recorded.Matches(fence) {
@@ -425,17 +433,17 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 		} else {
 			log.Infof("subject %s: stale policy file discarded (fence %s/%s ≠ %s/%s)", subj, pf.Incarnation, pf.AttachmentID, fence.RuntimeInstanceID, fence.AttachmentID)
 		}
-		return
+		return nil
 	}
 	pol, parseErr := policy.ParsePolicy(string(body))
 	if parseErr != nil {
 		if _, delErr := fs.Delete(); delErr != nil {
 			log.Errorf("subject %s: unparseable policy file quarantine failed (file left in place): %v", subj, delErr)
 			s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file quarantine failed: %v", delErr))
-			return
+			return policy.DefaultDenyPolicy()
 		}
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file content rejected (%v)", parseErr))
-		return
+		return policy.DefaultDenyPolicy()
 	}
 	entry := &policyEntry{revision: pf.Revision, fence: fence}
 	// A durable seal marker (export acked, teardown not yet delivered)
@@ -448,6 +456,7 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 	s.policies[subj] = entry
 	s.pendingPolicies[subj] = pol
 	log.Infof("subject %s: policy reloaded from file (revision %d, incarnation %s); binding input superseded", subj, pf.Revision, pf.Incarnation)
+	return pol
 }
 
 // applyBindingPolicyLocked seeds the binding's policy for a freshly

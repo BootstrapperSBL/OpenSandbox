@@ -75,8 +75,7 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 	// Phase 1: guards + consistent source image, serialized with the policy
 	// relay commits (policyCommitMu). A relay writer that passed its guards
 	// but has not committed yet is either flushed before the snapshot (the
-	// copy carries its write) or blocked until phase 3 — it can never
-	// commit "under" the seal.
+	// copy carries its write) or blocked until phase 3.
 	s.policyCommitMu.Lock()
 	s.mu.Lock()
 	snap, status, err := s.policyExportSourceImageLocked(subj, fence, regFence, registered)
@@ -129,6 +128,16 @@ func (s *fastSandboxPolicyServer) applyPolicyExport(env *actionhandler.Envelope)
 		if err != nil || (state != policy.FileCommitted && state != policy.FileUnchanged) {
 			return http.StatusInternalServerError, fmt.Errorf("policy bundle removal failed (state %v): %v", state, err)
 		}
+	}
+	// Seal-free template carry: the record was copied verbatim and the
+	// source keeps full relay CRUD — no latch, bookkeeping untouched.
+	if !env.Snapshot.Sealed() {
+		if snap.Exists() {
+			log.Infof("subject %s: policy exported to snapshot bundle, seal-free (template carry)", subj)
+		} else {
+			log.Infof("subject %s: no policy file to export, seal-free (template carry)", subj)
+		}
+		return http.StatusOK, nil
 	}
 	// Durable seal first: a restart before REMOVE_BINDING must reload the
 	// entry sealed, or relay writes would stale the taken bundle.

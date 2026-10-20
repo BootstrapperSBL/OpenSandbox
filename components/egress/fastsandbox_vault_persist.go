@@ -14,7 +14,12 @@
 
 // Egress-held vault persistence (OSEP-0022 stage 2): one file per subject
 // under <egress-volume>/vault/, so an egress restart recovers locally — no
-// server re-push exists or is needed. Ordering is persist → apply → ack
+// server re-push exists or is needed.
+//
+// TODO(encryption-at-rest): template-borne vault blobs are stored as-is.
+// When encryption lands it protects the store-side reader only — CLONE
+// ISOLATION is determined by KEY SCOPING (per-tenant/pool keys), so design
+// the key hierarchy with the template-distribution flow in mind. Ordering is persist → apply → ack
 // (acked ⇒ durable and applied), reusing the policy-persistence machinery's
 // three-state classification, snapshot restore, and recovery latch.
 package main

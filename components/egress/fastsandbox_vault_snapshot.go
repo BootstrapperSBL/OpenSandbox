@@ -67,7 +67,11 @@ func reservesPathUnder(dir, path string) bool {
 }
 
 // applyVaultExport copies the subject's vault file into the bundle target and
-// marks the subject sealed. A subject without a vault file just seals. Any
+// marks the subject sealed (SnapshotTransfer.Seal absent/true — the
+// checkpoint flow); Seal=false is the seal-free template carry: the record
+// is copied verbatim and the source keeps full relay CRUD. A subject
+// without a vault file just seals (checkpoint) / exports nothing
+// (template). Any
 // failure leaves the subject unsealed and active; what the pause flow does
 // with that is the caller's call — the fast-sandbox driver fails the pause
 // checkpoint, so the teardown never runs without a bundle. A retried export
@@ -147,6 +151,19 @@ func (s *fastSandboxPolicyServer) applyVaultExport(env *actionhandler.Envelope) 
 		if err != nil || (state != policy.FileCommitted && state != policy.FileUnchanged) {
 			return http.StatusInternalServerError, fmt.Errorf("vault bundle removal failed (state %v): %v", state, err)
 		}
+	}
+	// Seal-free template carry: the record was copied verbatim and the
+	// source keeps full relay CRUD — no latch, bookkeeping untouched. (The
+	// vault blob is carried as-is; encryption at rest is a deferred TODO in
+	// the vault persist layer, and clone isolation is key scoping, not the
+	// blob.)
+	if !env.Snapshot.Sealed() {
+		if snap.Exists() {
+			log.Infof("subject %s: vault exported to snapshot bundle, seal-free (template carry)", subj)
+		} else {
+			log.Infof("subject %s: no vault file to export, seal-free (template carry)", subj)
+		}
+		return http.StatusOK, nil
 	}
 	// Durable seal first: a restart before REMOVE_BINDING must reload the
 	// entry sealed, or relay writes would stale the taken bundle.

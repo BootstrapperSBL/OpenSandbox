@@ -44,7 +44,7 @@ func TestPolicySnapshotExportCopiesAndSeals(t *testing.T) {
 	h.readySubject(t, policyTestUID, vaultTestIP)
 	bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
 
-	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// The bundle copy is byte-identical to the subject's policy file.
@@ -65,7 +65,7 @@ func TestPolicySnapshotExportCopiesAndSeals(t *testing.T) {
 	assert.Equal(t, subject.StateActive, state)
 
 	// A retried export (lost ack) re-copies and re-seals idempotently.
-	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, policyFile.data, h.fakeForPath(bundlePath).data)
 }
@@ -82,7 +82,7 @@ func TestPolicySnapshotExportWithoutPolicyFileStillSeals(t *testing.T) {
 	require.False(t, h.fileFor(policyTestUID).exists, "precondition: the removal purged the file")
 
 	bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
-	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.False(t, h.fakeForPath(bundlePath).exists, "nothing to carry: no policy file, no bundle write")
 }
@@ -92,7 +92,7 @@ func TestPolicySnapshotExportUnregisteredSubjectIsNoOp(t *testing.T) {
 	h := newPolicyPersistHarness(t)
 	bundlePath := filepath.Join(t.TempDir(), "bundle", "unregistered.json")
 
-	rec := doAction(t, h.srv, policySnapshotBody(t, "unregistered-sandbox", testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec := doAction(t, h.srv, policySnapshotBody(t, "unregistered-sandbox", testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.False(t, h.fakeForPath(bundlePath).exists, "nothing to carry: no subject, no bundle write")
 }
@@ -101,7 +101,7 @@ func TestPolicySnapshotExportGuards(t *testing.T) {
 	t.Run("stale fence", func(t *testing.T) {
 		h := newPolicyPersistHarness(t)
 		h.readySubject(t, policyTestUID, vaultTestIP)
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, "old-runtime", testFenceA, "POLICY_EXPORT", "/tmp/bundle.json"))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, "old-runtime", testFenceA, "POLICY_EXPORT", "/tmp/bundle.json", nil))
 		assert.Equal(t, http.StatusConflict, rec.Code)
 		h.srv.mu.Lock()
 		e := h.srv.policies[subject.FromSandboxUID(policyTestUID)]
@@ -114,7 +114,7 @@ func TestPolicySnapshotExportGuards(t *testing.T) {
 		h.srv.requirePolicyRecoveryLocked("simulated latch")
 		bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
 
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 		h.srv.mu.Lock()
 		e := h.srv.policies[subject.FromSandboxUID(policyTestUID)]
@@ -127,7 +127,7 @@ func TestPolicySnapshotExportGuards(t *testing.T) {
 		h.readySubject(t, policyTestUID, vaultTestIP)
 		inside := filepath.Join(h.dir, "other.json") // another subject's file
 
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", inside))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", inside, nil))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 		h.srv.mu.Lock()
 		e := h.srv.policies[subject.FromSandboxUID(policyTestUID)]
@@ -151,7 +151,7 @@ func TestPolicySnapshotExportGuards(t *testing.T) {
 			f.exists = true
 		}
 
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusConflict, rec.Code)
 		h.srv.mu.Lock()
 		e := h.srv.policies[subject.FromSandboxUID(policyTestUID)]
@@ -159,6 +159,35 @@ func TestPolicySnapshotExportGuards(t *testing.T) {
 		assert.False(t, e.sealed)
 		assert.Equal(t, copied, bundle.data, "the stale copy exists but is not sealed — the driver retries against the newer state")
 	})
+}
+
+// TestPolicySnapshotExportSealFree (issue #2312, Seal=false): the template
+// carry copies the record verbatim and the source keeps full relay CRUD —
+// no seal latch, revision bookkeeping unchanged.
+func TestPolicySnapshotExportSealFree(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+	h.readySubject(t, policyTestUID, vaultTestIP)
+	bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
+	sealFree := false
+
+	before := h.fakeForPath(filepath.Join(h.dir, policyTestUID+".json")).data
+	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, &sealFree))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// Byte-identical copy of the persisted record.
+	bundle := h.fakeForPath(bundlePath)
+	require.True(t, bundle.exists)
+	assert.Equal(t, before, bundle.data)
+
+	// The source keeps full relay CRUD — no 409, no seal latch.
+	rec = doPolicy(t, h.srv, http.MethodGet, policyTestUID, "", "")
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(1), rev)
+	assert.Contains(t, string(doc.Policy), "api.example.com")
+	rec = doPolicy(t, h.srv, http.MethodPut, policyTestUID, policyPutDoc(policyAllowAlt(), 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code, "the source keeps CRUD after a seal-free export")
+	rec = doPolicy(t, h.srv, http.MethodDelete, policyTestUID, "", "")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +201,7 @@ func TestPolicySnapshotImportLandsFileBeforeRegistration(t *testing.T) {
 
 	// Resume on a fresh Pod: no subject registered yet; the driver imports
 	// before SET_BINDING.
-	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// Landed via the commit protocol, re-stamped with the restored fence —
@@ -219,7 +248,7 @@ func TestPolicySnapshotImportAfterSetBindingInstallsAndUnseals(t *testing.T) {
 
 	// Export seals the subject (simulated pause), then resume on the same
 	// fence: the import lands, installs, and unseals.
-	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	h.srv.mu.Lock()
 	e := h.srv.policies[subject.FromSandboxUID(policyTestUID)]
@@ -229,7 +258,7 @@ func TestPolicySnapshotImportAfterSetBindingInstallsAndUnseals(t *testing.T) {
 	// The bundle carries revision 1 (seeded state) — rewrite it to revision
 	// 5 to prove the import wins over the live revision 1.
 	h.seedPolicyBundle(t, bundlePath, 5, policyAllowAlt())
-	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_IMPORT", bundlePath))
+	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_IMPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// The imported policy is live and unsealed.
@@ -256,14 +285,14 @@ func TestPolicySnapshotImportRejects(t *testing.T) {
 	}
 	t.Run("missing bundle file", func(t *testing.T) {
 		h, bundlePath := newHarness(t)
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusNotFound, rec.Code)
 	})
 	t.Run("corrupt bundle", func(t *testing.T) {
 		h, bundlePath := newHarness(t)
 		require.NoError(t, os.MkdirAll(filepath.Dir(bundlePath), 0o700))
 		require.NoError(t, os.WriteFile(bundlePath, []byte(`{"v":1,`), 0o600))
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 	t.Run("invalid policy content", func(t *testing.T) {
@@ -272,34 +301,34 @@ func TestPolicySnapshotImportRejects(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, os.MkdirAll(filepath.Dir(bundlePath), 0o700))
 		require.NoError(t, os.WriteFile(bundlePath, raw, 0o600))
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 	t.Run("oversized bundle", func(t *testing.T) {
 		h, bundlePath := newHarness(t)
 		require.NoError(t, os.MkdirAll(filepath.Dir(bundlePath), 0o700))
 		require.NoError(t, os.WriteFile(bundlePath, make([]byte, maxPolicySnapshotBytes+1), 0o600))
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 	t.Run("source under the policy persistence directory", func(t *testing.T) {
 		h, _ := newHarness(t)
 		inside := filepath.Join(h.dir, "staged.json")
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", inside))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", inside, nil))
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 	t.Run("stale fence while registered", func(t *testing.T) {
 		h, bundlePath := newHarness(t)
 		h.readySubject(t, policyTestUID, vaultTestIP)
 		h.seedPolicyBundle(t, bundlePath, 5, policyAllowAlt())
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusConflict, rec.Code)
 	})
 	t.Run("recovery latch rejects the import", func(t *testing.T) {
 		h, bundlePath := newHarness(t)
 		h.seedPolicyBundle(t, bundlePath, 5, policyAllowAlt())
 		h.srv.requirePolicyRecoveryLocked("simulated latch")
-		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+		rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 		assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 		assert.False(t, h.fileFor(policyTestUID).exists, "no policy file mutation while latched")
 	})
@@ -313,7 +342,7 @@ func TestPolicySnapshotDuplicateImportDoesNotRollBack(t *testing.T) {
 	// First import lands revision 5 (registered, denying).
 	rec := doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, snapshotResumeR, snapshotResumeA, 1, strPtr(policyAllow())))
 	require.Equal(t, http.StatusOK, rec.Code)
-	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// Relay writes resume: revision 6 lands.
@@ -321,7 +350,7 @@ func TestPolicySnapshotDuplicateImportDoesNotRollBack(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// A lost-ack retry must not roll revision 6 back to the bundle's 5.
-	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath))
+	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, snapshotResumeR, snapshotResumeA, "POLICY_IMPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	pf, _ := decodePolicyFile(t, h.fileFor(policyTestUID))
@@ -340,7 +369,7 @@ func TestPolicySnapshotRemoveBindingPurgesSealed(t *testing.T) {
 	h.readySubject(t, policyTestUID, vaultTestIP)
 	bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
 
-	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.True(t, h.fakeForPath(bundlePath).exists, "precondition: the bundle copy is intact")
 
@@ -380,7 +409,7 @@ func TestPolicySnapshotSealSurvivesRestart(t *testing.T) {
 	h.readySubject(t, policyTestUID, vaultTestIP)
 	bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
 
-	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec := doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// Fresh server over the same persistence state + binding replay.

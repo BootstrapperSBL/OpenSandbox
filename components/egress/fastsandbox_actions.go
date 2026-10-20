@@ -113,10 +113,11 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 		// Capability signal for the Fastlet's policy transfer: without policy
 		// persistence there is no recorded policy to hand off, so the
 		// transfer degrades (skips) rather than failing the checkpoint.
-		PolicyTransfer:   s.policyFiles != nil,
-		PolicyRecovery:   policyRecovery,
-		DegradedPolicies: s.degradedPolicyUIDs(),
-		DegradedVaults:   degraded,
+		PolicyTransfer:      s.policyFiles != nil,
+		PolicyRecovery:      policyRecovery,
+		DegradedPolicies:    s.degradedPolicyUIDs(),
+		DegradedVaults:      degraded,
+		TemplateStateExport: true,
 	}
 	if s.mitmGate != nil {
 		resp.MitmCaFingerprint = s.mitmGate.CAFingerprint()
@@ -228,8 +229,14 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 	// policy to revalidate against, the files stay fenced on disk until the
 	// next registration or terminal purge.
 	if !env.Binding.IsRemoval() {
-		s.rehydrateVaultReload(subj, fence, pol)
-		s.rehydratePolicyReload(subj, fence)
+		// Policy first: its reload result is the validation policy for the
+		// vault reload (a template clone's vault hosts are covered by the
+		// landed template policy, not by the replayed bootstrap input).
+		seed := s.rehydratePolicyReload(subj, fence)
+		if seed == nil {
+			seed = pol
+		}
+		s.rehydrateVaultReload(subj, fence, seed)
 	}
 	state, err := s.reg.RegisterAndEnforce(subj, subject.SubjectKey{SourceIP: att.IP}, fence, func() error {
 		return s.OnRegistered(subj, att)

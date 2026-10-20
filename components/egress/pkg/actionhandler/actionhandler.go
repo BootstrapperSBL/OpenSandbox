@@ -114,9 +114,23 @@ type Hook struct {
 }
 
 // SnapshotTransfer names the driver-provided staging file for one subject's
-// vault snapshot: the export target, or the bundle source at restore.
+// state snapshot (vault / recorded policy): the export target, or the bundle
+// source at restore.
 type SnapshotTransfer struct {
 	Path string `json:"path"`
+	// Seal selects the export semantics. Absent/nil = sealed (the
+	// checkpoint flow: the subject is locked out of the copied state until
+	// an import or teardown re-owns it). Seal=false = seal-free carry —
+	// the record is copied verbatim and the source keeps full relay CRUD
+	// (the template flow: the source stays live and the clone adopts the
+	// carried state at its first registration).
+	Seal *bool `json:"seal,omitempty"`
+}
+
+// Sealed reports the export semantics: nil means the checkpoint default
+// (sealed).
+func (t *SnapshotTransfer) Sealed() bool {
+	return t.Seal == nil || *t.Seal
 }
 
 // validatePath enforces the Pod-local absolute-path contract at parse time,
@@ -306,4 +320,11 @@ type StatusResponse struct {
 	// closed for them; a relay write heals).
 	PolicyRecovery   bool     `json:"policyRecovery,omitempty"`
 	DegradedPolicies []string `json:"degradedPolicies,omitempty"`
+	// TemplateStateExport reports that this Handler supports the
+	// seal-free template state carry (SnapshotTransfer.Seal=false exports
+	// keep the source live; imports land for the next registration).
+	// Absent on older builds decodes as false: the Fastlet's template
+	// snapshots then export nothing (handlers that always seal are never
+	// asked) — rolling upgrades are safe in both directions.
+	TemplateStateExport bool `json:"templateStateExport,omitempty"`
 }

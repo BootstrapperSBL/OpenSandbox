@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -65,6 +66,15 @@ func newPolicyPersistHarness(t *testing.T) *policyPersistHarness {
 	}
 	h.pp = pp
 	h.srv.SetPolicyFiles(pp)
+	// The policy clone flow also exercises the vault transfer (template
+	// carry exports both states), so the harness wires vault persistence as
+	// a SIBLING state directory (mirroring the production layout — same
+	// volume, distinct basenames; aliasing them would clobber the shared
+	// <uid>.json names).
+	vp, err := newVaultPersistence(filepath.Join(h.dir, "vault"))
+	require.NoError(t, err)
+	vp.newFile = pp.newFile
+	h.srv.SetVaultFiles(vp)
 	return h
 }
 
@@ -133,7 +143,7 @@ func (h *policyPersistHarness) seedPolicyBundle(t *testing.T, path string, revis
 }
 
 // policySnapshotBody builds a POLICY_EXPORT / POLICY_IMPORT envelope.
-func policySnapshotBody(t *testing.T, uid, runtimeID, attID, op, path string) string {
+func policySnapshotBody(t *testing.T, uid, runtimeID, attID, op, path string, seal *bool) string {
 	t.Helper()
 	env := actionhandler.Envelope{
 		APIVersion:   constants.ActionsAPIVersion,
@@ -146,7 +156,7 @@ func policySnapshotBody(t *testing.T, uid, runtimeID, attID, op, path string) st
 			AttachmentID:      attID,
 			RouteGeneration:   1,
 		},
-		Snapshot: &actionhandler.SnapshotTransfer{Path: path},
+		Snapshot: &actionhandler.SnapshotTransfer{Path: path, Seal: seal},
 	}
 	raw, err := json.Marshal(env)
 	require.NoError(t, err)
@@ -594,7 +604,7 @@ func TestPolicyPersistSealedFilelessSubjectSurvivesRestart(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.False(t, h.fileFor(policyTestUID).exists, "precondition: file-less after removal")
 	bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
-	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath, nil))
 	require.Equal(t, http.StatusOK, rec.Code)
 	h.srv.mu.Lock()
 	require.True(t, h.srv.policies[subject.FromSandboxUID(policyTestUID)].sealed)
@@ -631,6 +641,85 @@ func TestPolicyPersistSealedFilelessSubjectSurvivesRestart(t *testing.T) {
 	_ = reg2
 }
 
+// TestTemplateCloneAdoptsPolicyAndVault (issue #2312 acceptance 2): the
+// template's policy and vault records are adopted at the clone's first
+// registration — re-stamped to the clone's fence, revision preserved, vault
+// validated against the LANDED template policy (not the bootstrap input),
+// and enforced in-guest.
+func TestTemplateCloneAdoptsPolicyAndVault(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+
+	// Template source: allow a.com + b.com, with a vault binding on a.com.
+	h.readySubject(t, "template-u", vaultTestIP)
+	rec := doPolicy(t, h.srv, http.MethodPut, "template-u", policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"a.com"},{"action":"allow","target":"api.example.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doVault(t, h.srv, http.MethodPost, "template-u", vaultCredential(), "")
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	// Template carry: seal-free exports of both states.
+	bundle := filepath.Join(t.TempDir(), "bundle")
+
+	require.NoError(t, os.MkdirAll(bundle, 0o700))
+	sealFree := false
+	rec = doAction(t, h.srv, policySnapshotBody(t, "template-u", testFenceR, testFenceA, "POLICY_EXPORT", filepath.Join(bundle, "policy.json"), &sealFree))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, h.srv, policySnapshotBody(t, "template-u", testFenceR, testFenceA, "VAULT_EXPORT", filepath.Join(bundle, "vault.json"), &sealFree))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// The source keeps full CRUD (seal-free).
+	rec = doPolicy(t, h.srv, http.MethodGet, "template-u", "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doVault(t, h.srv, http.MethodGet, "template-u", "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// The clone: fresh subject on a new fence; the driver hands both
+	// bundle files over strictly before SET_BINDING. The imports re-stamp
+	// the records to the clone's fence for the next registration.
+	const cloneUID, cloneIP = "clone-u", "10.9.2.5"
+	const cloneR, cloneA = "clone-runtime", "clone-attachment"
+	// Materialize the published bundle (the driver uploads the staged
+	// files; the restore side pulls them back to disk).
+	for _, name := range []string{"policy.json", "vault.json"} {
+		staged := h.fakeForPath(filepath.Join(bundle, name))
+		require.True(t, staged.exists, "the template export must have staged %s", name)
+		require.NoError(t, os.WriteFile(filepath.Join(bundle, name), staged.data, 0o600))
+	}
+	rec = doAction(t, h.srv, policySnapshotBody(t, cloneUID, cloneR, cloneA, "POLICY_IMPORT", filepath.Join(bundle, "policy.json"), nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, h.srv, policySnapshotBody(t, cloneUID, cloneR, cloneA, "VAULT_IMPORT", filepath.Join(bundle, "vault.json"), nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// First registration: the bootstrap input (default-allow) is
+	// superseded by the landed template policy; the vault reload validates
+	// against that LANDED policy, so the clone adopts both.
+	rec = doAction(t, h.srv, bindBody(t, cloneUID, cloneIP, cloneR, cloneA, 1, strPtr(`{"defaultAction":"allow"}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, h.srv, hookBody(t, cloneUID, cloneR, cloneA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, h.srv, hookBody(t, cloneUID, cloneR, cloneA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	clone := subject.FromSandboxUID(cloneUID)
+	assert.Equal(t, "allow", reg_UserEvaluate(h.srv, clone, "a.com"), "the template policy is enforced")
+	assert.Equal(t, "deny", reg_UserEvaluate(h.srv, clone, "c.com"))
+
+	// The clone's vault is live and injected from the adopted record.
+	req := httptest.NewRequest(http.MethodGet, "/credential-vault/_active?clientIp="+cloneIP, nil)
+	rec2 := httptest.NewRecorder()
+	h.srv.handleCredentialVaultActive(rec2, req)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	assert.Contains(t, rec2.Body.String(), "Bearer sekret")
+
+	// The adopted record is authoritative over later binding replays.
+	rec = doAction(t, h.srv, bindBody(t, cloneUID, cloneIP, cloneR, cloneA, 2, strPtr(`{"defaultAction":"allow"}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doPolicy(t, h.srv, http.MethodGet, cloneUID, "", "")
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(2), rev, "the landed revision is preserved through adoption")
+	assert.Contains(t, string(doc.Policy), "a.com")
+}
+
 // ---------------------------------------------------------------------------
 // Capability + healthy posture
 // ---------------------------------------------------------------------------
@@ -645,6 +734,7 @@ func TestPolicyPersistCapabilityFlag(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
 	status = mustStatus(t, srv)
 	assert.True(t, status.PolicyTransfer)
+	assert.True(t, status.TemplateStateExport, "seal-free template carry + land-for-next-registration are supported")
 	assert.NotContains(t, mustStatusBodyJSON(t, srv), "policyRecovery", "healthy posture omits the recovery flag")
 }
 
