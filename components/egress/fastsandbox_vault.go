@@ -123,8 +123,16 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 	// The body has been consumed; a late response must not try to read it.
 	r.Body.Close()
 
-	// Registry reads before s.mu (lock order: registry → s.mu, see
-	// selectRelayVault).
+	// The whole write holds policyCommitMu: the validation policy must not
+	// change between the pre-read and the commit (policy mutations — relay
+	// PUT/DELETE, hooks, removals — serialize on the same mutex, and none
+	// of them bump the fence, so the commit-time fence re-check alone
+	// cannot catch this). Lock order: policyCommitMu → registry → s.mu.
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
+
+	// Registry reads before s.mu (lock order: policyCommitMu → registry →
+	// s.mu).
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		http.Error(w, "unknown subject", http.StatusNotFound)

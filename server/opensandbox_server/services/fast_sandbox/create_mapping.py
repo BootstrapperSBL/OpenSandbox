@@ -32,6 +32,11 @@ from typing import Optional
 
 from opensandbox_server.api.schema import CreateSandboxRequest
 from opensandbox_server.services.fast_sandbox.network_policy import normalized_policy
+# The egress binding input seeded for a sandbox created without a
+# networkPolicy: default-allow (behavior identical to a policy-less
+# sandbox) — the binding's point is subject registration, not enforcement.
+DEFAULT_ALLOW_POLICY = {"defaultAction": "allow", "egress": []}
+
 from opensandbox_server.services.fast_sandbox.generated import (
     fastpath_pb2 as pb2,
 )
@@ -147,7 +152,7 @@ def map_create_request(
     else:
         create.action_bindings.add(
             handler="egress",
-            input=json.dumps({"defaultAction": "allow", "egress": []}),
+            input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
     extensions = request.extensions or {}
@@ -205,21 +210,15 @@ def map_template_create_request(
     if request.metadata:
         create.metadata.update(request.metadata)
 
-    # Every fsb sandbox registers an egress subject at create: the binding
-    # is what makes the Fastlet run SET_BINDING (deny-first install, network
-    # attachment) — the handler-relay surfaces (/policy/{uid},
-    # /vault/{uid}) and the pause/resume state transfer attach to it. A
-    # sandbox created without a networkPolicy seeds a no-op default-allow
-    # record (the registration is the point — the sandbox behaves exactly
-    # like today's policy-less one), and runtime changes ride the relay.
+    # Same registration rule as map_create_request: every fsb sandbox gets
+    # an egress subject at create.
     if request.network_policy is not None:
         create.action_bindings.add(
             handler="egress", input=json.dumps(normalized_policy(request.network_policy))
         )
     else:
         create.action_bindings.add(
-            handler="egress",
-            input=json.dumps({"defaultAction": "allow", "egress": []}),
+            handler="egress", input=json.dumps(DEFAULT_ALLOW_POLICY),
         )
 
     extensions = request.extensions or {}

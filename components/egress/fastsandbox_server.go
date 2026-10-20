@@ -383,10 +383,9 @@ func (s *fastSandboxPolicyServer) applyPolicy(subj subject.Subject, pol *policy.
 	s.policyMu.Lock()
 	defer s.policyMu.Unlock()
 	eff := s.reg.EffectiveOf(pol)
-	// Bounded: applyPolicy runs under policyCommitMu, so one slow nft
-	// transaction would head-of-line-block every subject's writes. The
-	// registration deny-first install is not under that serialization and
-	// keeps a 30s budget.
+	// Bounded (policyApplyTimeout): every applyPolicy caller runs under
+	// policyCommitMu, so one slow nft transaction would head-of-line-block
+	// every subject's writes.
 	nftCtx, cancel := context.WithTimeout(s.ctx, policyApplyTimeout)
 	defer cancel()
 	if err := s.nft.ApplyPolicy(nftCtx, subj, eff); err != nil {
@@ -447,7 +446,10 @@ func (s *fastSandboxPolicyServer) dropVault(subj subject.Subject) {
 // (nft rules + gateway DNS redirect + MITM interception). Runs under the
 // registry write lock, so no registry calls here.
 func (s *fastSandboxPolicyServer) OnRegistered(subj subject.Subject, att actionhandler.NetworkAttachment) error {
-	nftCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	// Bounded (policyApplyTimeout): SET_BINDING runs under policyCommitMu,
+	// so a slow deny-first install would head-of-line-block every subject's
+	// policy writes.
+	nftCtx, cancel := context.WithTimeout(s.ctx, policyApplyTimeout)
 	defer cancel()
 	if err := s.nft.ApplyDenyFirst(nftCtx, subj, att); err != nil {
 		return err

@@ -129,7 +129,7 @@ def _relay_get_full(service, sandbox_id: str) -> dict:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Network policy relay returned an invalid record.",
         ) from exc
-    if not isinstance(state.get("policy"), dict):
+    if not isinstance(state, dict) or not isinstance(state.get("policy"), dict):
         raise policy_relay_error(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Network policy relay record is missing the policy body.",

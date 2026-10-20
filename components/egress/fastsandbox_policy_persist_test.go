@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -577,6 +578,57 @@ func TestPolicyPersistRemovalPurgeFailureLandsDenyTombstone(t *testing.T) {
 	rev, doc := mustPolicyRevision(t, rec)
 	assert.Equal(t, int64(3), rev)
 	assert.Contains(t, string(doc.Policy), `"defaultAction":"deny"`)
+}
+
+// TestPolicyPersistSealedFilelessSubjectSurvivesRestart (review C1): an
+// export seals a file-less subject; the restart's binding replay must
+// restore the seal WITHOUT deadlocking (the sealed branch runs under the
+// reload's own s.mu), and the relay ops stay 409 with default-deny pending.
+func TestPolicyPersistSealedFilelessSubjectSurvivesRestart(t *testing.T) {
+	h := newPolicyPersistHarness(t)
+
+	// Bind, then remove the policy (healthy purge → file-less), then export
+	// (seals the file-less subject).
+	h.readySubject(t, policyTestUID, vaultTestIP)
+	rec := doAction(t, h.srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 2, nil))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.False(t, h.fileFor(policyTestUID).exists, "precondition: file-less after removal")
+	bundlePath := filepath.Join(t.TempDir(), "bundle", policyTestUID+".json")
+	rec = doAction(t, h.srv, policySnapshotBody(t, policyTestUID, testFenceR, testFenceA, "POLICY_EXPORT", bundlePath))
+	require.Equal(t, http.StatusOK, rec.Code)
+	h.srv.mu.Lock()
+	require.True(t, h.srv.policies[subject.FromSandboxUID(policyTestUID)].sealed)
+	h.srv.mu.Unlock()
+
+	// Restart: fresh server over the same persistence state, then the
+	// binding replay (non-removal). Must not deadlock; the seal and the
+	// default-deny pending come back.
+	srv2, reg2, _ := fastSandboxTestServer(t)
+	pp2, err := newPolicyPersistence(h.dir)
+	require.NoError(t, err)
+	pp2.newFile = h.pp.newFile
+	srv2.SetPolicyFiles(pp2)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r := doAction(t, srv2, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyAllow())))
+		assert.Equal(t, http.StatusOK, r.Code)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("deadlock: the sealed file-less replay never completed")
+	}
+
+	srv2.mu.Lock()
+	e := srv2.policies[subject.FromSandboxUID(policyTestUID)]
+	srv2.mu.Unlock()
+	require.NotNil(t, e)
+	assert.True(t, e.sealed, "the seal is restored from the marker")
+	rec = doPolicy(t, srv2, http.MethodPut, policyTestUID, policyPutDoc(policyAllow(), 0, false, false), "")
+	assert.Equal(t, http.StatusConflict, rec.Code, "relay ops stay 409 while sealed")
+	_ = reg2
 }
 
 // ---------------------------------------------------------------------------

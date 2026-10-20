@@ -302,6 +302,14 @@ func (s *fastSandboxPolicyServer) clearPolicyRecordLocked(subj subject.Subject) 
 	pp := s.policyFiles
 	s.mu.Unlock()
 	if entry == nil {
+		// A previous attempt may have cleared the memory record but failed
+		// the durable purge: retry the idempotent cleanup so the acked
+		// removal is real (the Fastlet's retry lands here).
+		if pp != nil {
+			if err := pp.purge(subj); err != nil {
+				return fmt.Errorf("policy file purge retry: %w", err)
+			}
+		}
 		return nil
 	}
 	s.mu.Lock()
@@ -382,15 +390,13 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 		return
 	}
 	if !snap.Exists() {
-		// Fresh subject: nothing persisted, the binding input seeds. A
-		// durable seal marker (an export that sealed a file-less subject)
-		// must still gate the relay ops — the seed entry carries it.
+		// Fresh subject: the binding input seeds. A durable seal marker (an
+		// export that sealed a file-less subject) still gates the relay
+		// ops — the seed entry carries it (caller holds s.mu).
 		if s.policyFiles.isSealed(subj) {
-			s.mu.Lock()
 			s.policies[subj] = &policyEntry{fence: fence, sealed: true}
 			s.pendingPolicies[subj] = policy.DefaultDenyPolicy()
-			s.mu.Unlock()
-			log.Infof("subject %s: seal restored from marker on a file-less subject (binding input seeds pending default-deny)", subj)
+			log.Infof("subject %s: seal restored from marker (file-less subject)", subj)
 			return
 		}
 		return

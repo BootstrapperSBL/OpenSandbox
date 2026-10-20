@@ -259,9 +259,12 @@ func (s *fastSandboxPolicyServer) applyVaultImport(env *actionhandler.Envelope) 
 		return http.StatusInternalServerError, fmt.Errorf("vault bundle re-stamp failed: %w", err)
 	}
 
-	// Registry reads before s.mu (lock order: registry → s.mu, see
-	// handleVaultRelayWrite); the validation policy merges the always
-	// overlay for the pending fallback (barrier semantics).
+	// The whole import holds policyCommitMu (vault-write parity with
+	// handleVaultRelayWrite): the validation policy and the registration
+	// fence cannot change between the pre-reads and the commit. Lock
+	// order: policyCommitMu → registry → s.mu.
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
 	validation := s.vaultValidationPolicy(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -494,7 +494,7 @@ expect_answers osb-sandbox-a allow.test 1.1.1.1
 # after the restart + SET_BINDING replay the recorded file must supersede
 # the input — asserted by the marker target surviving the GET below
 # (vault parity, Test 14e).
-relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"durability.test"}]}' 
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"durability.test"},{"action":"allow","target":"10.99.0.0/24"}]}'
 wait_for 10 "dyn lease present before restart" nft_has '1.1.1.1'
 kill "${EGRESS_PID}" 2>/dev/null
 wait "${EGRESS_PID}" 2>/dev/null || true
@@ -509,10 +509,18 @@ expect_answers osb-sandbox-a allow.test 1.1.1.1
 # file superseded the replayed binding input.
 recorded="$(curl -s "http://127.0.0.1:${POLICY_PORT}/policy/a")"
 echo "${recorded}" | grep -q 'durability.test' || fail "the relayed policy must survive the restart (file supersedes the replayed binding input), got: ${recorded}"
-pass "restart durability (recorded policy supersedes the replayed binding input)"
+# Enforcement, not just the record: the probe's static allow must be live
+# in nft (the replayed input does not contain it — a regression where the
+# replay overrode the reload would lose this element).
+nft_has '10.99.0.0/24' || fail "the reloaded policy must be ENFORCED (10.99.0.0/24 missing from nft)"
+pass "restart durability (recorded policy supersedes the replayed binding input, enforced)"
 # Restore the lineage: under file-supersedes-input, every later section
 # starts from the recorded policy — put back what the binding inputs intend.
-relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}' 
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
+# DELETE tombstone across a restart, and the revision precondition: a
+# stale expectedRevision is a 409 on the public contract.
+http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT "http://127.0.0.1:${POLICY_PORT}/policy/a" -d '{"policy":{"defaultAction":"deny","egress":[]},"expectedRevision":99}')"
+[ "${http_code}" = "409" ] || fail "stale expectedRevision must be 409, got ${http_code}"
 
 ###############################################################################
 info "Test 10: strict DoH mode (no blocklist) drops all tcp 443 globally"

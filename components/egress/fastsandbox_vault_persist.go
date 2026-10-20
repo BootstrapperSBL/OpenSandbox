@@ -177,7 +177,7 @@ func restrictVolumeRoot(dir, noun string) error {
 	}
 	entries, err := os.ReadDir(parent)
 	if err != nil {
-		return fmt.Errorf("list vault volume root %s: %w", parent, err)
+		return fmt.Errorf("list %s volume root %s: %w", noun, parent, err)
 	}
 	base := filepath.Base(dir)
 	for _, entry := range entries {

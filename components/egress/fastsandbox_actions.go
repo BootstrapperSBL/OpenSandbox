@@ -300,6 +300,12 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		// ever consume.
 		s.policyCommitMu.Lock()
 		defer s.policyCommitMu.Unlock()
+		// In-lock fence re-validation: the pre-lock check cannot see a
+		// rebind that completes while this Hook waits on policyCommitMu —
+		// a stale Hook must never activate the successor.
+		if !s.fenceMatchesLocked(subj, fence) {
+			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
+		}
 		// Peek, do not consume: a transient nft failure must leave the
 		// pending policy in place so the Fastlet's retry of the same Hook
 		// succeeds instead of 409-ing forever with the subject deny-first.
