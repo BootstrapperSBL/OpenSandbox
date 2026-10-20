@@ -79,6 +79,8 @@ func TestBashSession_NonZeroExitEmitsError(t *testing.T) {
 	require.NotNil(t, gotErr, "expected non-nil error output")
 	require.Equal(t, "CommandExecError", gotErr.EName)
 	require.Equal(t, "7", gotErr.EValue)
+	require.NotNil(t, gotErr.ExitCode, "expected exit_code for a command that ran")
+	require.Equal(t, 7, *gotErr.ExitCode)
 	require.NotEmpty(t, sessionID, "expected session id to be set")
 	require.Equal(t, "before", stdoutLine)
 

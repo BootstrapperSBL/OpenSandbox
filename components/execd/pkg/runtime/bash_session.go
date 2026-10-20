@@ -373,6 +373,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 				EName:     "CommandExecError",
 				EValue:    strconv.Itoa(userExitCode),
 				Traceback: []string{errMsg},
+				ExitCode:  &userExitCode,
 			})
 		}
 		log.Error("bash session: command error: %s (command: %q)", errMsg, log.SanitizeCommand(request.Code))
