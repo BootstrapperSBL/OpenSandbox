@@ -388,8 +388,8 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	// behavior.
 	normalizeIsolatedOptions(opts)
 
-	if len(opts.Overlays) == 0 {
-		return "", fmt.Errorf("at least one overlay is required")
+	if err := validateNormalizedCreate(opts); err != nil {
+		return "", err
 	}
 
 	for _, ov := range opts.Overlays {
@@ -906,15 +906,32 @@ func newMergedView(s *isolatedSession) vfs.FS {
 		return isolation.NewMergedView(ov.path, upper, ov.mode, uid, gid)
 	}
 
-	// Empty overlays yield an empty router rather than a panic.
-	if len(s.overlays) <= 1 {
-		if len(s.overlays) == 0 {
-			return isolation.NewMultiMergedView(nil)
+	// bindView serves a bind's namespace dest paths from its host source
+	// directory. BindView applies no overlay semantics: a bind is a live
+	// 1:1 mount, so the view follows symlinks and keeps ".wh." files real,
+	// exactly as the namespace sees them; ro mode rejects writes, matching
+	// --ro-bind.
+	bindView := func(b isolation.BindMount) isolation.OverlayView {
+		dest := b.Dest
+		if dest == "" {
+			dest = b.Source
 		}
-		return overlayView(s.overlays[0])
+		return isolation.OverlayView{
+			Path: dest,
+			Root: b.Source,
+			FS:   isolation.NewBindView(b.Source, b.ReadOnly, uid, gid),
+		}
 	}
 
-	views := make([]isolation.OverlayView, 0, len(s.overlays))
+	// Register bind views before overlay views: bwrap applies caller mounts
+	// in argv order (overlay segments first, binds last) and a later mount
+	// shadows earlier ones sharing a destination, so binds must win
+	// equal-prefix ties here too.
+	views := make([]isolation.OverlayView, 0, len(s.overlays)+len(s.opts.Binds))
+	for _, b := range s.opts.Binds {
+		views = append(views, bindView(b))
+	}
+
 	relativeBase := 0
 	for i, ov := range s.overlays {
 		if ov.path != "/" && s.overlays[relativeBase].path == "/" {
@@ -922,12 +939,30 @@ func newMergedView(s *isolatedSession) vfs.FS {
 			relativeBase = i
 		}
 		views = append(views, isolation.OverlayView{
-			Path:         ov.path,
-			FS:           overlayView(ov),
-			RelativeBase: false,
+			Path: ov.path,
+			FS:   overlayView(ov),
 		})
 	}
-	views[relativeBase].RelativeBase = true
+
+	// Without binds, preserve the historical view shapes (a bare MergedView
+	// for the single-overlay session).
+	if len(s.opts.Binds) == 0 {
+		switch len(views) {
+		case 0:
+			return isolation.NewMultiMergedView(nil)
+		case 1:
+			return overlayView(s.overlays[0])
+		}
+	}
+
+	// RelativeBase indexing below requires at least one overlay; Create
+	// enforces that, but newMergedView must not panic if that invariant
+	// ever changes.
+	if len(s.overlays) == 0 {
+		return isolation.NewMultiMergedView(views)
+	}
+
+	views[relativeBase+len(s.opts.Binds)].RelativeBase = true
 	return isolation.NewMultiMergedView(views)
 }
 
@@ -1065,6 +1100,102 @@ func (r *IsolatedRunner) pathAllowedResolved(resolved string) bool {
 		}
 	}
 	return false
+}
+
+// trustedBaseMounts are the bwrap mounts applied AFTER every caller-
+// controlled mount (buildArgvWithLifecycle): a bind whose destination falls
+// under one of them is shadowed inside the namespace, so the files view
+// must not serve it either.
+var trustedBaseMounts = []string{"/run", "/dev", "/proc"}
+
+// validateNormalizedCreate checks the invariants that depend on the
+// normalized options shape.
+func validateNormalizedCreate(opts *IsolatedSessionOptions) error {
+	if len(opts.Overlays) == 0 {
+		return fmt.Errorf("at least one overlay is required")
+	}
+	// Keep the files view and the namespace in agreement: a bind whose
+	// destination shadows (or is shadowed by) another caller mount would be
+	// served by different host directories through session.run and
+	// session.files, so reject the overlap up front.
+	return validateBindMountStack(opts.Overlays, opts.ExtraWritable, opts.Binds)
+}
+
+// validateBindMountStack rejects bind destinations whose mount-stack
+// visibility would disagree with the files view's longest-prefix routing:
+//
+//   - duplicate bind destinations (bwrap exposes the last, the router the
+//     first),
+//   - a destination that is a strict ancestor of another mount (bwrap's
+//     later mount hides the earlier subtree; the router would pick the
+//     deeper mount),
+//   - a destination under the trusted base mounts (/run, /dev, /proc),
+//     which bwrap always mounts last.
+//
+// A bind destination exactly equal to an overlay or extra_writable path is
+// allowed: the bind is applied later and wins in both the namespace and
+// the files view.
+func validateBindMountStack(
+	overlays []IsolatedOverlayOptions,
+	extraWritable []string,
+	binds []isolation.BindMount,
+) error {
+	bindDests := make([]string, 0, len(binds))
+	for _, b := range binds {
+		dest := b.Dest
+		if dest == "" {
+			dest = b.Source
+		}
+		bindDests = append(bindDests, filepath.Clean(dest))
+	}
+
+	otherMounts := make([]string, 0, len(overlays)+len(extraWritable))
+	for _, ov := range overlays {
+		otherMounts = append(otherMounts, filepath.Clean(ov.Path))
+	}
+	for _, p := range extraWritable {
+		otherMounts = append(otherMounts, filepath.Clean(p))
+	}
+
+	for i, dest := range bindDests {
+		for j, other := range bindDests {
+			if i == j {
+				continue
+			}
+			if dest == other {
+				return fmt.Errorf("binds dest %q: duplicate bind destination", dest)
+			}
+			if pathIsStrictAncestor(dest, other) {
+				return fmt.Errorf(
+					"binds dest %q shadows bind mount %q; nested bind destinations are not supported",
+					dest, other,
+				)
+			}
+		}
+		for _, mount := range otherMounts {
+			if pathIsStrictAncestor(dest, mount) {
+				return fmt.Errorf(
+					"binds dest %q shadows mount %q; ancestor bind destinations are not supported",
+					dest, mount,
+				)
+			}
+		}
+		for _, base := range trustedBaseMounts {
+			if dest == base || strings.HasPrefix(dest, base+"/") {
+				return fmt.Errorf(
+					"binds dest %q is shadowed by the trusted base mount %q",
+					dest, base,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+// pathIsStrictAncestor reports whether ancestor is a proper path prefix of
+// descendant (equal paths are not a strict ancestor relation).
+func pathIsStrictAncestor(ancestor, descendant string) bool {
+	return ancestor != descendant && strings.HasPrefix(descendant, ancestor+"/")
 }
 
 // resolveSymlinks returns the real path of p with symlinks resolved. Because p
