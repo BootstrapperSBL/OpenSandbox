@@ -13,49 +13,64 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# verify/snapshot.sh — snapshot round trip (CLI -> SandboxSnapshot CR -> restore)
+# verify/snapshot.sh — snapshot round trip with recorded-policy carry
+# (CLI -> SandboxSnapshot CR -> artifact store -> restore)
+#
+# Test shape: a POLICY-LESS sandbox gains deny rules (the fsb create seeds a
+# default-allow egress binding for every sandbox — the registration is the
+# point — so rules can be added after create), the snapshot must publish the
+# recorded policy file (policy.json rides Template-kind artifact sets next
+# to the manifest), and a restored sandbox must boot EXACTLY the dump-time
+# policy — rules added after the dump must not be in it. Deny enforcement is
+# verified with real in-guest traffic probes (execd POST /command through
+# the signed gateway route running curl), not just the control-plane view:
+# with defaultAction=allow a deny rule is only meaningful if the denied
+# target is unreachable while everything else still works.
 #
 # Coverage:
 #
-#   1. Snapshot create: a Running, /ping-healthy source sandbox is
-#      snapshotted via `osb snapshot create`; the POST returns
-#      status=Creating and the server row converges from the
-#      SandboxSnapshot CR via its watcher to Ready (300s budget).
-#   2. Re-entry fencing during the dump window: a second snapshot POST
-#      for the same sandbox must be fenced with 409 — or, during fence
-#      cache lag, accepted with 202 and then resolved to a terminal
-#      phase (a stuck accepted snapshot would block all future
-#      snapshots through the fence).
-#   3. Source survival: once the snapshot is terminal, the pause window
-#      must be released — the source sandbox is Running and /ping-200
-#      again.
-#   4. Repeat snapshot: a second snapshot of the same source after the
-#      first is terminal must produce a distinct id and reach Ready.
-#   5. Listing: `osb snapshot list --sandbox-id` must contain both
-#      required snapshots (and any accepted re-entry one) as Ready.
-#   6. Restore: `osb sandbox create --snapshot-id` (resource flags
-#      restating the pool profile) boots the artifact set published at
-#      dump time — the restored sandbox reaches Running and serves
-#      execd /ping through the gateway.
-#   7. Cleanup: kill the restored and source sandboxes and delete every
-#      snapshot row (the server forwards per-row artifact deletion).
-#
-# The snapshot ids are shared through SNAPSHOT_ID / SNAPSHOT_ID2 /
-# SNAPSHOT_EXTRA.
+#   1. Bootstrap: create WITHOUT a network policy; the sandbox registers
+#      default-allow (GET /networkpolicy reports mode=allow_all) and the
+#      guest reaches an allowed target.
+#   2. Deny rule #1 (PUT {defaultAction: allow, deny pypi.org}): the policy
+#      converges to enforcing with the deny rule; in-guest traffic —
+#      pypi.org BLOCKED, example.com still reachable (default-allow intact).
+#   3. Snapshot: `osb snapshot create` returns Creating; a re-entry snapshot
+#      during the dump window is fenced (409, or 202 during fence cache lag
+#      and resolved to a terminal phase); the row converges to Ready via the
+#      SandboxSnapshot CR watcher; the source stays Running + /ping-healthy.
+#   4. ARTIFACT (dump time): the published artifact set (the SandboxSnapshot
+#      CR's status.manifestRef directory) carries policy.json whose recorded
+#      policy is EXACTLY the dump-time one — defaultAction allow, egress
+#      == [deny pypi.org]; github.com is absent (not added yet).
+#   5. Deny rule #2 (PATCH merge deny github.com): enforcing with both
+#      denies; in-guest traffic — github.com now blocked too, example.com
+#      still reachable. Then the source sandbox is deleted.
+#   6. Restore: `osb sandbox create --snapshot-id` boots the published
+#      artifact set — the restored sandbox runs the DUMP-TIME policy: deny
+#      pypi.org still enforced, github.com REACHABLE AGAIN (the post-dump
+#      rule never entered the artifact set), example.com reachable.
+#   7. Deny rule #3 on the restored sandbox (PATCH deny github.com):
+#      enforced and traffic-blocked. The restored sandbox is deleted.
+#   8. Negative: PUT /networkpolicy on the DELETED sandbox id must be
+#      rejected with 404.
+#   9. Cleanup: every snapshot row is deleted (the server forwards per-row
+#      artifact deletion).
 #
 # Housekeeping: the artifact store is pruned at entry — stale checkpoint /
 # template sets are removed, the baseline golden template set and the
 # indexes pointing into it are preserved.
+#
+# The created snapshot id is shared through SNAPSHOT_ID; a re-entry
+# snapshot accepted during fence cache lag is tracked through SNAPSHOT_EXTRA.
 #
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
-# The snapshot verify stage shares the created snapshot ids through
-# SNAPSHOT_ID / SNAPSHOT_ID2.
+# The created snapshot id is shared through SNAPSHOT_ID.
 SNAPSHOT_ID=""
-SNAPSHOT_ID2=""
 # A re-entry snapshot accepted during fence cache lag (202) is tracked here
 # so its terminal outcome is asserted and it is cleaned up.
 SNAPSHOT_EXTRA=""
@@ -76,17 +91,100 @@ snapshot_terminal() { # <snapshot-id>
 	[[ "$state" == "Ready" || "$state" == "Failed" ]]
 }
 
+# --- policy view + in-guest traffic probes -----------------------------------------
+
+snapshot_policy_mode_is() { # <mode> — GET /networkpolicy reports <mode>
+	[[ "$(server_api GET "/sandboxes/$VERIFY_ID/networkpolicy" 2>/dev/null | jq -r '.mode // empty')" == "$1" ]]
+}
+
+snapshot_policy_rule_is() { # <target> <action> — a rule for <target> with <action>
+	server_api GET "/sandboxes/$VERIFY_ID/networkpolicy" 2>/dev/null | jq -e --arg t "$1" --arg a "$2" \
+		'([.policy.egress[]? | select(.target == $t)][0].action // "") == $a' >/dev/null
+}
+
+snapshot_policy_lacks_target() { # <target> — no rule for <target>
+	server_api GET "/sandboxes/$VERIFY_ID/networkpolicy" 2>/dev/null | jq -e --arg t "$1" \
+		'([.policy.egress[]? | select(.target == $t)] | length) == 0' >/dev/null
+}
+
+# In-guest traffic probe: execd POST /command through the signed gateway
+# route (the same surface the SDK's commands.run uses). The probe curls the
+# target from INSIDE the guest and echoes a marker; the raw SSE stream is
+# scanned for it, which survives any event framing.
+snapshot_guest_exec() { # <shell-snippet> -> raw SSE stream (best effort)
+	local route
+	route="$(osb_api sandbox endpoint "$VERIFY_ID" --port 44772 -o json 2>/dev/null \
+		| jq -r '.headers["OpenSandbox-Ingress-To"] // empty')"
+	[[ -n "$route" ]] || return 1
+	curl -sS -N -m 45 -H "OpenSandbox-Ingress-To: $route" -H "Content-Type: application/json" \
+		-d "$(jq -n --arg c "$1" '{command: $c, timeout: 30000}')" \
+		"$GATEWAY_URL/command" 2>/dev/null
+}
+
+snapshot_traffic_reachable() { # <target> — the guest can complete https://<target>
+	local out
+	out="$(snapshot_guest_exec "curl -fsS -m 10 -o /dev/null https://$1 && echo PROBE_REACHABLE || echo PROBE_BLOCKED")" || return 1
+	[[ "$out" == *"PROBE_REACHABLE"* ]]
+}
+
+snapshot_traffic_blocked() { # <target> — the guest cannot complete https://<target>
+	local out
+	out="$(snapshot_guest_exec "curl -fsS -m 10 -o /dev/null https://$1 && echo PROBE_REACHABLE || echo PROBE_BLOCKED")" || return 1
+	[[ "$out" == *"PROBE_BLOCKED"* ]]
+}
+
+# --- artifact probes ---------------------------------------------------------------
+
+# The SandboxSnapshot CR name is deterministic: osb-snap-<uuid hex without
+# dashes> (server/sandbox_snapshot naming), with the raw id in a label.
+snapshot_cr_name() { # <snapshot-id> -> CR object name
+	printf 'osb-snap-%s' "$(printf '%s' "$1" | tr -d '-')"
+}
+
+# status.manifestRef points at the published manifest.json (Succeeded only);
+# the recorded policy file sits next to it in the artifact set.
+snapshot_bundle_policy() { # -> the snapshot set's policy.json envelope
+	local ref key
+	ref="$(kubectl_get "sandboxsnapshot/$(snapshot_cr_name "$SNAPSHOT_ID")" '{.status.manifestRef}' 2>/dev/null)" || return 1
+	[[ "$ref" == "s3://$RUSTFS_BUCKET/publish/"* ]] || return 1
+	key="${ref#s3://$RUSTFS_BUCKET/publish/}"
+	key="${key%/*}/policy.json"
+	rc cat "chain/$RUSTFS_BUCKET/publish/$key" 2>/dev/null
+}
+
+snapshot_bundle_policy_is() { # <jq filter> — assert on the envelope
+	snapshot_bundle_policy | jq -e "$1" >/dev/null
+}
+
+# Status-code-returning server_api for negative-path assertions.
+snapshot_api_status() { # method path [json-body] -> http status
+	local method="$1" path="$2" body="${3:-}" out
+	if [[ -n "$body" ]]; then
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-H "Content-Type: application/json" -d "$body" -w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	else
+		out="$(curl -sS -m 60 -X "$method" -H "OPEN-SANDBOX-API-KEY: $SERVER_API_KEY" \
+			-w '\n%{http_code}' "$SERVER_URL$path" 2>/dev/null)"
+	fi
+	printf '%s' "${out##*$'\n'}"
+}
+
+# --- the verify ---------------------------------------------------------------------
+
 snapshot_verify() {
-	# Full round trip on the live stack: snapshot a Running sandbox, watch it
-	# to Ready, restore a NEW sandbox from the snapshotId and boot it. Also
-	# covers re-entry fencing, source-sandbox survival, and a repeat snapshot.
+	# Test shape: a policy-less sandbox gains deny rules over a default-allow
+	# bootstrap; the snapshot must carry the recorded policy at dump time;
+	# the restored sandbox must run EXACTLY that policy (post-dump rules out);
+	# rule updates on a deleted sandbox must be rejected with 404.
 	local created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
 	# Snapshot sets are multi-GiB: drop stale ones from earlier runs before
 	# this verify adds its own (baseline template kept).
 	prune_artifact_store
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
-	log "verify (snapshot): creating the source sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+
+	# --- Stage A: policy-less source -> deny rule #1 -> snapshot -----------------
+	log "verify (snapshot): creating a sandbox WITHOUT a network policy via the opensandbox CLI (templateId=$TEMPLATE_ID)"
 	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
 		--metadata origin=fast-sandbox-env-snapshot --skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create failed against $SERVER_URL"
@@ -98,10 +196,29 @@ snapshot_verify() {
 	t1="$(now_ms)"
 	log "verify (snapshot): source sandbox $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
 
+	# Bootstrap: a policy-less create seeds a default-allow egress binding
+	# (registration is the point), so the policy surface is live and open.
+	wait_for "policy-less sandbox bootstraps default-allow (mode=allow_all)" 60 \
+		snapshot_policy_mode_is allow_all
+	wait_for "guest reaches example.com under the bootstrap policy" 120 \
+		snapshot_traffic_reachable example.com
+	pass "policy-less source: default-allow bootstrap live (mode=allow_all, example.com reachable)"
+
+	# Deny rule #1 via full replace: default-allow + a single deny target —
+	# a deny rule is only meaningful when the default is allow.
+	local put_body
+	put_body="$(jq -n '{defaultAction: "allow", egress: [{action: "deny", target: "pypi.org"}]}')"
+	server_api PUT "/sandboxes/$VERIFY_ID/networkpolicy" "$put_body" >/dev/null \
+		|| fail "PUT networkpolicy (deny pypi.org) failed for $VERIFY_ID"
+	wait_for "deny pypi.org recorded and enforcing" 120 snapshot_policy_rule_is pypi.org deny
+	wait_for "guest blocked from pypi.org" 180 snapshot_traffic_blocked pypi.org
+	wait_for "guest still reaches example.com (default-allow intact)" 120 \
+		snapshot_traffic_reachable example.com
+	pass "deny rule #1 live: pypi.org blocked, example.com reachable (default-allow)"
+
 	# 1. Snapshot create returns Creating; the row converges from the
 	# SandboxSnapshot CR via the server watcher.
 	log "verify (snapshot): osb snapshot create $source_id --name env-verify"
-	t1="$(now_ms)"
 	out="$(osb_api snapshot create "$source_id" --name env-verify -o json 2>/dev/null)" \
 		|| fail "snapshot create failed for $source_id"
 	SNAPSHOT_ID="$(printf '%s' "$out" | jq -r '.id')"
@@ -138,51 +255,46 @@ snapshot_verify() {
 	pass "snapshot: create -> Creating -> watcher -> Ready"
 
 	# 3. Source survival: Running + /ping again after the terminal phase.
-	VERIFY_ID="$source_id"
 	wait_for "source sandbox Running again after the snapshot" 120 sandbox_running
 	wait_for "source sandbox execd /ping 200 after the snapshot" 100 execd_ping_ok
 	pass "snapshot: source sandbox survived (Running + /ping 200)"
 
-	# 3b. An accepted re-entry snapshot must reach a terminal phase; a stuck
-	# one would block all future snapshots via the re-entry fence.
-	if [[ -n "$SNAPSHOT_EXTRA" ]]; then
-		wait_for "re-entry snapshot $SNAPSHOT_EXTRA reaches a terminal phase" 150 snapshot_terminal "$SNAPSHOT_EXTRA"
-		log "verify (snapshot): re-entry snapshot $SNAPSHOT_EXTRA terminal: $(osb_api snapshot get "$SNAPSHOT_EXTRA" -o json 2>/dev/null | jq -r '.status.state')"
-		pass "snapshot: accepted re-entry snapshot resolved to a terminal phase"
-	fi
+	# 4. ARTIFACT (dump time): the published set carries the recorded policy
+	# file with EXACTLY the policy at dump time — rule #2 does not exist yet.
+wait_for "snapshot artifact carries policy.json (defaultAction allow)" 60 \
+	snapshot_bundle_policy_is '.defaultAction == "allow"'
+wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
+	snapshot_bundle_policy_is '.policy == {defaultAction: "allow", egress: [{action: "deny", target: "pypi.org"}]}'
+	pass "snapshot artifact carries the dump-time recorded policy (policy.json: allow + deny pypi.org only)"
 
-	# 4. Second snapshot once the first is terminal: fresh id.
-	t3="$(now_ms)"
-	out="$(osb_api snapshot create "$source_id" --name env-verify-2 -o json 2>/dev/null)" \
-		|| fail "second snapshot create failed for $source_id"
-	snapshot_id2="$(printf '%s' "$out" | jq -r '.id')"
-	[[ -n "$snapshot_id2" && "$snapshot_id2" != "null" && "$snapshot_id2" != "$SNAPSHOT_ID" ]] \
-		|| fail "second snapshot did not produce a distinct id: $snapshot_id2"
-	SNAPSHOT_ID2="$snapshot_id2"
-	wait_for "poll osb snapshot get $snapshot_id2 until Ready" 300 snapshot_ready "$snapshot_id2"
-	t4="$(now_ms)"
-	log "verify (snapshot): $snapshot_id2 second snapshot create->Ready $(( (t4 - t3) / 1000000 ))ms"
-	pass "snapshot: repeated snapshot of the same sandbox -> Ready (distinct id)"
+	# 5. Deny rule #2 AFTER the dump: merged via PATCH; the source sandbox
+	# blocks github.com too, then is deleted per the test shape.
+	local patch_body
+	patch_body='[{"action": "deny", "target": "github.com"}]'
+	server_api PATCH "/sandboxes/$VERIFY_ID/networkpolicy" "$patch_body" >/dev/null \
+		|| fail "PATCH networkpolicy (deny github.com) failed for $VERIFY_ID"
+	wait_for "deny github.com recorded and enforcing" 120 snapshot_policy_rule_is github.com deny
+	wait_for "guest blocked from github.com" 180 snapshot_traffic_blocked github.com
+	wait_for "guest still reaches example.com after rule #2" 120 \
+		snapshot_traffic_reachable example.com
+	pass "deny rule #2 live post-dump: github.com blocked (source only)"
 
-	# 5. Listing: sandboxId scoping returns both required snapshots, both
-	# Ready (an accepted re-entry snapshot may add a third, terminal row).
+	# 5b. Listing: sandboxId scoping returns the snapshot as Ready.
 	out="$(osb_api snapshot list --sandbox-id "$source_id" --page-size 50 -o json 2>"$WORK/last-snapshot-list.err")" \
 		|| fail "snapshot list failed for $source_id: $(head -c 400 "$WORK/last-snapshot-list.err" 2>/dev/null)"
-	[[ "$(printf '%s' "$out" | jq -r --arg id "$SNAPSHOT_ID" --arg id2 "$snapshot_id2" \
-		'[.items[] | select((.id == $id or .id == $id2) and .status.state == "Ready")] | length')" == "2" ]] \
-		|| fail "snapshot list does not contain both required snapshots as Ready: $(printf '%s' "$out" | head -c 400)"
-	if [[ -n "$SNAPSHOT_EXTRA" ]]; then
-		[[ "$(printf '%s' "$out" | jq -r --arg id "$SNAPSHOT_EXTRA" \
-			'[.items[] | select(.id == $id)] | length')" == "1" ]] \
-			|| fail "accepted re-entry snapshot $SNAPSHOT_EXTRA missing from the list"
-	fi
-	pass "snapshot: list scoped by sandboxId contains the snapshots (Ready)"
+	[[ "$(printf '%s' "$out" | jq -r --arg id "$SNAPSHOT_ID" \
+		'[.items[] | select(.id == $id and .status.state == "Ready")] | length')" == "1" ]] \
+		|| fail "snapshot list does not contain $SNAPSHOT_ID as Ready: $(printf '%s' "$out" | head -c 400)"
+	pass "snapshot: list scoped by sandboxId contains the snapshot (Ready)"
 
-	# 6. Restore: the row resolves to the published template index key; the
-	# resource flags restate the pool profile (firecracker pool).
+	# 5c. Delete the source sandbox (the snapshot outlives it).
+	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $source_id failed"
+	wait_for "snapshot source sandbox deleted" 120 verify_sandbox_gone
+
+	# --- Stage B: restore from the snapshot --------------------------------------
 	local restored
 	log "verify (snapshot): osb sandbox create --snapshot-id $SNAPSHOT_ID (pool profile restated)"
-	t3="$(now_ms)"
 	restored="$(osb_api sandbox create --snapshot-id "$SNAPSHOT_ID" --timeout 1h \
 		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
 		--skip-health-check -o json 2>/dev/null)" \
@@ -191,25 +303,44 @@ snapshot_verify() {
 	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "restore create carried no id"
 	VERIFY_ID="$restore_id"
 	wait_for "restored sandbox Running" 600 sandbox_running
-	t4="$(now_ms)"
 	wait_for "restored execd /ping 200 through the gateway" 300 execd_ping_ok
-	log "verify (snapshot): restored $restore_id create->Running $(( (t4 - t3) / 1000000 ))ms"
-	pass "snapshot: restore -> sandbox boots the published artifact set -> execd /ping OK"
+	# The restored sandbox runs the DUMP-TIME policy: the bundle is delivered
+	# to egress (POLICY_IMPORT) before the data plane is ready.
+	wait_for "restored sandbox enforcing the dump-time deny (pypi.org)" 120 \
+		snapshot_policy_rule_is pypi.org deny
+	wait_for "restored sandbox has no post-dump rule (github.com absent)" 60 \
+		snapshot_policy_lacks_target github.com
+	wait_for "restored guest still blocked from pypi.org" 180 snapshot_traffic_blocked pypi.org
+	wait_for "restored guest reaches github.com AGAIN (post-dump rule not in the artifact set)" 180 \
+		snapshot_traffic_reachable github.com
+	wait_for "restored guest reaches example.com" 120 snapshot_traffic_reachable example.com
+	pass "restore: dump-time policy live (pypi.org blocked, github.com reachable again, example.com fine)"
 
-	# 7. Cleanup; the server forwards artifact deletion per snapshot row.
+	# 7. Deny rule #3 on the restored sandbox: github.com denied and blocked.
+	server_api PATCH "/sandboxes/$VERIFY_ID/networkpolicy" "$patch_body" >/dev/null \
+		|| fail "PATCH networkpolicy (deny github.com) failed for the restored sandbox"
+	wait_for "restored sandbox enforcing deny github.com" 120 snapshot_policy_rule_is github.com deny
+	wait_for "restored guest blocked from github.com" 180 snapshot_traffic_blocked github.com
+	pass "deny rule #3 live on the restored sandbox: github.com blocked"
+
+	# 8. Negative: updating rules on a DELETED sandbox must be rejected (404).
 	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
 		|| log "verify cleanup: kill $restore_id failed"
 	wait_for "restored sandbox deleted" 120 verify_sandbox_gone
-	VERIFY_ID="$source_id"
-	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
-		|| log "verify cleanup: kill $source_id failed"
-	wait_for "snapshot source sandbox deleted" 120 verify_sandbox_gone
-	for snapshot_id in "$SNAPSHOT_ID" "$SNAPSHOT_ID2" "$SNAPSHOT_EXTRA"; do
+	local neg_body neg_code
+	neg_body="$(jq -n '{defaultAction: "allow", egress: [{action: "deny", target: "example.com"}]}')"
+	neg_code="$(snapshot_api_status PUT "/sandboxes/$restore_id/networkpolicy" "$neg_body")"
+	[[ "$neg_code" == "404" ]] \
+		|| fail "networkpolicy update on the deleted sandbox returned $neg_code, expected 404"
+	pass "policy update on the deleted sandbox rejected (404)"
+
+	# 9. Cleanup; the server forwards artifact deletion per snapshot row.
+	for snapshot_id in "$SNAPSHOT_ID" "$SNAPSHOT_EXTRA"; do
 		[[ -n "$snapshot_id" ]] || continue
 		osb_api snapshot delete "$snapshot_id" >/dev/null 2>&1 \
 			|| log "verify cleanup: snapshot delete $snapshot_id failed"
 	done
-	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
+	pass "snapshot: cleanup (source + restored sandboxes deleted, snapshot rows removed)"
 }
 
 # --- standalone entry ----------------------------------------------------------------
