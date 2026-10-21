@@ -247,16 +247,13 @@ func buildPTYCommand(command string) *exec.Cmd {
 	return exec.Command(shell, args...)
 }
 
-// defaultPTYTerm is the terminal type assumed for PTY sessions when the
-// resolved environment carries no TERM. Interactive programs (ls, vim, top)
-// consult TERM to decide whether colors and terminfo capabilities are safe
-// to use; execd runs as a daemon whose environment normally lacks it.
+// defaultPTYTerm backs the TERM default in ptySessionEnv: execd runs as a
+// daemon whose environment normally carries no TERM, which makes interactive
+// programs disable colors and terminfo features.
 const defaultPTYTerm = "xterm-256color"
 
-// ptySessionEnv returns the user process environment for a PTY session,
-// defaulting TERM when absent or empty (an empty TERM makes programs behave
-// as if terminfo were unavailable). Pipe mode deliberately does not get this
-// default: its side is not a terminal, so advertising one would be wrong.
+// ptySessionEnv returns the user process environment with TERM defaulted for
+// the interactive PTY side; pipe mode is not a terminal and gets no default.
 func ptySessionEnv() []string {
 	env := UserProcessEnvironment()
 	for i, kv := range env {
@@ -286,8 +283,7 @@ func (s *ptySession) StartPTY() error {
 
 	cmd := buildPTYCommand(s.command)
 	// Resolve through the shared user-env layering (sandbox binding envs from
-	// /init < EXECD_ENVS file) instead of inheriting execd's raw environment,
-	// and make sure the interactive shell has a usable terminal type.
+	// /init < EXECD_ENVS file) instead of inheriting execd's raw environment.
 	cmd.Env = ptySessionEnv()
 	if s.cwd != "" {
 		cmd.Dir = s.cwd

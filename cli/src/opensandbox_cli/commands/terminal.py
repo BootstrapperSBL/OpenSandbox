@@ -12,15 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Interactive terminal into a sandbox via the execd PTY WebSocket protocol.
+"""Interactive terminal into a sandbox over the execd PTY WebSocket.
 
-Frame formats (see components/execd/PTY.md):
-
-- Client -> Server binary: ``0x00`` + raw stdin bytes.
-- Server -> Client binary: ``0x01`` stdout, ``0x02`` stderr (pipe mode only),
-  ``0x03`` replay (8-byte big-endian offset followed by raw bytes).
-- JSON text frames carry ``connected`` / ``exit`` / ``error`` / ``pong`` from
-  the server, and ``resize`` / ``signal`` / ``ping`` from the client.
+Frame protocol is defined in components/execd/PTY.md.
 """
 
 from __future__ import annotations
@@ -63,7 +57,6 @@ class WSDuplex(Protocol):
 
 
 def _ws_scheme(protocol: str) -> str:
-    """Map the configured HTTP protocol to its WebSocket scheme."""
     return "wss" if protocol == "https" else "ws"
 
 
@@ -79,7 +72,6 @@ def _create_pty_session(
     workdir: str | None,
     timeout: timedelta,
 ) -> str:
-    """Create an execd PTY session and return its session id."""
     body: dict[str, str] = {}
     if workdir:
         body["cwd"] = workdir
@@ -119,7 +111,6 @@ def _delete_pty_session(
 
 @contextmanager
 def _raw_mode(fd: int) -> Iterator[None]:
-    """Put the local TTY into raw mode and always restore it."""
     import termios
     import tty
 
@@ -132,11 +123,7 @@ def _raw_mode(fd: int) -> Iterator[None]:
 
 
 def _posix_tty_io() -> tuple[ReadFn, WriteFn, SizeFn, int]:
-    """Build IO callables bound to the process TTY (POSIX only).
-
-    Returns the stdin reader, stdout writer, terminal-size getter, and the
-    stdin file descriptor used for raw mode and size queries.
-    """
+    """Build TTY stdin/stdout/size hooks plus the stdin fd for raw mode."""
     stdin_fd = sys.stdin.fileno()
     stdout: IO[bytes] = sys.stdout.buffer
 
@@ -176,11 +163,7 @@ async def stream_pty(
     stdin_read: ReadFn,
     stdout_write: WriteFn,
 ) -> tuple[int | None, list[str]]:
-    """Relay frames between the WebSocket and the local terminal.
-
-    Returns the remote exit code (``None`` when the connection ended without
-    an ``exit`` frame) plus any ``error`` frame messages sent by the server.
-    """
+    """Relay frames; the exit code is ``None`` without an ``exit`` frame."""
     exit_code: int | None = None
     errors: list[str] = []
 
@@ -209,12 +192,10 @@ async def stream_pty(
 
     stdin_task = asyncio.create_task(_pump_stdin(ws, stdin_read))
     try:
-        # Let the stdin pump start first so pending keystrokes are forwarded
-        # before the server-side read loop runs to completion.
+        # Give the stdin pump a head start before the read loop drains frames.
         await asyncio.sleep(0)
-        # Drive the relay from the server side: the loop ends on the ``exit``
-        # frame or when the connection closes. A local stdin EOF must not cut
-        # the output stream, so the stdin pump is simply reaped afterwards.
+        # A local stdin EOF must not cut the output stream: reap the pump and
+        # keep reading until the server sends ``exit`` or closes.
         await read_ws()
     finally:
         stdin_task.cancel()
@@ -263,7 +244,6 @@ async def _connect_and_stream(
 
 
 def _require_posix_tty() -> None:
-    """Fail fast when the local side cannot drive an interactive terminal."""
     if os.name != "posix":
         raise click.ClickException(
             "osb terminal is only supported on Unix, macOS, and Linux."
@@ -333,8 +313,8 @@ def terminal(
     except (OSError, websockets.WebSocketException) as exc:
         raise click.ClickException(f"Terminal connection failed: {exc}") from exc
     finally:
-        # Only clean up when the shell exited on its own; an interrupted
-        # session keeps running server-side and could be inspected later.
+        # A clean shell exit tears the session down; an interrupted connection
+        # leaves it running (shell alive, replay retained) for inspection.
         if teardown:
             _delete_pty_session(http_base, headers, session_id, timeout=timeout)
 
