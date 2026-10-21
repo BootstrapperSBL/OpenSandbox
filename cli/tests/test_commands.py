@@ -31,6 +31,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import websockets
 from click.testing import CliRunner
 from opensandbox.exceptions import SandboxApiException
 from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
@@ -2705,8 +2706,25 @@ class TestTerminal:
         )
 
         assert result.exit_code == 1
-        assert "closed before the shell exited" in result.stderr
+        assert "kept on the sandbox: sess-1" in result.stderr
+        assert "DELETE http://execd.example:44772/pty/sess-1" in result.stderr
         delete.assert_not_called()
+
+    def test_startup_failure_deletes_session_and_reports_error(
+        self, runner: CliRunner
+    ) -> None:
+        incoming = ['{"type":"error","code":"START_FAILED","error":"no such dir"}']
+
+        result, _, _, delete, _, _ = _invoke_terminal(
+            runner,
+            ["terminal", "sbx-1"],
+            incoming=incoming,
+        )
+
+        assert result.exit_code == 1
+        assert "Shell startup failed" in result.stderr
+        assert "no such dir" in result.stderr
+        assert delete.call_args.args[2] == "sess-1"
 
     def test_server_error_frames_are_reported_on_stderr(
         self, runner: CliRunner
@@ -2753,6 +2771,42 @@ class TestStdinReader:
 
 
 class TestStreamPTY:
+    def test_abnormal_close_preserves_collected_error_frames(self) -> None:
+        class _AbnormalCloseWS(_FakePTYWebSocket):
+            async def __anext__(self) -> object:
+                try:
+                    return await super().__anext__()
+                except StopAsyncIteration:
+                    # execd closes without a WebSocket close frame on startup
+                    # failure; the error frame must not be lost.
+                    raise websockets.ConnectionClosedError(None, None) from None
+
+        async def scenario():
+            ws = _AbnormalCloseWS(
+                [
+                    '{"type":"error","code":"START_FAILED","error":"no such dir"}',
+                    b"\x01partial",
+                ]
+            )
+
+            async def stdin_read() -> bytes:
+                return b""
+
+            chunks = bytearray()
+            streamed = bytearray()
+            result = await stream_pty(
+                ws,
+                stdin_read=stdin_read,
+                stdout_write=chunks.extend,
+                error_write=streamed.extend,
+            )
+            return result, bytes(chunks), bytes(streamed)
+
+        (exit_code, errors), written, streamed = asyncio.run(scenario())
+        assert (exit_code, errors) == (None, ["no such dir"])
+        assert written == b"partial"
+        assert streamed == b"no such dir\r\n"
+
     def test_error_frames_are_collected_and_exit_code_returned(self) -> None:
         async def scenario() -> tuple[int | None, list[str]]:
             ws = _FakePTYWebSocket(

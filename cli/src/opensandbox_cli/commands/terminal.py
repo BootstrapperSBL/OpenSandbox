@@ -196,6 +196,7 @@ async def stream_pty(
     *,
     stdin_read: ReadFn,
     stdout_write: WriteFn,
+    error_write: WriteFn | None = None,
     send_lock: asyncio.Lock | None = None,
 ) -> tuple[int | None, list[str]]:
     """Relay frames; the exit code is ``None`` without an ``exit`` frame."""
@@ -204,26 +205,36 @@ async def stream_pty(
 
     async def read_ws() -> None:
         nonlocal exit_code
-        async for message in ws:
-            if isinstance(message, bytes) and message:
-                kind, payload = message[0], message[1:]
-                if kind == BIN_REPLAY:
-                    if len(payload) <= 8:
+        try:
+            async for message in ws:
+                if isinstance(message, bytes) and message:
+                    kind, payload = message[0], message[1:]
+                    if kind == BIN_REPLAY:
+                        if len(payload) <= 8:
+                            continue
+                        payload = payload[8:]
+                    if payload and kind in (BIN_STDOUT, BIN_STDERR, BIN_REPLAY):
+                        stdout_write(payload)
+                elif isinstance(message, str):
+                    try:
+                        frame = json.loads(message)
+                    except json.JSONDecodeError:
                         continue
-                    payload = payload[8:]
-                if payload and kind in (BIN_STDOUT, BIN_STDERR, BIN_REPLAY):
-                    stdout_write(payload)
-            elif isinstance(message, str):
-                try:
-                    frame = json.loads(message)
-                except json.JSONDecodeError:
-                    continue
-                frame_type = frame.get("type")
-                if frame_type == "exit":
-                    exit_code = int(frame.get("exit_code") or 0)
-                    return
-                if frame_type == "error":
-                    errors.append(str(frame.get("error") or "unknown error"))
+                    frame_type = frame.get("type")
+                    if frame_type == "exit":
+                        exit_code = int(frame.get("exit_code") or 0)
+                        return
+                    if frame_type == "error":
+                        message = str(frame.get("error") or "unknown error")
+                        errors.append(message)
+                        if error_write is not None:
+                            # The terminal is in raw mode: CRLF, not LF.
+                            error_write(message.encode() + b"\r\n")
+        except websockets.ConnectionClosed:
+            # Abnormal close: keep the collected exit state and errors so the
+            # caller can surface them (e.g. execd's START_FAILED closes
+            # without a WebSocket close frame).
+            pass
 
     stdin_task = asyncio.create_task(
         _pump_stdin(ws, send_lock or asyncio.Lock(), stdin_read)
@@ -247,6 +258,7 @@ async def _connect_and_stream(
     stdin_read: ReadFn,
     stdout_write: WriteFn,
     get_size: SizeFn,
+    error_write: WriteFn | None = None,
 ) -> tuple[int | None, list[str]]:
     """Connect to the PTY WebSocket, drive the relay loop, handle resize."""
     async with websockets.connect(ws_url, additional_headers=headers or None) as ws:
@@ -287,6 +299,7 @@ async def _connect_and_stream(
                 ws,
                 stdin_read=stdin_read,
                 stdout_write=stdout_write,
+                error_write=error_write,
                 send_lock=send_lock,
             )
         finally:
@@ -341,7 +354,13 @@ def terminal(
     )
 
     stdin_read, stdout_write, get_size, stdin_fd = _posix_tty_io()
-    error_write = sys.stderr.buffer.write
+
+    def report_error(data: bytes) -> None:
+        # CRLF line endings are added by the sender: the terminal is in raw
+        # mode, where a bare LF does not return the carriage.
+        sys.stderr.buffer.write(data)
+        sys.stderr.buffer.flush()
+
     exit_code: int | None = None
     errors: list[str] = []
     teardown = False
@@ -354,9 +373,10 @@ def terminal(
                     stdin_read=stdin_read,
                     stdout_write=stdout_write,
                     get_size=get_size,
+                    error_write=report_error,
                 )
             )
-        teardown = exit_code is not None
+        teardown = exit_code is not None or bool(errors)
     except websockets.InvalidStatus as exc:
         raise click.ClickException(
             f"The execd refused the terminal connection: {exc}"
@@ -364,16 +384,21 @@ def terminal(
     except (OSError, websockets.WebSocketException) as exc:
         raise click.ClickException(f"Terminal connection failed: {exc}") from exc
     finally:
-        # A clean shell exit tears the session down; an interrupted connection
-        # leaves it running (shell alive, replay retained) for inspection.
+        # Clean exit tears the session down, as does a reported failure (e.g.
+        # START_FAILED: the shell never ran, so there is nothing to preserve).
+        # A lost connection on a live shell is the one case worth keeping.
         if teardown:
             _delete_pty_session(http_base, headers, session_id, timeout=timeout)
 
-    for message in errors:
-        error_write(message.encode() + b"\n")
-        sys.stderr.buffer.flush()
     if exit_code is None:
-        raise click.ClickException(
-            "The terminal connection closed before the shell exited."
+        if errors:
+            raise click.ClickException("Shell startup failed: " + "; ".join(errors))
+        sys.stderr.write(
+            "Warning: the terminal connection closed before the shell exited.\n"
+            f"The PTY session was kept on the sandbox: {session_id}\n"
+            f"  status: GET    {http_base}/pty/{session_id}\n"
+            f"  remove: DELETE {http_base}/pty/{session_id}\n"
         )
+        sys.stderr.flush()
+        raise click.ClickException("Terminal connection lost.")
     sys.exit(exit_code)

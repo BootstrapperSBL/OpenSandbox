@@ -303,7 +303,7 @@ osb terminal <sandbox-id>
 osb terminal <sandbox-id> -w /workspace
 ```
 
-Requires an interactive TTY, and is supported on Unix, macOS, and Linux. If the connection drops while the shell is still running, the session is kept server-side so it can still be inspected; a clean exit tears the session down.
+Requires an interactive TTY, and is supported on Unix, macOS, and Linux. If the connection drops while the shell is still running, the session is kept server-side and its id is printed so it can be inspected or removed via the execd API; a clean exit tears the session down.
 
 ### Work with files
 
