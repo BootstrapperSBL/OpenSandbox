@@ -116,12 +116,31 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 	reg := subject.NewRegistry(alwaysDeny, alwaysAllow)
 	fastSandboxSrv := newFastSandboxPolicyServer(ctx, reg, podNft)
 
+	// Register the configured state-directory basenames BEFORE either
+	// constructor runs: the volume-root restriction must recognize the
+	// configured sibling as ours even on custom-named deployments.
+	vaultDir := strings.TrimSpace(os.Getenv(constants.EnvEgressVaultDir))
+	policyDir := strings.TrimSpace(os.Getenv(constants.EnvEgressPolicyDir))
+	if policyDir == "" {
+		log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR is required (the recorded policy is egress-held state)")
+	}
+	registerStateDirName(vaultDir)
+	registerStateDirName(policyDir)
+	// The two state directories are siblings holding same-named per-subject
+	// files (<uid>.json) and seal markers: aliasing them would make each
+	// persister clobber the other's state (a restart-time rehydrate of one
+	// kind quarantines the other kind's file). Reject before any state is
+	// written.
+	if vaultDir != "" && policyDir != "" && sameStateDir(vaultDir, policyDir) {
+		log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR must differ from OPENSANDBOX_EGRESS_VAULT_DIR (both resolve to %s)", policyDir)
+	}
+
 	// Vault persistence (OSEP-0022 stage 2): per-subject vault files under
 	// OPENSANDBOX_EGRESS_VAULT_DIR so an egress restart recovers locally at
 	// SET_BINDING replay. Empty/unset keeps the vault memory-only. Fail fast
 	// on an unusable directory: silently serving memory-only would break the
 	// acked ⇒ durable contract.
-	if vaultDir := strings.TrimSpace(os.Getenv(constants.EnvEgressVaultDir)); vaultDir != "" {
+	if vaultDir != "" {
 		vp, err := newVaultPersistence(vaultDir)
 		if err != nil {
 			log.Fatalf("fast-sandbox vault persistence: %v", err)
@@ -130,35 +149,6 @@ func runFastSandboxProfile(ctx context.Context, upstreamSpec *mitmproxy.Upstream
 		log.Infof("fast-sandbox vault persistence enabled at %s (one file per subject, atomic commit protocol)", vaultDir)
 	}
 
-	// Policy persistence: REQUIRED for the fast-sandbox profile. Per-subject
-	// policy files under OPENSANDBOX_EGRESS_POLICY_DIR make the recorded
-	// policy egress-held state — an egress restart recovers it locally at
-	// SET_BINDING replay (the committed file supersedes the replayed binding
-	// input) and the POLICY_EXPORT / POLICY_IMPORT snapshot transfer carries
-	// it across pause/resume. There is no memory-only posture: the binding
-	// input must never become a policy recovery source, so an unusable
-	// directory fails startup.
-	policyDir := strings.TrimSpace(os.Getenv(constants.EnvEgressPolicyDir))
-	if policyDir == "" {
-		log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR is required (the recorded policy is egress-held state)")
-	}
-	// Register the configured state-directory basenames BEFORE either
-	// constructor runs: the volume-root restriction must recognize the
-	// configured sibling as ours even on custom-named deployments.
-	registerStateDirName(policyDir)
-	if vaultDir := strings.TrimSpace(os.Getenv(constants.EnvEgressVaultDir)); vaultDir != "" {
-		registerStateDirName(vaultDir)
-	}
-	// The two state directories are siblings holding same-named per-subject
-	// files (<uid>.json) and seal markers: aliasing them would make each
-	// persister clobber the other's state (a restart-time rehydrate of one
-	// kind quarantines the other kind's file). Reject before any state is
-	// written.
-	if vaultDir := strings.TrimSpace(os.Getenv(constants.EnvEgressVaultDir)); vaultDir != "" {
-		if sameStateDir(vaultDir, policyDir) {
-			log.Fatalf("fast-sandbox policy persistence: OPENSANDBOX_EGRESS_POLICY_DIR must differ from OPENSANDBOX_EGRESS_VAULT_DIR (both resolve to %s)", policyDir)
-		}
-	}
 	pp, err := newPolicyPersistence(policyDir)
 	if err != nil {
 		log.Fatalf("fast-sandbox policy persistence: %v", err)

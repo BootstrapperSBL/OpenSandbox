@@ -80,8 +80,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Fsb - the sandbox is paused; its recorded policy is
-            sealed until resume.
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':

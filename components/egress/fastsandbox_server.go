@@ -91,8 +91,9 @@ type fastSandboxPolicyServer struct {
 	// pendingPolicies (denying subjects); this entry carries only the
 	// bookkeeping the vault entry carries for vault state.
 	policies map[subject.Subject]*policyEntry
-	// policyFiles owns the per-subject policy files; nil keeps the policy
-	// memory-only (the default).
+	// policyFiles owns the per-subject policy files. Always non-nil in the
+	// fast-sandbox profile (startup fails without it); nil only in unit
+	// tests that assemble the server directly.
 	policyFiles *policyPersistence
 	// policyRecovery is the policy persistence recovery latch (same
 	// mechanics as vaultRecovery).

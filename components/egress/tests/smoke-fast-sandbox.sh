@@ -474,7 +474,7 @@ case "${http_code}" in
   301|307|308) ;; # redirects into the /policy/{uid} relay subtree
   *) fail "bare /policy must redirect into the relay subtree, got ${http_code}" ;;
 esac
-location="$(curl -s -o /dev/null -w '%{header_json}' "http://127.0.0.1:${POLICY_PORT}/policy" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("location","")[0])' 2>/dev/null || true)"
+location="$(curl -s -D - -o /dev/null "http://127.0.0.1:${POLICY_PORT}/policy" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
 [ "${location}" = "/policy/" ] || fail "bare /policy redirect target must be /policy/, got ${location:-none}"
 pass "superseded proxy-route surfaces removed (relay surfaces only)"
 

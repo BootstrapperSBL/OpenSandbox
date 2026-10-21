@@ -134,6 +134,11 @@ def _relay_get_full(service, sandbox_id: str) -> dict:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Network policy relay record is missing the policy body.",
         )
+    if not isinstance(state.get("revision"), int):
+        raise policy_relay_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "Network policy relay record is missing the revision.",
+        )
     return state
 
 
