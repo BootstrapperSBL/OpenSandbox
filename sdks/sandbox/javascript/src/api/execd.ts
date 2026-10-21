@@ -1425,6 +1425,11 @@ export interface components {
              */
             execution_count?: number;
             /**
+             * @description Successful foreground POST /command process exit status (0), present only on its execution_complete event after the process has exited. Omitted for background startup acknowledgements, code execution, and other events. Absence does not imply success; older servers omit this field. Non-zero command exits use error.exit_code instead.
+             * @example 0
+             */
+            exit_code?: number;
+            /**
              * Format: int64
              * @description Execution duration in milliseconds
              * @example 150

@@ -2737,6 +2737,10 @@ components:
           type: integer
           description: Cell execution number in the session
           example: 1
+        exit_code:
+          type: integer
+          description: "Successful foreground POST /command process exit status (0), present only on its execution_complete event after the process has exited. Omitted for background startup acknowledgements, code execution, and other events. Absence does not imply success; older servers omit this field. Non-zero command exits use error.exit_code instead."
+          example: 0
         execution_time:
           type: integer
           format: int64

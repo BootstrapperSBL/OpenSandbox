@@ -77,9 +77,14 @@ func (c *CodeInterpretingController) RunCommand() {
 			close(completeCh)
 		})
 	}
-	origComplete := eventsHandler.OnExecuteComplete
 	eventsHandler.OnExecuteComplete = func(executionTime time.Duration) {
-		origComplete(executionTime)
+		var exitCode *int
+		if !request.Background {
+			// The foreground runtime invokes this hook only after a successful wait.
+			code := 0
+			exitCode = &code
+		}
+		c.writeExecutionComplete(executionTime, exitCode)
 		recordExecution("success")
 		signalComplete()
 	}
