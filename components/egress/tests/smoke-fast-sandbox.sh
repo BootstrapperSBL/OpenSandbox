@@ -204,6 +204,20 @@ relay_put_policy() {
   esac
 }
 
+# relay_get_policy <uid> <name>: echoes the recorded policy document.
+relay_get_policy() {
+  curl -s "http://127.0.0.1:${POLICY_PORT}/policy/${1}"
+}
+
+# relay_delete_policy <uid>: DELETE lands an authoritative default-deny
+# tombstone at the successor revision (204).
+relay_delete_policy() {
+  local uid="$1" code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -XDELETE \
+    "http://127.0.0.1:${POLICY_PORT}/policy/${uid}")"
+  [ "${code}" = "204" ] || fail "relay DELETE /policy/${uid} failed: ${code}"
+}
+
 dns_query() {
   # dns_query <netns-or-host> <name>
   local where="$1" name="$2"
@@ -517,11 +531,23 @@ pass "restart durability (recorded policy supersedes the replayed binding input,
 # Restore the lineage: under file-supersedes-input, every later section
 # starts from the recorded policy — put back what the binding inputs intend.
 relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
-# DELETE tombstone across a restart, and the revision precondition: a
-# stale expectedRevision is a 412 on the handler contract (the server
-# remaps it to 409 on the public API).
+# DELETE tombstone: an authoritative default-deny at the successor
+# revision (204); the stale expectedRevision precondition is a 412 on the
+# handler contract (the server remaps it to 409 on the public API).
 http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT "http://127.0.0.1:${POLICY_PORT}/policy/a" -d '{"policy":{"defaultAction":"deny","egress":[]},"expectedRevision":99}')"
 [ "${http_code}" = "412" ] || fail "stale expectedRevision must be 412, got ${http_code}"
+relay_delete_policy a
+recorded="$(relay_get_policy a)"
+echo "${recorded}" | grep -q '"defaultAction":"deny"' \
+  || fail "the DELETE tombstone must be an authoritative default-deny record, got: ${recorded}"
+pass "DELETE tombstone (default-deny record persisted, stale revision 412)"
+
+# The tombstone survives the Test 10 restart + binding replay: the
+# replayed bootstrap binding (deny) is superseded by the identical tombstone
+# at the SAME revision — no resurrection of the pre-delete allow, no
+# revision reset.
+relay_get_policy a | grep -q '"defaultAction":"deny"' \
+  || fail "the tombstone must survive the restart, got: $(relay_get_policy a)"
 
 ###############################################################################
 info "Test 10: strict DoH mode (no blocklist) drops all tcp 443 globally"
@@ -533,7 +559,11 @@ set_binding a 10.10.0.5 6 runtime-a-2 att-a-2 '{"defaultAction":"deny"}'
 wait_for 15 "subject a re-registered after strict-mode restart" dns_rcode_is osb-sandbox-a allow.test 3
 nft_has 'tcp dport 443 drop' || fail "strict mode must install a bare tcp 443 drop"
 nft_has 'doh_block_v4' && fail "strict mode must not create blocklist sets"
-pass "strict DoH mode enforced (bare 443 drop, no blocklist sets)"
+# The tombstone revision is preserved across the restart + replay — the
+# binding input was superseded, not re-seeded.
+relay_get_policy a | grep -q '"defaultAction":"deny"' \
+  || fail "the tombstone must survive the strict-mode restart + replay"
+pass "strict DoH mode enforced (bare 443 drop, no blocklist sets); tombstone survives replay"
 
 ###############################################################################
 info "Test 11: MITM data plane — shared mitmdump + per-subject DNAT + subject-aware active vault"
