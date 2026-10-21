@@ -294,6 +294,17 @@ osb command session run <sandbox-id> <session-id> -o raw -- sh -c 'echo $FOO'
 osb command session delete <sandbox-id> <session-id> -o json
 ```
 
+### Open an interactive terminal
+
+`osb terminal` attaches your current terminal to a real PTY inside the sandbox (colors, `stty`, and resize all behave like a local shell). Exit the remote shell (or press Ctrl-D) to leave; the remote exit code becomes the command's exit code.
+
+```bash
+osb terminal <sandbox-id>
+osb terminal <sandbox-id> -w /workspace
+```
+
+Requires an interactive TTY, and is supported on Unix, macOS, and Linux. If the connection drops while the shell is still running, the session is kept server-side so it can still be inspected; a clean exit tears the session down.
+
 ### Work with files
 
 ```bash
@@ -402,6 +413,7 @@ The main command groups are:
 - `osb template`: golden-image template builds
 - `osb snapshot`: snapshot management
 - `osb command`: command execution and persistent sessions
+- `osb terminal`: interactive PTY terminal into a sandbox
 - `osb file`: file and directory operations
 - `osb egress`: runtime egress policy
 - `osb diagnostics`: stable diagnostics logs and events
