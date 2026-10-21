@@ -46,8 +46,11 @@
 #   5. Resume: POST resume, poll back to Running (checkpoint restored),
 #      /ping 200 through a FRESH route (resume advances the route
 #      generation — the old route staying valid would be a bug), the
-#      egress logs "policy imported from snapshot bundle" for the
-#      subject, and the policy is STILL ENFORCING with the original rules.
+#      egress logs the policy-bundle delivery for the subject (normally
+#      "bundle landed for the next registration" — the delivery precedes
+#      the SET_BINDING replay; "imported from snapshot bundle" when it
+#      lands registered), and the policy is STILL ENFORCING with the
+#      original rules.
 #   6. Policy update: PUT /networkpolicy replaces the rule set with a
 #      single allow github.com rule; the policy converges to enforcing
 #      with the new target.
@@ -98,8 +101,8 @@ pause_policy_enforced() { # <target> — GET /networkpolicy enforcing with <targ
 	printf '%s' "$out" | jq -e --arg t "$1" '[.policy.egress[]?.target] | index($t) != null' >/dev/null
 }
 
-pause_egress_log_contains() { # <fixed-substring> — marker in the pool egress logs
-	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null | grep -qF "$1"
+pause_egress_log_contains() { # <extended-regex> — marker in the pool egress logs
+	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null | grep -qE "$1"
 }
 
 # --- the verify -------------------------------------------------------------------
@@ -168,9 +171,13 @@ pause_resume_verify() {
 	log "verify (pause): $VERIFY_ID resume->Running (checkpoint restored) $(( (t3 - t2) / 1000000 ))ms"
 	wait_for "post-resume execd /ping 200 through a fresh route" 100 execd_ping_ok
 	# The bundle is delivered to egress (POLICY_IMPORT) before the data plane
-	# is ready, so the restored subject keeps the checkpoint's policy.
+	# is ready, so the restored subject keeps the checkpoint's policy. The
+	# delivery lands before SET_BINDING (the pause's REMOVE_BINDING purged
+	# the registration), so the marker is the unregistered branch's "bundle
+	# landed for the next registration" — accept the registered branch's
+	# wording too, in case the delivery ever races ahead of the purge.
 	wait_for "egress imported the policy from the checkpoint bundle" 120 \
-		pause_egress_log_contains "subject s-$sandbox_uid: policy imported from snapshot bundle"
+		pause_egress_log_contains "subject s-$sandbox_uid: policy (imported from snapshot bundle|bundle landed for the next registration)"
 	wait_for "policy still enforcing after resume (example.com)" 120 pause_policy_enforced example.com
 	pass "policy survived the resume (imported from the bundle, still enforcing)"
 	pass "pause/resume round-trip timings: pause->Paused $(( (t2 - t1) / 1000000 ))ms, resume->Running $(( (t3 - t2) / 1000000 ))ms (opensandbox CLI -> FastPath -> artifact store)"
