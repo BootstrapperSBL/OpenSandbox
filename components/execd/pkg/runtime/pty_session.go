@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -246,6 +247,30 @@ func buildPTYCommand(command string) *exec.Cmd {
 	return exec.Command(shell, args...)
 }
 
+// defaultPTYTerm is the terminal type assumed for PTY sessions when the
+// resolved environment carries no TERM. Interactive programs (ls, vim, top)
+// consult TERM to decide whether colors and terminfo capabilities are safe
+// to use; execd runs as a daemon whose environment normally lacks it.
+const defaultPTYTerm = "xterm-256color"
+
+// ptySessionEnv returns the user process environment for a PTY session,
+// defaulting TERM when absent or empty (an empty TERM makes programs behave
+// as if terminfo were unavailable). Pipe mode deliberately does not get this
+// default: its side is not a terminal, so advertising one would be wrong.
+func ptySessionEnv() []string {
+	env := UserProcessEnvironment()
+	for i, kv := range env {
+		if name, value, ok := strings.Cut(kv, "="); ok && name == "TERM" {
+			if value != "" {
+				return env
+			}
+			env[i] = "TERM=" + defaultPTYTerm
+			return env
+		}
+	}
+	return append(env, "TERM="+defaultPTYTerm)
+}
+
 // StartPTY launches the preferred shell via pty.StartWithSize.
 // Must be called with the WS lock held.
 func (s *ptySession) StartPTY() error {
@@ -261,8 +286,9 @@ func (s *ptySession) StartPTY() error {
 
 	cmd := buildPTYCommand(s.command)
 	// Resolve through the shared user-env layering (sandbox binding envs from
-	// /init < EXECD_ENVS file) instead of inheriting execd's raw environment.
-	cmd.Env = UserProcessEnvironment()
+	// /init < EXECD_ENVS file) instead of inheriting execd's raw environment,
+	// and make sure the interactive shell has a usable terminal type.
+	cmd.Env = ptySessionEnv()
 	if s.cwd != "" {
 		cmd.Dir = s.cwd
 	}

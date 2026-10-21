@@ -307,3 +307,33 @@ func TestUserProcessEnvironmentFiltersBlacklist(t *testing.T) {
 	require.Contains(t, joined, "OPENSANDBOX_ID=sandbox-1")
 	require.NotContains(t, joined, "EXECD_ACCESS_TOKEN")
 }
+
+func TestPTYSessionEnvDefaultsTerm(t *testing.T) {
+	t.Setenv("EXECD_ENVS", "")
+	applyTestBinding(t, &binding.RuntimeBinding{SandboxID: "sandbox-1"})
+
+	t.Setenv("TERM", "")
+	require.Equal(
+		t,
+		[]string{"TERM=" + defaultPTYTerm},
+		terminalEntries(ptySessionEnv()),
+	)
+}
+
+func TestPTYSessionEnvKeepsExistingTerm(t *testing.T) {
+	t.Setenv("EXECD_ENVS", "")
+	applyTestBinding(t, &binding.RuntimeBinding{SandboxID: "sandbox-1"})
+
+	t.Setenv("TERM", "xterm")
+	require.Equal(t, []string{"TERM=xterm"}, terminalEntries(ptySessionEnv()))
+}
+
+func terminalEntries(env []string) []string {
+	var found []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TERM=") {
+			found = append(found, kv)
+		}
+	}
+	return found
+}
