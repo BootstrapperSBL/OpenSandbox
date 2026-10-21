@@ -16,7 +16,7 @@
 """E2E coverage for the fast-sandbox (fsb) integration environment.
 
 Mirrors the HTTP verify stages of
-``scripts/fast-sandbox-env/integration.sh`` using the Python SDK
+``scripts/fast-sandbox-env/integration-env.sh`` using the Python SDK
 instead of raw curl: template catalog visibility, template-based sandbox
 creation through the signed gateway route, networkpolicy convergence
 (PATCH merge + DELETE), lifecycle ops (get/list/metadata/renew),
@@ -27,7 +27,7 @@ Requires the fsb integration stack to be up plus
 ``OPENSANDBOX_TEST_FSB_TEMPLATE_ID`` (the golden-image template built by
 the env script's ``template_up`` stage):
 
-    ./scripts/fast-sandbox-env/integration.sh up
+    ./scripts/fast-sandbox-env/integration-env.sh up
     cd tests/python
     OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" \
         uv run pytest tests/test_fsb_e2e.py

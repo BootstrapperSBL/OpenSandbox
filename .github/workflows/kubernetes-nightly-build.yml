@@ -390,15 +390,15 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Run integration tests (idle-pause profile)
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration.sh up --auto-clean
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
       - name: Run base SDK e2e
         timeout-minutes: 30
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration.sh sdk-e2e
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       - name: Run idle-pause SDK e2e
         timeout-minutes: 45
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration.sh idle-e2e
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh idle-e2e
 
       # Collect the env's own failure dump ($WORK/logs/failure-*.txt) plus
       # live status, BEFORE teardown removes the cluster.
@@ -409,7 +409,7 @@ jobs:
           mkdir -p diagnostics
           sudo cp -a "$work/logs" "$work/run.log" diagnostics/ 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" diagnostics || true
-          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration.sh status \
+          sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh status \
             > diagnostics/live-status.txt 2>&1 || true
 
       - name: Upload failure diagnostics
@@ -422,7 +422,7 @@ jobs:
 
       - name: Teardown
         if: always()
-        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration.sh down
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh down
 
   publish-nightly-latest:
     name: Publish latest (${{ matrix.component }} nightly)
