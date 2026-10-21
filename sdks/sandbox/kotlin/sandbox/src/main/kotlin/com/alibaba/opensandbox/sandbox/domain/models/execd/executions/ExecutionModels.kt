@@ -148,6 +148,13 @@ class ExecutionError(
     val value: String,
     val timestamp: Long,
     val traceback: List<String> = emptyList(),
+    /**
+     * Exit status reported by execd for a CommandExecError when the command ran
+     * and finished with a non-zero status (-1 when terminated by a signal).
+     * Null when the process failed to start, for non-command errors, and on
+     * servers that predate error.exit_code.
+     */
+    val exitCode: Int? = null,
 )
 
 /**
@@ -166,6 +173,12 @@ class ExecutionComplete(
      * Execution time in mills
      */
     val executionTimeInMillis: Long,
+    /**
+     * Successful foreground POST /command exit status (0), when present on the
+     * wire execution_complete event. Null for background startup, code
+     * execution, and servers that omit execution_complete.exit_code.
+     */
+    val exitCode: Int? = null,
 )
 
 /**
