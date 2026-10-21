@@ -13,41 +13,114 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# verify/pause-resume.sh — pause/resume round trip (CLI -> FastPath checkpoint)
+# verify/pause-resume.sh — pause/resume round trip with recorded-policy carry
+# (CLI -> FastPath checkpoint -> artifact store)
+#
+# Test shape: the sandbox is created WITH an egress policy (default deny;
+# allow example.com + *.opensandbox.ai), so every pause checkpoint must
+# carry the subject's recorded policy file — policy.json rides the bundle
+# as an opaque artifact, uploaded next to the checkpoint manifest and
+# re-delivered to egress (POLICY_IMPORT) before the data plane is ready on
+# resume. The checkpoint bundle is addressed through the Sandbox CR
+# (status.runtime.checkpoint.manifestRef) and read from the artifact store
+# with the rc CLI; the recorded policy.json is plain JSON (revision +
+# embedded policy body), so its rules are asserted directly.
 #
 # Coverage:
 #
-#   1. Baseline: create a sandbox via `osb sandbox create` (template,
-#      skip-health-check), poll it to Running, and confirm execd /ping
-#      returns 200 through a freshly resolved signed gateway route.
-#   2. Pause semantics (durable-first): POST pause, then poll GET until
-#      state=Paused. Paused means the checkpoint is fully durable in the
-#      artifact store AND the fastlet capacity is released — not merely
-#      that the call was accepted. The pause -> Paused latency is logged.
-#   3. Route release (negative assertion): after Paused, the OLD signed
-#      route must no longer serve /ping — the gateway must reject a
-#      route whose sandbox is not running. A still-serving paused
-#      sandbox fails the verify.
-#   4. Resume: POST resume, poll GET back to Running (checkpoint
-#      restored from the artifact store), then /ping must return 200
-#      through a FRESH route — resume advances the route generation, so
-#      re-resolving the endpoint is mandatory and the old route staying
-#      valid would indicate a generation bug.
-#   5. Cleanup: kill the sandbox and wait until GET 404s.
+#   1. Baseline: create via `osb sandbox create` carrying the policy file,
+#      poll to Running, confirm execd /ping 200 through a signed gateway
+#      route, and confirm the policy is ENFORCING pre-pause
+#      (networkPolicy -> egress action binding -> nft convergence) — the
+#      recorded policy file must exist before the checkpoint can carry it.
+#   2. Pause semantics (durable-first): POST pause, poll GET until
+#      state=Paused (checkpoint durable in the artifact store + fastlet
+#      capacity released); pause -> Paused latency logged.
+#   3. ARTIFACT (first pause): the egress logs "policy exported to
+#      snapshot bundle" for the subject, and the published bundle under
+#      the checkpoint manifestRef contains policy.json whose recorded
+#      policy still allows example.com + *.opensandbox.ai (revision >= 1).
+#   4. Route release (negative assertion): after Paused, the OLD signed
+#      route must no longer serve /ping — a still-serving paused sandbox
+#      fails the verify.
+#   5. Resume: POST resume, poll back to Running (checkpoint restored),
+#      /ping 200 through a FRESH route (resume advances the route
+#      generation — the old route staying valid would be a bug), the
+#      egress logs "policy imported from snapshot bundle" for the
+#      subject, and the policy is STILL ENFORCING with the original rules.
+#   6. Policy update: PUT /networkpolicy replaces the rule set with a
+#      single allow github.com rule; the policy converges to enforcing
+#      with the new target.
+#   7. ARTIFACT (second pause): pause again; the NEW checkpoint bundle's
+#      policy.json must carry the UPDATED policy — github.com present,
+#      example.com replaced (absent), and a revision strictly greater
+#      than the first bundle's.
+#   8. Cleanup: kill the sandbox and wait until GET 404s.
 #
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
+# --- recorded-policy probes -----------------------------------------------------
+# The checkpoint bundle is located through the Sandbox CR (status.runtime.
+# checkpoint.manifestRef) and read from the artifact store via the rc CLI;
+# policy.json is the egress policy-file envelope: a plain-JSON document
+# carrying the revision and the verbatim policy body.
+
+checkpoint_policy_bundle() { # -> policy.json envelope of the CURRENT pause checkpoint
+	local ref key
+	ref="$(kubectl_get "sandbox/$VERIFY_ID" '{.status.runtime.checkpoint.manifestRef}' 2>/dev/null)" || return 1
+	[[ "$ref" == "s3://$RUSTFS_BUCKET/"* ]] || return 1
+	key="${ref#s3://$RUSTFS_BUCKET/}"
+	key="${key%/*}/policy.json"
+	rc cat "chain/$RUSTFS_BUCKET/$key" 2>/dev/null
+}
+
+pause_bundle_allows() { # <target> — the bundle's recorded policy allows <target>
+	checkpoint_policy_bundle | jq -e --arg t "$1" '[.policy.egress[]?.target] | index($t) != null' >/dev/null
+}
+
+pause_bundle_lacks() { # <target> — the bundle's recorded policy no longer has <target>
+	checkpoint_policy_bundle | jq -e --arg t "$1" '[.policy.egress[]?.target] | index($t) == null' >/dev/null
+}
+
+pause_bundle_revision() { # -> the bundle's recorded revision (0 when unreadable)
+	local bundle
+	bundle="$(checkpoint_policy_bundle 2>/dev/null)" || { printf '0'; return 0; }
+	printf '%s' "$bundle" | jq '.revision // 0' 2>/dev/null || printf '0'
+}
+
+pause_policy_enforced() { # <target> — GET /networkpolicy enforcing with <target>
+	local out
+	out="$(server_api GET "/sandboxes/$VERIFY_ID/networkpolicy" 2>/dev/null)" || return 1
+	[[ "$(printf '%s' "$out" | jq -r '.mode // empty')" == "enforcing" ]] || return 1
+	printf '%s' "$out" | jq -e --arg t "$1" '[.policy.egress[]?.target] | index($t) != null' >/dev/null
+}
+
+pause_egress_log_contains() { # <fixed-substring> — marker in the pool egress logs
+	kubectl -n "$RESOURCE_NS" logs -l app=sandbox-fastlet -c egress --tail=800 2>/dev/null | grep -qF "$1"
+}
+
+# --- the verify -------------------------------------------------------------------
+
 pause_resume_verify() {
-	# Accepted + poll: Paused == checkpoint durable + capacity released;
-	# resume advances the route generation, so /ping needs a fresh route.
-	local created t0 t1 t2 t3
-	log "verify (pause): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+	# Test shape: create WITH an egress policy -> pause -> the checkpoint
+	# bundle in the artifact store must carry the recorded policy file ->
+	# resume -> the sandbox serves again AND the policy is still enforced ->
+	# PUT a new rule set -> pause again -> the NEW checkpoint bundle must
+	# carry the UPDATED policy (new rule present, replaced rule gone).
+	local created t0 t1 t2 t3 rev1 rev2 sandbox_uid policy_file
+	policy_file="$GEN_DIR/pause-policy.json"
+	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "example.com"}, {action: "allow", target: "*.opensandbox.ai"}]}' \
+		> "$policy_file"
+
+	log "verify (pause): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID, with an egress policy)"
 	t0="$(now_ms)"
 	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
-		--metadata origin=fast-sandbox-env-pause --skip-health-check -o json 2>/dev/null)" \
+		--metadata origin=fast-sandbox-env-pause \
+		--network-policy-file "$policy_file" \
+		--skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create failed against $SERVER_URL"
 	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
 	[[ -n "$VERIFY_ID" && "$VERIFY_ID" != "null" ]] || fail "create response carried no id"
@@ -55,7 +128,13 @@ pause_resume_verify() {
 	t1="$(now_ms)"
 	log "verify (pause): $VERIFY_ID create->Running $(( (t1 - t0) / 1000000 ))ms"
 
+	sandbox_uid="$(kubectl_get "sandbox/$VERIFY_ID" '{.metadata.uid}' 2>/dev/null)"
+	[[ -n "$sandbox_uid" ]] || fail "sandbox CR carried no uid"
+
 	wait_for "pre-pause execd /ping 200 through the gateway" 100 execd_ping_ok
+	# The recorded policy file must exist before the checkpoint can carry it.
+	wait_for "egress policy enforcing pre-pause (networkPolicy -> binding -> nft)" 120 \
+		pause_policy_enforced example.com
 
 	log "verify (pause): osb sandbox pause $VERIFY_ID"
 	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 \
@@ -70,6 +149,16 @@ pause_resume_verify() {
 	fi
 	pass "paused: execd /ping no longer served (runtime released, signed route rejected at the gateway)"
 
+	# Artifact check (first pause): the published checkpoint set must carry
+	# the recorded policy file with the pre-pause rules.
+	wait_for "egress exported the recorded policy into the checkpoint bundle" 120 \
+		pause_egress_log_contains "subject s-$sandbox_uid: policy exported to snapshot bundle"
+	wait_for "checkpoint bundle policy.json allows example.com" 60 pause_bundle_allows example.com
+	wait_for "checkpoint bundle policy.json allows *.opensandbox.ai" 60 pause_bundle_allows '*.opensandbox.ai'
+	rev1="$(pause_bundle_revision)"
+	[[ "${rev1:-0}" -ge 1 ]] || fail "checkpoint policy.json carries no positive revision (got ${rev1:-0})"
+	pass "checkpoint artifact carries the recorded policy (policy.json, revision $rev1, pre-pause rules intact)"
+
 	log "verify (pause): osb sandbox resume $VERIFY_ID"
 	t2="$(now_ms)"
 	osb_api sandbox resume "$VERIFY_ID" --skip-health-check >/dev/null 2>&1 \
@@ -78,7 +167,37 @@ pause_resume_verify() {
 	t3="$(now_ms)"
 	log "verify (pause): $VERIFY_ID resume->Running (checkpoint restored) $(( (t3 - t2) / 1000000 ))ms"
 	wait_for "post-resume execd /ping 200 through a fresh route" 100 execd_ping_ok
+	# The bundle is delivered to egress (POLICY_IMPORT) before the data plane
+	# is ready, so the restored subject keeps the checkpoint's policy.
+	wait_for "egress imported the policy from the checkpoint bundle" 120 \
+		pause_egress_log_contains "subject s-$sandbox_uid: policy imported from snapshot bundle"
+	wait_for "policy still enforcing after resume (example.com)" 120 pause_policy_enforced example.com
+	pass "policy survived the resume (imported from the bundle, still enforcing)"
 	pass "pause/resume round-trip timings: pause->Paused $(( (t2 - t1) / 1000000 ))ms, resume->Running $(( (t3 - t2) / 1000000 ))ms (opensandbox CLI -> FastPath -> artifact store)"
+
+	# Policy update (raw PUT: the CLI only has merge-style patches), then a
+	# second pause whose checkpoint must publish the UPDATED policy.
+	local put_body
+	put_body="$(jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "github.com"}]}')"
+	server_api PUT "/sandboxes/$VERIFY_ID/networkpolicy" "$put_body" >/dev/null \
+		|| fail "PUT networkpolicy failed for $VERIFY_ID"
+	wait_for "policy update converged (PUT -> ReplaceActionBindings -> nft)" 120 \
+		pause_policy_enforced github.com
+
+	log "verify (pause): osb sandbox pause $VERIFY_ID (second round, after the policy update)"
+	osb_api sandbox pause "$VERIFY_ID" >/dev/null 2>&1 \
+		|| fail "second pause failed for $VERIFY_ID"
+	wait_for "poll GET until Paused (second checkpoint durable)" 240 sandbox_paused
+
+	# Artifact check (second pause): the NEW checkpoint bundle must carry the
+	# UPDATED policy — the new rule present, the replaced rule gone, and a
+	# strictly higher revision than the first bundle.
+	wait_for "updated checkpoint bundle policy.json allows github.com" 60 pause_bundle_allows github.com
+	wait_for "updated checkpoint bundle policy.json dropped example.com" 60 pause_bundle_lacks example.com
+	rev2="$(pause_bundle_revision)"
+	[[ "${rev2:-0}" -gt "${rev1:-0}" ]] \
+		|| fail "checkpoint policy.json revision did not advance across the policy update ($rev1 -> $rev2)"
+	pass "checkpoint artifact updated: policy.json revision $rev1 -> $rev2, github.com added, example.com replaced"
 
 	osb_api sandbox kill "$VERIFY_ID" >/dev/null 2>&1 \
 		|| log "verify cleanup: kill failed; remove $VERIFY_ID manually"
