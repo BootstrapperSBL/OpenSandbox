@@ -352,6 +352,13 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	}
 	s.mu.Unlock()
 
+	return reportRunResult(request, waitErr, exitCode, startAt)
+}
+
+// reportRunResult maps the shell's wait result and parsed exit code onto the
+// request hooks: a non-exit wait error is returned, a non-zero exit code is
+// reported via OnExecuteError, and a clean run via OnExecuteComplete.
+func reportRunResult(request *ExecuteCodeRequest, waitErr error, exitCode *int, startAt time.Time) error {
 	var exitCodeErr exitCoder
 	if waitErr != nil && !errors.As(waitErr, &exitCodeErr) {
 		log.Error("bash session: wait: %v (command: %q)", waitErr, log.SanitizeCommand(request.Code))
