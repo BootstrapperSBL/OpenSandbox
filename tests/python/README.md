@@ -34,7 +34,7 @@ Credential Vault E2E tests require a reachable target service and `OPENSANDBOX_C
 
 ### Fast-sandbox (fsb) integration env
 
-`tests/test_fsb_e2e.py` converts the HTTP verify stages of `scripts/fast-sandbox-env/integration-env.sh` (template create → gateway ping → networkpolicy PATCH/DELETE convergence, lifecycle ops, pause/resume, public snapshot round trip) into Python SDK calls. It is skipped unless the fsb stack is up and `OPENSANDBOX_TEST_FSB_TEMPLATE_ID` points at the golden-image template the env script builds, and it is excluded from the default `make test` run:
+`tests/test_fsb_e2e.py` exercises the Python SDK client contract against the live fsb stack, and stays deliberately thin: the deep stack behavior (create wire-up, policy enforcement and update convergence, checkpoint durability and route release, recorded-policy carry across pause/resume and snapshots, vault transfer, idle-pause/wake, artifact pruning) is covered by the shell verify suites under `scripts/fast-sandbox-env/verify/`, which `integration.sh up` chains on every run. The SDK suite is skipped unless the fsb stack is up and `OPENSANDBOX_TEST_FSB_TEMPLATE_ID` points at the golden-image template the env script builds, and it is excluded from the default `make test` run:
 
 ```bash
 ./scripts/fast-sandbox-env/integration-env.sh up     # brings up the stack, prints/keeps the template id
@@ -59,29 +59,32 @@ Sandbox lifecycle (`SandboxManager` + `Sandbox`):
 - [x] `Sandbox.connect` — re-attach to a running sandbox; origin auto-detected from the server header; execd + policy operations served through the re-attached instance
 - [x] `sandbox.pause` → `Paused` (durable-first window)
 - [x] `sandbox.kill` (+ deletion re-read)
-- [x] `SandboxManager.get_sandbox_info` / `list_sandbox_infos` / `patch_sandbox_metadata` (upsert + null delete) / `renew_sandbox`
 - [x] `sandbox.origin` — template vs unknown, server header reconciliation
 
 Snapshot management (`SandboxManager`):
 
-- [x] `create_snapshot` — 202 + Creating; re-entry fence (409 or accepted → terminal)
+- [x] `create_snapshot` — 202 + Creating
 - [x] `get_snapshot` — poll to Ready
-- [x] `list_snapshots` — `sandboxId`-scoped, both rows Ready
 - [x] `delete_snapshot`
 
 Execd plane (`Sandbox` properties, exercised on template sandboxes):
 
-- [x] `sandbox.commands.run` — stdout assertions + egress probes (`wget`)
+- [x] `sandbox.commands.run` — stdout assertions + egress probes (`curl`)
 - [x] `sandbox.files.write_file` / `read_file` — write/read round trip
 - [x] `sandbox.get_metrics` — cpu/memory value ranges
 - [x] `sandbox.is_healthy` — post-resume / post-restore
 
+Diagnostics (`SandboxManager` + `Sandbox`):
+
+- [x] `get_diagnostic_context` — fsb backend identifiers
+- [x] `get_diagnostic_events` — inline delivery, `runtime`/`all` scopes
+- [x] `get_diagnostic_logs` — container logs unsupported on fsb (501)
+
 Egress policy (`Sandbox`):
 
-- [x] `get_egress_policy` — convergence polling
 - [x] `patch_egress_rules` — merge semantics verified **at HTTP level** (newly allowed target serves HTTPS)
-- [x] `delete_egress_rules` — removal verified **at HTTP level** (deleted target stops resolving/serving)
-- [x] policy persistence across pause/resume and after snapshot restore
+- [x] `delete_egress_rules` — removal verified **at HTTP level** (deleted target stops serving)
+- [x] port-scoped rules fail closed with 400 (create-carried and PATCH)
 
 State fidelity:
 
