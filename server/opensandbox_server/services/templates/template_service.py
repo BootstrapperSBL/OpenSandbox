@@ -354,20 +354,14 @@ class FastSandboxTemplateService:
         unknown or non-Succeeded templates both yield 404, so no existence
         information leaks.
 
-        The DB row is the read authority: the watch reactor is the only
-        writer of build-phase transitions (CR status -> watch event -> row),
-        so this gate is a pure DB read on the sandbox-create hot path.
+        Reads the DB row only; the watch reactor converges build phase.
         """
         namespace = self._resolve_namespace()
         record = self._repo().get(template_id, namespace)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
         if record.phase in (FastSandboxTemplatePhase.PENDING, FastSandboxTemplatePhase.BUILDING):
-            # Non-terminal row on the create gate: make sure the namespace
-            # watch is alive so the row still converges (e.g. the watch
-            # failed to start when the template was created). Healthy
-            # deployments pay a set-membership check; start() is
-            # non-blocking either way.
+            # Re-arm the watch so a non-terminal row cannot get stuck.
             self._ensure_namespace_watch(namespace)
         if record.phase is not FastSandboxTemplatePhase.SUCCEEDED:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
@@ -442,11 +436,7 @@ class FastSandboxTemplateService:
 
     # -- status sync -------------------------------------------------------------
     #
-    # The watch reactor (start_background_sync / _on_template_event) is the
-    # ONLY path that moves CR build phase into the DB rows; reads (including
-    # the sandbox-create gate) trust the DB projection and never re-read the
-    # CR. "CRD is gone" is likewise event-driven: the DELETED watch event
-    # fails the row (template_service watch handler below).
+    # The watch reactor is the only CR->DB phase path; reads trust the DB.
 
     def _update_phase(
         self,

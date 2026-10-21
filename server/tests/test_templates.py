@@ -123,9 +123,7 @@ class _FakeTemplateCRs:
 
 
 def _converge(service, crs, namespace: str, name: str, event: str = "MODIFIED") -> None:
-    """Deliver the CR store's current state through the watch reactor — the
-    only path that moves build phase into DB rows (reads never re-read the
-    CR, so tests must simulate the event to converge a row)."""
+    """Deliver the CR store's current state through the watch reactor."""
     handler = service._on_template_event(namespace)
     if event == "DELETED":
         handler("DELETED", {"metadata": {"name": name}})
@@ -447,8 +445,7 @@ def test_resolve_artifact_requires_succeeded(service, crs):
 
 
 def test_resolve_gate_trusts_db_row_not_crd(service, crs):
-    """The create gate reads the DB projection only; CR state reaches it
-    exclusively through the watch reactor."""
+    """The create gate reads the DB projection only."""
     record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
 
     # CR already says Succeeded but the event has not been delivered: 404.
@@ -467,9 +464,7 @@ def test_resolve_gate_trusts_db_row_not_crd(service, crs):
 
 
 def test_resolve_restarts_watch_for_non_terminal_rows(service, crs, repo):
-    """A row that never converged (its namespace watch failed to start when
-    the template was created) still gets a watch retry on the create gate,
-    so PENDING rows cannot get stuck permanently."""
+    """A non-terminal row re-arms its namespace watch on the create gate."""
     record = service_record("tpl-stuck", "ns-1")
     repo.create(record)
     assert "ns-1" not in service._watched_namespaces
