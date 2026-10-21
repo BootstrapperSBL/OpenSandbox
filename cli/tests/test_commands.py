@@ -21,6 +21,7 @@ so the root ``cli`` callback creates our mock instead of a real SDK client.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import stat
@@ -49,7 +50,7 @@ from opensandbox.models.templates import (
     TemplateStatus,
 )
 
-from opensandbox_cli.commands.terminal import stream_pty
+from opensandbox_cli.commands.terminal import _make_stdin_reader, stream_pty
 from opensandbox_cli.config import load_config_file
 from opensandbox_cli.main import cli
 from opensandbox_cli.output import OutputFormatter
@@ -2723,6 +2724,32 @@ class TestTerminal:
 
         assert result.exit_code == 0
         assert "boom" in result.stderr
+
+
+class TestStdinReader:
+    def test_reads_data_and_cancels_promptly_without_reader_left_registered(
+        self,
+    ) -> None:
+        async def scenario() -> bytes:
+            read_fd, write_fd = os.pipe()
+            try:
+                stdin_read = _make_stdin_reader(read_fd)
+
+                # With nothing written, cancellation must complete promptly
+                # (a blocking worker thread would hang here instead).
+                task = asyncio.create_task(stdin_read())
+                await asyncio.sleep(0.05)
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=2)
+
+                os.write(write_fd, b"hi")
+                return await asyncio.wait_for(stdin_read(), timeout=2)
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
+
+        assert asyncio.run(scenario()) == b"hi"
 
 
 class TestStreamPTY:

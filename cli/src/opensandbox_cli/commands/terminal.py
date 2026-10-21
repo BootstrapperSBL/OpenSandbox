@@ -122,17 +122,42 @@ def _raw_mode(fd: int) -> Iterator[None]:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+def _make_stdin_reader(fd: int) -> ReadFn:
+    """Build a cancellable stdin read driven by event-loop readability.
+
+    A blocking ``os.read`` in the default executor cannot be cancelled: the
+    worker thread stays parked in ``read(2)`` and stalls event-loop shutdown
+    until a key arrives. A reader callback is cancelled with its task.
+    """
+
+    async def stdin_read() -> bytes:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[bytes] = loop.create_future()
+
+        def _on_readable() -> None:
+            if future.done():
+                return
+            try:
+                future.set_result(os.read(fd, 4096))
+            except BlockingIOError:
+                return  # Spurious wakeup; stay registered.
+            except OSError:
+                future.set_result(b"")  # EOF or hang-up.
+
+        loop.add_reader(fd, _on_readable)
+        try:
+            return await future
+        finally:
+            loop.remove_reader(fd)
+
+    return stdin_read
+
+
 def _posix_tty_io() -> tuple[ReadFn, WriteFn, SizeFn, int]:
     """Build TTY stdin/stdout/size hooks plus the stdin fd for raw mode."""
     stdin_fd = sys.stdin.fileno()
     stdout: IO[bytes] = sys.stdout.buffer
-
-    async def stdin_read() -> bytes:
-        loop = asyncio.get_running_loop()
-        try:
-            return await loop.run_in_executor(None, os.read, stdin_fd, 4096)
-        except OSError:
-            return b""
+    stdin_read = _make_stdin_reader(stdin_fd)
 
     def stdout_write(data: bytes) -> None:
         stdout.write(data)
@@ -145,14 +170,23 @@ def _posix_tty_io() -> tuple[ReadFn, WriteFn, SizeFn, int]:
     return stdin_read, stdout_write, get_size, stdin_fd
 
 
-async def _pump_stdin(ws: WSDuplex, stdin_read: ReadFn) -> None:
+def _consume_task_result(task: asyncio.Future) -> None:
+    """Retrieve a fire-and-forget task's outcome to suppress task warnings."""
+    if not task.cancelled():
+        task.exception()
+
+
+async def _pump_stdin(
+    ws: WSDuplex, send_lock: asyncio.Lock, stdin_read: ReadFn
+) -> None:
     """Forward local stdin to the PTY as binary frames until EOF or close."""
     while True:
         data = await stdin_read()
         if not data:
             return
         try:
-            await ws.send(bytes([BIN_STDIN]) + data)
+            async with send_lock:
+                await ws.send(bytes([BIN_STDIN]) + data)
         except websockets.ConnectionClosed:
             return
 
@@ -162,6 +196,7 @@ async def stream_pty(
     *,
     stdin_read: ReadFn,
     stdout_write: WriteFn,
+    send_lock: asyncio.Lock | None = None,
 ) -> tuple[int | None, list[str]]:
     """Relay frames; the exit code is ``None`` without an ``exit`` frame."""
     exit_code: int | None = None
@@ -190,7 +225,9 @@ async def stream_pty(
                 if frame_type == "error":
                     errors.append(str(frame.get("error") or "unknown error"))
 
-    stdin_task = asyncio.create_task(_pump_stdin(ws, stdin_read))
+    stdin_task = asyncio.create_task(
+        _pump_stdin(ws, send_lock or asyncio.Lock(), stdin_read)
+    )
     try:
         # Give the stdin pump a head start before the read loop drains frames.
         await asyncio.sleep(0)
@@ -213,17 +250,24 @@ async def _connect_and_stream(
 ) -> tuple[int | None, list[str]]:
     """Connect to the PTY WebSocket, drive the relay loop, handle resize."""
     async with websockets.connect(ws_url, additional_headers=headers or None) as ws:
+        # websockets forbids concurrent sends: stdin frames and SIGWINCH
+        # resize frames share one lock, and fire-and-forget resize tasks get
+        # their results consumed so failures never surface as task warnings.
+        send_lock = asyncio.Lock()
+
+        async def send_frame(frame: str) -> None:
+            try:
+                async with send_lock:
+                    await ws.send(frame)
+            except websockets.ConnectionClosed:
+                pass
 
         async def send_resize() -> None:
             try:
                 cols, rows = get_size()
             except OSError:
                 return
-            frame = json.dumps({"type": "resize", "cols": cols, "rows": rows})
-            try:
-                await ws.send(frame)
-            except websockets.ConnectionClosed:
-                pass
+            await send_frame(json.dumps({"type": "resize", "cols": cols, "rows": rows}))
 
         await send_resize()
         loop = asyncio.get_running_loop()
@@ -232,12 +276,19 @@ async def _connect_and_stream(
             try:
                 loop.add_signal_handler(
                     signal.SIGWINCH,
-                    lambda: asyncio.ensure_future(send_resize()),
+                    lambda: asyncio.ensure_future(send_resize()).add_done_callback(
+                        _consume_task_result
+                    ),
                 )
             except NotImplementedError:  # pragma: no cover - platform guard
                 has_winch = False
         try:
-            return await stream_pty(ws, stdin_read=stdin_read, stdout_write=stdout_write)
+            return await stream_pty(
+                ws,
+                stdin_read=stdin_read,
+                stdout_write=stdout_write,
+                send_lock=send_lock,
+            )
         finally:
             if has_winch:
                 loop.remove_signal_handler(signal.SIGWINCH)
