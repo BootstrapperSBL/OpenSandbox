@@ -50,6 +50,9 @@ dependencies = [
     "pyyaml>=6.0,<7.0",
     "tomlkit>=0.13.0,<1.0",
     "tomli>=2.0.0; python_version < '3.11'",
+    # `osb terminal` drives the execd PTY WebSocket; 14+ renamed extra_headers
+    # to additional_headers, which the terminal client uses.
+    "websockets>=14.0",
 ]
 
 [project.urls]
