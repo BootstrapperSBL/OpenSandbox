@@ -183,6 +183,7 @@ jobs:
 
       - name: MITM CA JDK bootstrap test
         if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
         working-directory: components/execd
         run: python3 tests/test_mitm_ca_jdk.py
 

@@ -343,10 +343,14 @@ _jdk_import_ca() {
 	fi
 
 	# Different JDK installations can link to the same system trust store.
+	# Bound the walk so a symlink cycle cannot hang bootstrap.
+	link_depth=0
 	while :; do
 		ks_dir="$(cd "$(dirname "$ks")" 2>/dev/null && pwd -P)" || return 0
 		ks="$ks_dir/$(basename "$ks")"
 		[ -L "$ks" ] || break
+		[ "$link_depth" -lt 40 ] || break
+		link_depth=$((link_depth + 1))
 		link_target="$(readlink "$ks" 2>/dev/null)" || break
 		case "$link_target" in
 		/*) ks="$link_target" ;;

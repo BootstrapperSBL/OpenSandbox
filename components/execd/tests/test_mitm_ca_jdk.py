@@ -160,6 +160,72 @@ class JDKTrustTests(unittest.TestCase):
             [c["op"] for c in calls], ["-exportcert", "-list", "-importcert"]
         )
 
+    def test_valid_symlink_chain_at_hop_limit_is_deduplicated(self):
+        store = self.store("shared/cacerts")
+        target = store
+        # The JDK's cacerts link is the 40th hop.
+        for index in range(39):
+            link = self.root / f"link-{index}"
+            link.symlink_to(
+                "shared/../shared/cacerts"
+                if index == 0
+                else os.path.relpath(target, link.parent)
+            )
+            target = link
+        calls = self.run_helpers(
+            self.jdk("jdk-chain", target), self.jdk("jdk-direct", store)
+        )
+        self.assertEqual(
+            [c["op"] for c in calls], ["-exportcert", "-list", "-importcert"]
+        )
+        self.assertTrue(all(c["store"] == str(store) for c in calls))
+        self.assertEqual(store.read_text(), CERT_A)
+
+    def test_symlink_cycles_after_store_check_do_not_block_bootstrap(self):
+        for cycle_length in (1, 2):
+            with self.subTest(cycle_length=cycle_length):
+                self.log.unlink(missing_ok=True)
+                store = self.store(f"cycle-{cycle_length}/store")
+                home = self.jdk(f"cycle-{cycle_length}/jdk", store)
+                healthy_store = self.store(f"cycle-{cycle_length}/healthy-store")
+                healthy_home = self.jdk(f"cycle-{cycle_length}/healthy", healthy_store)
+                # Static cycles fail the initial -f check. Introduce the cycle
+                # at the first readlink to exercise the walk itself (a race).
+                commands = """
+readlink() {
+    ln -sfn "$CYCLE_TARGET" "$CYCLE_LINK"
+    command readlink "$1"
+}
+_jdk_import_ca "$2" "$1" 2>"$CYCLE_WARNING"
+grep -q "warning: failed to import mitm CA" "$CYCLE_WARNING"
+[ -z "${_SEEN_JDK_STORES:-}" ]
+unset -f readlink
+# The now-static cycle is skipped by the initial file check.
+_jdk_import_ca "$2" "$1"
+_jdk_import_ca "$3" "$1"
+"""
+                link = home / "lib/security/cacerts"
+                target = link
+                if cycle_length == 2:
+                    target = link.parent / "other"
+                    target.symlink_to(link.name)
+                calls = self.run_helpers(
+                    home,
+                    healthy_home,
+                    commands=commands,
+                    extra_env={
+                        "CYCLE_TARGET": str(target),
+                        "CYCLE_LINK": str(link),
+                        "CYCLE_WARNING": str(self.root / "cycle-warning"),
+                    },
+                )
+                self.assertEqual(
+                    [c["op"] for c in calls],
+                    ["-exportcert", "-list", "-importcert"] * 2,
+                )
+                self.assertEqual(store.read_text(), "")
+                self.assertEqual(healthy_store.read_text(), CERT_A)
+
     def test_pem_line_wrapping_and_crlf_do_not_trigger_reimport(self):
         store = self.store("store", CERT_A)
         self.cert.write_bytes(
