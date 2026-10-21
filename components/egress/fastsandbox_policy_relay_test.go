@@ -131,6 +131,85 @@ func TestPolicyRelayPutReplacesSeededRecord(t *testing.T) {
 	assert.Contains(t, string(doc.Policy), "other.example.com")
 }
 
+// TestRelayPutReArmsEnforcement (bug report: relay PUT persists + GET but
+// enforcement stays at the SET_BINDING-time deny): after activation with a
+// deny bootstrap, a relay PUT(allow) must re-apply enforcement — nft gets
+// the allow policy and the registry flips to it.
+func TestRelayPutReArmsEnforcement(t *testing.T) {
+	srv, reg, nft := fastSandboxTestServer(t)
+	s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(`{"defaultAction":"deny"}`))
+	nft.mu.Lock()
+	require.NotNil(t, nft.lastPolicy)
+	require.Equal(t, "deny", nft.lastPolicy.Evaluate("example.com"))
+	denyApplies := len(nft.policyApplied)
+	nft.mu.Unlock()
+
+	// Relay PUT(allow) on the ACTIVE subject.
+	rec := doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	nft.mu.Lock()
+	armed := nft.lastPolicy
+	applies := len(nft.policyApplied)
+	nft.mu.Unlock()
+	require.NotNil(t, armed, "the relay PUT must re-arm enforcement (nft apply missing)")
+	assert.Equal(t, "allow", armed.Evaluate("example.com"), "nft must be re-armed with the committed policy")
+	assert.Greater(t, applies, denyApplies, "an apply must have run after the PUT")
+
+	assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("example.com"))
+	rec = doPolicy(t, srv, http.MethodGet, policyTestUID, "", "")
+	rev, doc := mustPolicyRevision(t, rec)
+	assert.Equal(t, int64(2), rev)
+	assert.Contains(t, string(doc.Policy), "example.com")
+}
+
+// TestFirstPutAfterSeedArmsEnforcement (review discriminator: the FIRST
+// relay PUT after SET_BINDING must re-arm enforcement to the committed
+// record, in BOTH hook orderings).
+func TestFirstPutAfterSeedArmsEnforcement(t *testing.T) {
+	const allowPol = `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
+
+	t.Run("put before data-plane-ready", func(t *testing.T) {
+		srv, reg, nft := fastSandboxTestServer(t)
+		s := subject.FromSandboxUID(policyTestUID)
+		rec := doAction(t, srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(`{"defaultAction":"deny"}`)))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		// FIRST PUT while denying (barrier hold).
+		rec = doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(allowPol, 1, false, true), "")
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+		require.Equal(t, http.StatusOK, rec.Code)
+		rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		nft.mu.Lock()
+		require.NotNil(t, nft.lastPolicy)
+		assert.Equal(t, "allow", nft.lastPolicy.Evaluate("example.com"))
+		nft.mu.Unlock()
+		assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("example.com"))
+		assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	})
+
+	t.Run("put after data-plane-ready", func(t *testing.T) {
+		srv, reg, nft := fastSandboxTestServer(t)
+		s := setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(`{"defaultAction":"deny"}`))
+
+		rec := doPolicy(t, srv, http.MethodPut, policyTestUID, policyPutDoc(allowPol, 1, false, true), "")
+		require.Equal(t, http.StatusOK, rec.Code)
+
+		nft.mu.Lock()
+		require.NotNil(t, nft.lastPolicy)
+		assert.Equal(t, "allow", nft.lastPolicy.Evaluate("example.com"))
+		nft.mu.Unlock()
+		assert.Equal(t, "allow", reg.UserPolicy(s).Evaluate("example.com"))
+		assert.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	})
+}
+
 func TestPolicyRelayPreconditions(t *testing.T) {
 	srv, reg, _ := fastSandboxTestServer(t)
 	setBindingAndReady(t, srv, reg, policyTestUID, vaultTestIP, strPtr(policyAllow()))

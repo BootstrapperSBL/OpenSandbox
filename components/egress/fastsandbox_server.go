@@ -394,6 +394,7 @@ func (s *fastSandboxPolicyServer) applyPolicy(subj subject.Subject, pol *policy.
 	if err := s.reg.ApplyPolicy(subj, pol); err != nil {
 		return err
 	}
+	log.Infof("subject %s: policy applied (defaultAction=%s, rules=%d)", subj, pol.DefaultAction, len(pol.Egress))
 	return nil
 }
 
