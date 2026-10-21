@@ -15,8 +15,8 @@
 #
 """OSEP-0024 idle-pause / wake-on-access E2E (fsb integration env).
 
-Requires ``IDLE_PAUSE=1 integration-env.sh up`` plus
-``OPENSANDBOX_TEST_FSB_TEMPLATE_ID``; ``integration-env.sh idle-e2e``
+Requires ``IDLE_PAUSE=1 integration.sh up`` plus
+``OPENSANDBOX_TEST_FSB_TEMPLATE_ID``; ``integration.sh idle-e2e``
 exports both. Skipped otherwise and excluded from ``make test``.
 """
 

@@ -11,24 +11,24 @@ Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgr
 ## Usage
 
 ```bash
-./scripts/fast-sandbox-env/integration-env.sh up        # full stack + end-to-end + pause/resume verify
-./scripts/fast-sandbox-env/integration-env.sh status    # component / pool / DART / OpenSandbox health
-./scripts/fast-sandbox-env/integration-env.sh pool      # re-apply the pool only
-./scripts/fast-sandbox-env/integration-env.sh sdk-e2e   # Python SDK e2e suite against the live stack
-./scripts/fast-sandbox-env/integration-env.sh idle-e2e  # OSEP-0024 idle-pause/wake suite (needs IDLE_PAUSE=1 up)
-./scripts/fast-sandbox-env/integration-env.sh down      # teardown, host left clean
+./scripts/fast-sandbox-env/integration.sh up        # full stack + end-to-end + pause/resume verify
+./scripts/fast-sandbox-env/integration.sh status    # component / pool / DART / OpenSandbox health
+./scripts/fast-sandbox-env/integration.sh pool      # re-apply the pool only
+./scripts/fast-sandbox-env/integration.sh sdk-e2e   # Python SDK e2e suite against the live stack
+./scripts/fast-sandbox-env/integration.sh idle-e2e  # OSEP-0024 idle-pause/wake suite (needs IDLE_PAUSE=1 up)
+./scripts/fast-sandbox-env/integration.sh down      # teardown, host left clean
 ```
 
 ### Idle-pause / wake-on-access profile (OSEP-0024)
 
-`IDLE_PAUSE=1 ./scripts/fast-sandbox-env/integration-env.sh up` additionally deploys an ephemeral Redis (`manifests/idle-pause/redis.yaml`, before the server — the sweeper connects at startup), enables the server `[automation.idle_pause]` sweeper (5s sweep) and the gateway's `--activity-enabled` + `--wake-enabled`, and runs an `idle-pause / wake-on-access` verify stage: an opted-in sandbox (`lifecycle.idlePolicy`, X=30s) is auto-paused with zero traffic, and the next gateway request wakes it (parked while the restore completes). The `idle-e2e` action then runs the SDK suite (`tests/python/tests/test_fsb_idle_pause_e2e.py`) covering auto-pause, wake-on-access through the SDK's wake retry contract, and the no-idlePolicy compatibility invariant. Sandboxes without `lifecycle.idlePolicy` are never auto-paused or auto-woken regardless of the profile.
+`IDLE_PAUSE=1 ./scripts/fast-sandbox-env/integration.sh up` additionally deploys an ephemeral Redis (`manifests/idle-pause/redis.yaml`, before the server — the sweeper connects at startup), enables the server `[automation.idle_pause]` sweeper (5s sweep) and the gateway's `--activity-enabled` + `--wake-enabled`, and runs an `idle-pause / wake-on-access` verify stage: an opted-in sandbox (`lifecycle.idlePolicy`, X=30s) is auto-paused with zero traffic, and the next gateway request wakes it (parked while the restore completes). The `idle-e2e` action then runs the SDK suite (`tests/python/tests/test_fsb_idle_pause_e2e.py`) covering auto-pause, wake-on-access through the SDK's wake retry contract, and the no-idlePolicy compatibility invariant. Sandboxes without `lifecycle.idlePolicy` are never auto-paused or auto-woken regardless of the profile.
 
 After `up`, point any OpenSandbox SDK at `http://127.0.0.1:18080` with the `OPEN-SANDBOX-API-KEY: fast-sandbox-env` header; sandbox endpoints are signed `f1.*` header routes served by the gateway at `http://127.0.0.1:18081`. The installed CLI works against the same stack, e.g. `OPEN_SANDBOX_DOMAIN=127.0.0.1:18080 OPEN_SANDBOX_API_KEY=fast-sandbox-env osb sandbox list`.
 
 The `up` verify stages are also available as Python SDK e2e tests (template create → gateway ping → networkpolicy convergence, lifecycle ops, pause/resume, snapshot round trip):
 
 ```bash
-./scripts/fast-sandbox-env/integration-env.sh sdk-e2e   # needs uv on PATH
+./scripts/fast-sandbox-env/integration.sh sdk-e2e   # needs uv on PATH
 ```
 
 or, manually: `cd tests/python && OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" make test-fsb` (requires `OPENSANDBOX_TEST_FSB_TEMPLATE_ID`; the script stores the id in `$WORK/template-id`).
@@ -58,7 +58,21 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fast-sand
 ## Layout
 
 ```
-integration-env.sh          entrypoint: up / down / status / pool
+integration.sh          entrypoint: up / down / status / pool / sdk-e2e / idle-e2e;
+                            sources and chains the parts below (single process, so the
+                            ERR/failure-dump/--auto-clean contract and the stage summary
+                            stay unified)
+lib.sh                      shared config, logging/stage machinery, failure dump,
+                            tooling, server/CLI helpers (sourced by every part)
+env.sh                      environment lifecycle, also runnable standalone:
+                            up (provisioning stages, no verifies) / down / status / pool
+verify/                     one standalone-runnable script per verify stage
+  sandbox.sh                  end-to-end create -> gateway route -> execd /ping,
+                              egress policy convergence, lifecycle ops
+  pause-resume.sh             pause/resume round trip through the checkpoint
+  vault.sh                    credential-vault relay lifecycle (OSEP-0022)
+  idle-pause.sh               idle-pause / wake-on-access (OSEP-0024, IDLE_PAUSE=1)
+  snapshot.sh                 snapshot -> restore round trip
 architecture.svg             how the environment works (topology, pipeline,
                              P2P delivery, egress actions channel)
 manifests/

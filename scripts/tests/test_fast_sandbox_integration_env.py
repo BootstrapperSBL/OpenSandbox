@@ -21,7 +21,7 @@ import tempfile
 import unittest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "fast-sandbox-env/integration-env.sh"
+SCRIPT = Path(__file__).resolve().parents[1] / "fast-sandbox-env/integration.sh"
 SETUP = r'''
 source "$SCRIPT"
 mkdir -p "$LOGS_DIR" "$GEN_DIR"
