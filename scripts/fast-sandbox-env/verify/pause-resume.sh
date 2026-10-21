@@ -113,7 +113,7 @@ pause_resume_verify() {
 	# resume -> the sandbox serves again AND the policy is still enforced ->
 	# PUT a new rule set -> pause again -> the NEW checkpoint bundle must
 	# carry the UPDATED policy (new rule present, replaced rule gone).
-	local created t0 t1 t2 t3 rev1 rev2 sandbox_uid policy_file
+	local created t0 t1 t2 t3 t4 rev1 rev2 sandbox_uid policy_file
 	policy_file="$GEN_DIR/pause-policy.json"
 	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "example.com"}, {action: "allow", target: "*.opensandbox.ai"}]}' \
 		> "$policy_file"
@@ -163,12 +163,12 @@ pause_resume_verify() {
 	pass "checkpoint artifact carries the recorded policy (policy.json, revision $rev1, pre-pause rules intact)"
 
 	log "verify (pause): osb sandbox resume $VERIFY_ID"
-	t2="$(now_ms)"
+	t4="$(now_ms)"
 	osb_api sandbox resume "$VERIFY_ID" --skip-health-check >/dev/null 2>&1 \
 		|| fail "resume failed for $VERIFY_ID"
 	wait_for "poll GET until Running (checkpoint restored)" 240 sandbox_running
 	t3="$(now_ms)"
-	log "verify (pause): $VERIFY_ID resume->Running (checkpoint restored) $(( (t3 - t2) / 1000000 ))ms"
+	log "verify (pause): $VERIFY_ID resume->Running (checkpoint restored) $(( (t3 - t4) / 1000000 ))ms"
 	wait_for "post-resume execd /ping 200 through a fresh route" 100 execd_ping_ok
 	# The bundle is delivered to egress (POLICY_IMPORT) before the data plane
 	# is ready, so the restored subject keeps the checkpoint's policy. The
@@ -180,7 +180,7 @@ pause_resume_verify() {
 		pause_egress_log_contains "subject s-$sandbox_uid: policy (imported from snapshot bundle|bundle landed for the next registration)"
 	wait_for "policy still enforcing after resume (example.com)" 120 pause_policy_enforced example.com
 	pass "policy survived the resume (imported from the bundle, still enforcing)"
-	pass "pause/resume round-trip timings: pause->Paused $(( (t2 - t1) / 1000000 ))ms, resume->Running $(( (t3 - t2) / 1000000 ))ms (opensandbox CLI -> FastPath -> artifact store)"
+	pass "resume->Running $(( (t3 - t4) / 1000000 ))ms (checkpoint restored from the artifact store)"
 
 	# Policy update (raw PUT: the CLI only has merge-style patches), then a
 	# second pause whose checkpoint must publish the UPDATED policy.
