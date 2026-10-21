@@ -92,7 +92,10 @@ def sync_detailed(
         body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
-            present `workspace` is prepended to `overlays`.
+            present `workspace` is prepended to `overlays`. The session files API serves exactly the
+            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
+            namespace sees them, and absolute paths outside every session mount are rejected instead
+            of resolving against the workspace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -124,7 +127,10 @@ def sync(
         body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
-            present `workspace` is prepended to `overlays`.
+            present `workspace` is prepended to `overlays`. The session files API serves exactly the
+            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
+            namespace sees them, and absolute paths outside every session mount are rejected instead
+            of resolving against the workspace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -151,7 +157,10 @@ async def asyncio_detailed(
         body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
-            present `workspace` is prepended to `overlays`.
+            present `workspace` is prepended to `overlays`. The session files API serves exactly the
+            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
+            namespace sees them, and absolute paths outside every session mount are rejected instead
+            of resolving against the workspace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -181,7 +190,10 @@ async def asyncio(
         body (CreateIsolatedSessionRequest): Creates an isolated session with one or more overlay
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
-            present `workspace` is prepended to `overlays`.
+            present `workspace` is prepended to `overlays`. The session files API serves exactly the
+            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
+            namespace sees them, and absolute paths outside every session mount are rejected instead
+            of resolving against the workspace.
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

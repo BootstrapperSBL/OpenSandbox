@@ -40,7 +40,9 @@ T = TypeVar("T", bound="CreateIsolatedSessionRequest")
 class CreateIsolatedSessionRequest:
     """Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a
     single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are
-    present `workspace` is prepended to `overlays`.
+    present `workspace` is prepended to `overlays`. The session files API serves exactly the session mounts (overlays,
+    extra_writable, binds): paths under each mount resolve as the namespace sees them, and absolute paths outside every
+    session mount are rejected instead of resolving against the workspace.
 
         Attributes:
             profile (CreateIsolatedSessionRequestProfile | Unset):

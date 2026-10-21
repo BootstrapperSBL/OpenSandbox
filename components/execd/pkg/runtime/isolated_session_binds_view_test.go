@@ -322,6 +322,70 @@ func TestNewMergedView_BindsWithoutOverlaysDoesNotPanic(t *testing.T) {
 	}
 }
 
+// TestNewMergedView_SingleOverlayRejectsPathsOutsideWorkspace pins the
+// single-overlay, no-binds session shape: the historical bare MergedView is
+// preserved, but absolute paths outside the workspace (bind-like
+// destinations, the strict profile's private /tmp) must be rejected with
+// ErrPathOutsideOverlays instead of silently resolving against the
+// workspace upper, where they would touch a different file than the
+// namespace path refers to.
+func TestNewMergedView_SingleOverlayRejectsPathsOutsideWorkspace(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsLower := filepath.Join(base, "ws")
+	wsUpper := filepath.Join(base, "upper-ws")
+	for _, dir := range []string{wsLower, wsUpper} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	persist := true
+	s := newBindsViewSession(t,
+		[]IsolatedOverlayOptions{{Path: wsLower, Mode: "overlay", Persist: &persist}},
+		map[int]string{0: wsUpper},
+		nil,
+	)
+	view := newMergedView(s)
+	if _, ok := view.(*isolation.MergedView); !ok {
+		t.Fatalf("view type %T, want *isolation.MergedView for the single-overlay shape", view)
+	}
+
+	for _, p := range []string{"/tmp/secret.txt", "/etc/hostname", "/mnt/skills/a.txt"} {
+		if _, err := view.Stat(p); !errors.Is(err, isolation.ErrPathOutsideOverlays) {
+			t.Errorf("Stat %s = %v, want ErrPathOutsideOverlays", p, err)
+		}
+		if err := view.WriteFile(p, []byte("x"), 0o644); !errors.Is(err, isolation.ErrPathOutsideOverlays) {
+			t.Errorf("WriteFile %s = %v, want ErrPathOutsideOverlays", p, err)
+		}
+	}
+
+	// Nothing leaked into the workspace upper.
+	if _, err := os.Stat(filepath.Join(wsUpper, "tmp")); !os.IsNotExist(err) {
+		t.Errorf("rejected write leaked into workspace upper: %v", err)
+	}
+
+	// Workspace-scoped access keeps working.
+	if err := os.WriteFile(filepath.Join(wsLower, "seed.txt"), []byte("seed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := view.Stat(filepath.Join(wsLower, "seed.txt")); err != nil {
+		t.Errorf("Stat under workspace = %v, want nil", err)
+	}
+	data, err := view.ReadFile("seed.txt")
+	if err != nil || string(data) != "seed" {
+		t.Errorf("relative read = (%q, %v), want (\"seed\", nil)", data, err)
+	}
+	if err := view.WriteFile(filepath.Join(wsLower, "from-api.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("workspace write = %v, want nil", err)
+	}
+	if _, err := os.Stat(filepath.Join(wsUpper, "from-api.txt")); err != nil {
+		t.Fatalf("workspace write missing in upper: %v", err)
+	}
+}
+
 // TestValidateBindMountStack pins the mount-stack collisions the files view
 // cannot represent: duplicates, ancestor binds, and trusted-base shadowing.
 // Bind == overlay/extra_writable dest is allowed (the later bind shadows in
