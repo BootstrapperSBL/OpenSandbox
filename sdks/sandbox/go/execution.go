@@ -45,6 +45,11 @@ type ExecutionError struct {
 	Value     string   `json:"value"`
 	Timestamp int64    `json:"timestamp"`
 	Traceback []string `json:"traceback"`
+	// ExitCode is the exit status reported by execd for a CommandExecError
+	// when the command ran and finished with a non-zero status (-1 when it was
+	// terminated by a signal). Nil when the process failed to start, for
+	// non-command errors, and on servers that predate error.exit_code.
+	ExitCode *int `json:"exit_code,omitempty"`
 }
 
 // ExecutionComplete represents the completion event from the server.
@@ -116,6 +121,7 @@ type sseErrorPayload struct {
 	EName     string   `json:"ename,omitempty"`
 	EValue    string   `json:"evalue,omitempty"`
 	Traceback []string `json:"traceback,omitempty"`
+	ExitCode  *int     `json:"exit_code,omitempty"`
 }
 
 // sseEvent is the raw JSON structure from execd SSE/NDJSON events.
@@ -203,11 +209,13 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 	case "error":
 		var ename, evalue string
 		var traceback []string
+		var exitCode *int
 		// Prefer nested error object per spec; fall back to flat fields
 		if ev.Error != nil {
 			ename = ev.Error.EName
 			evalue = ev.Error.EValue
 			traceback = ev.Error.Traceback
+			exitCode = ev.Error.ExitCode
 		} else {
 			ename = ev.EName
 			evalue = ev.EValue
@@ -218,10 +226,15 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 			Value:     evalue,
 			Timestamp: ev.Timestamp,
 			Traceback: traceback,
+			ExitCode:  exitCode,
 		}
 		exec.Error = &execErr
-		// Try to parse exit code from error value
-		if code, err := strconv.Atoi(evalue); err == nil {
+		// Prefer the authoritative error.exit_code; fall back to parsing the
+		// error value for servers that predate it.
+		if exitCode != nil {
+			code := *exitCode
+			exec.ExitCode = &code
+		} else if code, err := strconv.Atoi(evalue); err == nil {
 			exec.ExitCode = &code
 		}
 		if handlers != nil && handlers.OnError != nil {

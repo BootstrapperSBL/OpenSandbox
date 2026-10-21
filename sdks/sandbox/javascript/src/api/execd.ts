@@ -1449,7 +1449,7 @@ export interface components {
                  */
                 ename?: string;
                 /**
-                 * @description Error value/message
+                 * @description Error value/message. For `CommandExecError` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when the process could not be started; use `exit_code` to tell the two apart.
                  * @example name 'undefined_var' is not defined
                  */
                 evalue?: string;
@@ -1462,6 +1462,11 @@ export interface components {
                  *     ]
                  */
                 traceback?: string[];
+                /**
+                 * @description Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` events emitted after the process ran; omitted when the process failed to start and for non-command errors.
+                 * @example 3
+                 */
+                exit_code?: number;
             };
         };
         /** @description File metadata including path and permissions */
