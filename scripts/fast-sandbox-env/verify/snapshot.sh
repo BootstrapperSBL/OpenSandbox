@@ -43,6 +43,10 @@
 # The snapshot ids are shared through SNAPSHOT_ID / SNAPSHOT_ID2 /
 # SNAPSHOT_EXTRA.
 #
+# Housekeeping: the artifact store is pruned at entry — stale checkpoint /
+# template sets are removed, the baseline golden template set and the
+# indexes pointing into it are preserved.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 
@@ -77,6 +81,9 @@ snapshot_verify() {
 	# to Ready, restore a NEW sandbox from the snapshotId and boot it. Also
 	# covers re-entry fencing, source-sandbox survival, and a repeat snapshot.
 	local created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
+	# Snapshot sets are multi-GiB: drop stale ones from earlier runs before
+	# this verify adds its own (baseline template kept).
+	prune_artifact_store
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
 	log "verify (snapshot): creating the source sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"

@@ -45,6 +45,10 @@
 #      arrive within a 300s budget).
 #   5. Cleanup: kill the sandbox and wait until GET 404s.
 #
+# Housekeeping: the artifact store is pruned at entry — stale checkpoint /
+# template sets are removed, the baseline golden template set and the
+# indexes pointing into it are preserved.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -101,6 +105,9 @@ idle_pause_verify() {
 	local created t0 t1 code i
 	local x=30
 	local rounds="${IDLE_PAUSE_ROUNDS:-3}"
+	# Every auto-pause round publishes a checkpoint set: drop stale ones
+	# from earlier runs before this verify adds its own.
+	prune_artifact_store
 	[[ "$rounds" =~ ^[1-9][0-9]*$ ]] || die "IDLE_PAUSE_ROUNDS must be a positive integer (got $rounds)"
 	log "verify (idle-pause): creating an opted-in sandbox (idleTimeoutSeconds=$x, rounds=$rounds) via the lifecycle API"
 	t0="$(now_ms)"

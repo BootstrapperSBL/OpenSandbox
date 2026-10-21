@@ -41,6 +41,10 @@
 #      revision 1.
 #   7. Cleanup: kill the sandbox and wait until GET 404s.
 #
+# Housekeeping: the artifact store is pruned at entry — stale checkpoint /
+# template sets are removed, the baseline golden template set and the
+# indexes pointing into it are preserved.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 
@@ -77,6 +81,9 @@ vault_revision_is() { # <expected-revision>
 
 vault_lifecycle_verify() {
 	local created vault_body ack rev sandbox_uid
+	# The pause here publishes a checkpoint set (vault + policy bundles):
+	# drop stale ones from earlier runs before this verify adds its own.
+	prune_artifact_store
 	log "verify (vault): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
 	# The policy rides the create: a policy-less create produces no egress
 	# binding at all, so the subject would never register.

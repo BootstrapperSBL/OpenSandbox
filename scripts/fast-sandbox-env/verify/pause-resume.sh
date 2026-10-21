@@ -60,6 +60,10 @@
 #      than the first bundle's.
 #   8. Cleanup: kill the sandbox and wait until GET 404s.
 #
+# Housekeeping: the artifact store is pruned at entry — stale checkpoint /
+# template sets are removed, the baseline golden template set and the
+# indexes pointing into it are preserved.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 
@@ -114,6 +118,9 @@ pause_resume_verify() {
 	# PUT a new rule set -> pause again -> the NEW checkpoint bundle must
 	# carry the UPDATED policy (new rule present, replaced rule gone).
 	local created t0 t1 t2 t3 t4 rev1 rev2 sandbox_uid policy_file
+	# Every pause publishes a multi-GiB checkpoint set: drop stale ones from
+	# earlier runs before this verify adds its own (baseline template kept).
+	prune_artifact_store
 	policy_file="$GEN_DIR/pause-policy.json"
 	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "example.com"}, {action: "allow", target: "*.opensandbox.ai"}]}' \
 		> "$policy_file"

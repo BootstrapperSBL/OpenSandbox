@@ -504,5 +504,67 @@ require_template_id() {
 		|| die "no template id at $WORK/template-id (run 'integration.sh up' first)"
 }
 
+# --- artifact-store hygiene ---------------------------------------------------------
+
+# Prune stale artifact sets from the test S3 (RustFS). Every pause publishes
+# an instance-private checkpoint set (multi-GiB: rootfs + vmstate + memory)
+# and crashed runs leave stale template sets, so the artifact-heavy verifies
+# prune before they start — while no sandbox exists that could still restore
+# from one. The baseline golden template survives: its published set (the
+# manifest_ref directory) and every image index that points INTO it are
+# kept; everything else under the store prefix goes. Best-effort by design:
+# a failed delete is logged and pruned-skip never fails a verify (hygiene,
+# not a functional gate).
+prune_artifact_store() {
+	local manifest_ref protected_digest entry key seg mref removed=0 kept=0
+	local -a stale_sets=() stale_indexes=()
+	local -A seen=()
+	[[ -n "${TEMPLATE_ID:-}" ]] || { log "artifact prune: no template id; skipping"; return 0; }
+	manifest_ref="$(osb_api template get "$TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')"
+	[[ "$manifest_ref" == "s3://$RUSTFS_BUCKET/publish/"* ]] \
+		|| { log "artifact prune: template manifest_ref unavailable; skipping"; return 0; }
+	protected_digest="${manifest_ref#s3://$RUSTFS_BUCKET/publish/}"
+	protected_digest="${protected_digest%%/*}"
+	log "artifact prune: protecting template set publish/$protected_digest/ (and the indexes pointing into it)"
+	while IFS= read -r key; do
+		key="${key#/}"; key="${key#chain/$RUSTFS_BUCKET/}"; key="${key#publish/}"
+		[[ "$key" == *"/"* ]] || continue
+		seg="${key%%/*}"
+		if [[ "$seg" == "$protected_digest" ]]; then
+			kept=$((kept + 1))
+		elif [[ "$seg" == "index" ]]; then
+			entry="${key#index/}"
+			[[ -n "$entry" ]] || continue
+			mref="$(rc cat "chain/$RUSTFS_BUCKET/publish/index/$entry" 2>/dev/null | jq -r '.manifestRef // empty' 2>/dev/null)"
+			if [[ "$mref" == "s3://$RUSTFS_BUCKET/publish/$protected_digest/"* ]]; then
+				kept=$((kept + 1))
+			elif [[ -z "${seen[$entry]:-}" ]]; then
+				seen[$entry]=1
+				stale_indexes+=("$entry")
+			fi
+		elif [[ -z "${seen[$seg]:-}" ]]; then
+			seen[$seg]=1
+			stale_sets+=("$seg")
+		fi
+	done < <(rc ls --recursive "chain/$RUSTFS_BUCKET/publish/" 2>/dev/null | awk '{print $NF}')
+	for seg in "${stale_sets[@]:-}"; do
+		[[ -n "$seg" ]] || continue
+		if rc rm --recursive --force "chain/$RUSTFS_BUCKET/publish/$seg" >/dev/null 2>&1; then
+			removed=$((removed + 1))
+		else
+			log "artifact prune: failed to remove publish/$seg/ (continuing)"
+		fi
+	done
+	for entry in "${stale_indexes[@]:-}"; do
+		[[ -n "$entry" ]] || continue
+		if rc rm --force "chain/$RUSTFS_BUCKET/publish/index/$entry" >/dev/null 2>&1; then
+			removed=$((removed + 1))
+		else
+			log "artifact prune: failed to remove publish/index/$entry (continuing)"
+		fi
+	done
+	log "artifact prune: removed ${#stale_sets[@]} stale set(s) + ${#stale_indexes[@]} stale index(es) ($removed delete call(s), baseline kept: $kept object(s))"
+}
+
 # Workspace directories must exist before any log()/stage call.
 mkdir -p "$WORK" "$LOGS_DIR" "$GEN_DIR"
