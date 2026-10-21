@@ -511,6 +511,38 @@ func TestActionsHookForUnregisteredSubjectConflict(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestHookRemoveConcurrentNoRace (review: subjFence map race): a
+// data-plane-ready hook (holding policyCommitMu, reading subjFence under
+// s.mu) racing terminal cleanup (which deletes subjFence under s.mu without
+// policyCommitMu) must be data-race-free and converge to a consistent
+// outcome. Run under -race in CI.
+func TestHookRemoveConcurrentNoRace(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	s := subject.FromSandboxUID(policyTestUID)
+
+	rec := doAction(t, srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyAllow())))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r := doAction(t, srv, removeBody(t, policyTestUID, testFenceR, testFenceA))
+		assert.Equal(t, http.StatusOK, r.Code)
+	}()
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	hookCode := rec.Code
+	<-done
+
+	// The removal always completes (we waited), so the converged terminal
+	// state is absent regardless of the hook's outcome (200 activation
+	// first → removal reverts; removal first → the hook is a 404/409).
+	assert.Contains(t, []int{http.StatusOK, http.StatusNotFound, http.StatusConflict}, hookCode)
+	_, present := reg.Get(s)
+	assert.False(t, present, "terminal cleanup wins: the subject is gone")
+}
+
 // Stale-subject takeover on slot reuse (OSEP-0022)
 // ---------------------------------------------------------------------------
 

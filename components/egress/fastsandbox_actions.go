@@ -307,16 +307,21 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 		// ever consume.
 		s.policyCommitMu.Lock()
 		defer s.policyCommitMu.Unlock()
-		// In-lock fence re-validation: the pre-lock check cannot see a
-		// rebind that completes while this Hook waits on policyCommitMu —
+		// Fence re-validation AND the pending peek under one s.mu hold
+		// (policyCommitMu → s.mu, the established order): fenceMatchesLocked
+		// reads subjFence, which terminal cleanup deletes under s.mu without
+		// policyCommitMu (dropSubjectState is called under the registry write
+		// lock from takeover) — an unsynchronized read here would race that
+		// delete. The pre-lock fence check above cannot see a rebind or
+		// removal that completes while this Hook waits on policyCommitMu —
 		// a stale Hook must never activate the successor.
-		if !s.fenceMatchesLocked(subj, fence) {
+		s.mu.Lock()
+		stale := !s.fenceMatchesLocked(subj, fence)
+		pol := s.pendingPolicies[subj]
+		s.mu.Unlock()
+		if stale {
 			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
 		}
-		// Peek, do not consume: a transient nft failure must leave the
-		// pending policy in place so the Fastlet's retry of the same Hook
-		// succeeds instead of 409-ing forever with the subject deny-first.
-		pol := s.pendingPolicy(subj)
 		if pol == nil {
 			// No pending policy: SET_BINDING has not landed (protocol
 			// ordering violation) or the binding was removed. Fail closed —
