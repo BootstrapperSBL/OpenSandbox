@@ -463,7 +463,13 @@ func (s *fastSandboxPolicyServer) degradedVaultUIDsLocked() []string {
 // An existing slice for this exact fence wins (duplicate SET_BINDING); one
 // left under a different fence goes through the same file rules as a fresh
 // registration.
-func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy) {
+// policyDegraded reports that the recorded policy itself degraded at this
+// restart: the vault then degrades WITHOUT validation and WITHOUT
+// quarantine (a deny-seeded validation would quarantine a HEALTHY vault
+// whose binding hosts the tightened/unknown policy no longer covers —
+// silently destroying persisted credentials on every restart until a
+// policy/vault relay write heals it).
+func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fence subject.Fencing, pol *policy.NetworkPolicy, policyDegraded bool) {
 	if s.vaultFiles == nil {
 		return
 	}
@@ -503,13 +509,27 @@ func (s *fastSandboxPolicyServer) rehydrateVaultReload(subj subject.Subject, fen
 			entry.degraded = fmt.Sprintf("corrupt vault file: %v", decErr)
 			s.quarantineVaultFile(subj, fs)
 			log.Warnf("subject %s: %s", subj, entry.degraded)
+		case policyDegraded:
+			// The recorded policy degraded at this restart: hold the vault
+			// degraded WITHOUT validating it against the deny fallback (a
+			// deny-seeded validation would quarantine a HEALTHY vault) and
+			// WITHOUT quarantining the file — a policy/vault relay write
+			// heals the slice.
+			entry.degraded = "held degraded: the recorded policy is degraded at this restart"
+			log.Warnf("subject %s: %s (file kept)", subj, entry.degraded)
 		case (subject.Fencing{RuntimeInstanceID: vf.Incarnation, AttachmentID: vf.AttachmentID}).Matches(fence):
 			// Same-instance recovery: revalidate against the replayed binding
-			// policy, install at the exact file revision.
+			// policy, install at the exact file revision. A validation
+			// failure (e.g. the recorded policy was tightened and no longer
+			// covers a binding host) DEGRADES the slice but KEEPS the file —
+			// runtime relay commits never re-validate the vault, so
+			// policy/vault divergence at restart is a normal state, and
+			// quarantining here would silently destroy persisted
+			// credentials. A policy/vault relay write heals the slice; a
+			// policy heal + restart revives it from the kept file.
 			if err := entry.store.Reload(vf.Revision, credentialvault.CreateRequest(body), pol); err != nil {
 				entry.degraded = fmt.Sprintf("vault file reload rejected: %v", err)
-				s.quarantineVaultFile(subj, fs) // can never validate under this binding
-				log.Warnf("subject %s: %s", subj, entry.degraded)
+				log.Warnf("subject %s: %s (file kept; a policy/vault relay write heals the slice)", subj, entry.degraded)
 			} else {
 				log.Infof("subject %s: vault reloaded from file (revision %d, incarnation %s)", subj, vf.Revision, vf.Incarnation)
 			}

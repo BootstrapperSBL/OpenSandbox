@@ -231,12 +231,15 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 	if !env.Binding.IsRemoval() {
 		// Policy first: its reload result is the validation policy for the
 		// vault reload (a template clone's vault hosts are covered by the
-		// landed template policy, not by the replayed bootstrap input).
-		seed := s.rehydratePolicyReload(subj, fence)
+		// landed template policy, not by the replayed bootstrap input). A
+		// degraded policy record degrades the VAULT with it (fail-closed,
+		// file kept) instead of seeding the deny fallback — a deny-seeded
+		// vault validation would quarantine a healthy vault.
+		seed, policyDegraded := s.rehydratePolicyReload(subj, fence)
 		if seed == nil {
 			seed = pol
 		}
-		s.rehydrateVaultReload(subj, fence, seed)
+		s.rehydrateVaultReload(subj, fence, seed, policyDegraded)
 	}
 	state, err := s.reg.RegisterAndEnforce(subj, subject.SubjectKey{SourceIP: att.IP}, fence, func() error {
 		return s.OnRegistered(subj, att)

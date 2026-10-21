@@ -378,24 +378,24 @@ func (s *fastSandboxPolicyServer) clearPolicyRecordLocked(subj subject.Subject) 
 // Returns the policy the subject must run per the reload: the file-backed
 // policy, default-deny when degraded, or nil when the binding input seeds
 // (fresh subject).
-func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fence subject.Fencing) *policy.NetworkPolicy {
+func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fence subject.Fencing) (seed *policy.NetworkPolicy, degraded bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e := s.policies[subj]; e != nil {
 		if e.fence == fence {
-			return nil
+			return nil, false
 		}
 		delete(s.policies, subj)
 	}
 	fs, err := s.policyFiles.storeFor(subj)
 	if err != nil {
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file store unavailable: %v", err))
-		return policy.DefaultDenyPolicy()
+		return policy.DefaultDenyPolicy(), true
 	}
 	snap, err := fs.Snapshot()
 	if err != nil {
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file unreadable: %v", err))
-		return policy.DefaultDenyPolicy()
+		return policy.DefaultDenyPolicy(), true
 	}
 	if !snap.Exists() {
 		// Fresh subject: the binding input seeds. A durable seal marker (an
@@ -405,9 +405,9 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 			s.policies[subj] = &policyEntry{fence: fence, sealed: true}
 			s.pendingPolicies[subj] = policy.DefaultDenyPolicy()
 			log.Infof("subject %s: seal restored from marker (file-less subject)", subj)
-			return policy.DefaultDenyPolicy()
+			return policy.DefaultDenyPolicy(), true
 		}
-		return nil
+		return nil, false
 	}
 	pf, body, decErr := policy.DecodePolicyFile(snap.Data())
 	if decErr != nil {
@@ -422,7 +422,7 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 			}
 		}
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file unusable (%v)", decErr))
-		return policy.DefaultDenyPolicy()
+		return policy.DefaultDenyPolicy(), true
 	}
 	recorded := subject.Fencing{RuntimeInstanceID: pf.Incarnation, AttachmentID: pf.AttachmentID}
 	if !recorded.Matches(fence) {
@@ -433,17 +433,17 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 		} else {
 			log.Infof("subject %s: stale policy file discarded (fence %s/%s ≠ %s/%s)", subj, pf.Incarnation, pf.AttachmentID, fence.RuntimeInstanceID, fence.AttachmentID)
 		}
-		return nil
+		return nil, false
 	}
 	pol, parseErr := policy.ParsePolicy(string(body))
 	if parseErr != nil {
 		if _, delErr := fs.Delete(); delErr != nil {
 			log.Errorf("subject %s: unparseable policy file quarantine failed (file left in place): %v", subj, delErr)
 			s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file quarantine failed: %v", delErr))
-			return policy.DefaultDenyPolicy()
+			return policy.DefaultDenyPolicy(), true
 		}
 		s.degradePolicyReloadLocked(subj, fence, fmt.Sprintf("policy file content rejected (%v)", parseErr))
-		return policy.DefaultDenyPolicy()
+		return policy.DefaultDenyPolicy(), true
 	}
 	entry := &policyEntry{revision: pf.Revision, fence: fence}
 	// A durable seal marker (export acked, teardown not yet delivered)
@@ -456,7 +456,7 @@ func (s *fastSandboxPolicyServer) rehydratePolicyReload(subj subject.Subject, fe
 	s.policies[subj] = entry
 	s.pendingPolicies[subj] = pol
 	log.Infof("subject %s: policy reloaded from file (revision %d, incarnation %s); binding input superseded", subj, pf.Revision, pf.Incarnation)
-	return pol
+	return pol, false
 }
 
 // applyBindingPolicyLocked seeds the binding's policy for a freshly
