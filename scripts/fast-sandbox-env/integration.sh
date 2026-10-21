@@ -79,7 +79,7 @@
 #   IDLE_PAUSE=1     OSEP-0024 idle-pause/wake profile: Redis, server
 #                    [automation.idle_pause], gateway activity+wake flags,
 #                    idle-pause verify stage
-#   IDLE_PAUSE_ROUNDS  auto-pause/wake rounds in the verify stage and idle-e2e (default 3)
+#   IDLE_PAUSE_ROUNDS  auto-pause/wake rounds in the idle-pause verify stage (default 3)
 #   IDLE_PAUSE_PARK_BUDGET  gateway wake park budget (default 5s; set e.g. 100ms to
 #                    force every wake through the marked-503 + client-retry path)
 #   REDIS_IMAGE      Redis image for the idle-pause profile (default redis:7-alpine)
@@ -139,8 +139,7 @@ idle_e2e() {
 	export OPENSANDBOX_TEST_PROTOCOL="http"
 	export OPENSANDBOX_TEST_API_KEY="$SERVER_API_KEY"
 	export OPENSANDBOX_TEST_IDLE_PAUSE="1"
-	export OPENSANDBOX_TEST_IDLE_ROUNDS="${IDLE_PAUSE_ROUNDS:-3}"
-	log "sdk e2e (idle-pause): template=$template_id server=$SERVER_URL rounds=$OPENSANDBOX_TEST_IDLE_ROUNDS -> tests/python/tests/test_fsb_idle_pause_e2e.py"
+	log "sdk e2e (idle-pause): template=$template_id server=$SERVER_URL -> tests/python/tests/test_fsb_idle_pause_e2e.py"
 	cd "$OSB_ROOT/tests/python" || die "tests/python not found under $OSB_ROOT"
 	uv run pytest tests/test_fsb_idle_pause_e2e.py
 }
