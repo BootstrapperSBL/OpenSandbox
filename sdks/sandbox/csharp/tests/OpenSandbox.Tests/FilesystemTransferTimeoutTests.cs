@@ -211,7 +211,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation during the header wait must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -261,7 +261,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation during the header wait must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -305,7 +305,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(ResponseBound, "a caller token must still cancel a transfer in flight");
         await serving;
@@ -335,7 +335,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -514,7 +514,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -545,7 +545,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
@@ -572,7 +572,7 @@ public class FilesystemTransferTimeoutTests
             .Should().ThrowAsync<OperationCanceledException>();
         elapsed.Stop();
 
-        exception.Which.InnerException.Should().NotBeOfType<TimeoutException>(
+        (exception.Which.InnerException is TimeoutException).Should().BeFalse(
             "a caller cancellation must not be reported as the transfer header timeout");
         elapsed.Elapsed.Should().BeLessThan(
             ResponseBound,
