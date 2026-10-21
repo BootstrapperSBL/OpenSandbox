@@ -21,13 +21,13 @@
 //
 // Operation mapping:
 //
-//	SET_BINDING        register the subject (deny-first), store the input
-//	                   policy as pending; activate immediately when the
-//	                   subject is already active (a plain input update does
-//	                   not replay Hooks). A JSON-null input removes the
-//	                   policy and reverts to deny-first. A key held by a
-//	                   different live subject is a stale-subject takeover
-//	                   (OSEP-0022): the previous owner goes first.
+//	SET_BINDING        register the subject (deny-first) and seed the input
+//	                   policy on a fresh subject (an existing record
+//	                   supersedes the input); activate immediately when the
+//	                   subject is already active. A JSON-null input removes
+//	                   the policy and reverts to deny-first. A key held by
+//	                   a different live subject is a stale-subject
+//	                   takeover (OSEP-0022): the previous owner goes first.
 //	LIFECYCLE_HOOK     sandbox.runtime-ready only confirms the deny-first
 //	                   install (idempotent); sandbox.data-plane-ready applies
 //	                   the pending policy -> active. Unknown Hooks are
@@ -38,6 +38,10 @@
 //	                   the subject — pause flow, before teardown.
 //	VAULT_IMPORT       land the bundle re-stamped with the restored fence —
 //	                   resume flow, before data-plane-ready.
+//	POLICY_EXPORT      copy the recorded policy file into the snapshot bundle
+//	                   and seal the subject — pause flow, before teardown.
+//	POLICY_IMPORT      land the policy bundle re-stamped with the restored
+//	                   fence — resume flow, before data-plane-ready.
 //
 // Fail-closed invariants: the subject is deny-first from registration until
 // its data-plane-ready Hook succeeds, so policy delivery can be late but
@@ -88,24 +92,32 @@ func (s *fastSandboxPolicyServer) handleActionsStatus(w http.ResponseWriter, r *
 		return
 	}
 	recovery := s.vaultRecoveryActive()
+	policyRecovery := s.policyRecoveryActive()
 	degraded := s.degradedVaultUIDs()
 	ready := true
 	if s.mitmGate != nil && s.mitmGate.MitmPending() {
 		ready = false
 	}
-	if recovery {
+	if recovery || policyRecovery {
 		ready = false
 	}
 	resp := actionhandler.StatusResponse{
-		APIVersion:     constants.ActionsAPIVersion,
-		Ready:          ready,
-		InstanceID:     s.instanceID,
-		Recovery:       recovery,
-		DegradedVaults: degraded,
+		APIVersion: constants.ActionsAPIVersion,
+		Ready:      ready,
+		InstanceID: s.instanceID,
+		Recovery:   recovery,
 		// Capability signal for the Fastlet's vault transfer: without vault
 		// persistence there is no vault state to hand off, so the transfer
 		// degrades (skips) rather than failing the checkpoint.
 		VaultTransfer: s.vaultFiles != nil,
+		// Capability signal for the Fastlet's policy transfer: without policy
+		// persistence there is no recorded policy to hand off, so the
+		// transfer degrades (skips) rather than failing the checkpoint.
+		PolicyTransfer:      s.policyFiles != nil,
+		PolicyRecovery:      policyRecovery,
+		DegradedPolicies:    s.degradedPolicyUIDs(),
+		DegradedVaults:      degraded,
+		TemplateStateExport: true,
 	}
 	if s.mitmGate != nil {
 		resp.MitmCaFingerprint = s.mitmGate.CAFingerprint()
@@ -158,6 +170,10 @@ func (s *fastSandboxPolicyServer) dispatchAction(env *actionhandler.Envelope) (i
 		return s.applyVaultExport(env)
 	case actionhandler.OperationVaultImport:
 		return s.applyVaultImport(env)
+	case actionhandler.OperationPolicyExport:
+		return s.applyPolicyExport(env)
+	case actionhandler.OperationPolicyImport:
+		return s.applyPolicyImport(env)
 	default:
 		// Unreachable: ParseEnvelope validated the operation.
 		return http.StatusBadRequest, fmt.Errorf("unknown operation %q", env.Operation)
@@ -182,26 +198,48 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 			return http.StatusBadRequest, fmt.Errorf("invalid binding input policy: %v", err)
 		}
 	}
+	// The whole mutation holds policyCommitMu — rebind purge, registration,
+	// and seed/apply are one unit against relay commits and hooks.
+	// Otherwise a predecessor-identity relay write could straddle the
+	// fence flip and its reg.ApplyPolicy would activate the successor
+	// under the predecessor's policy. Lock order: policyCommitMu →
+	// registry → s.mu.
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
+
 	// A fence change is a rebind: discard ALL prior per-subject state. The
 	// registry drops its entry inside RegisterAndEnforce; the vault slice
-	// must go too (memory + persisted file), or the old instance's
-	// credentials would survive into the successor's flows. Same-UID actions
-	// serialize per subject; the vault relay writes hold the same lock for
-	// their whole commit protocol.
+	// and the recorded policy must go too (memory + persisted files), or the
+	// old instance's credentials and policy would survive into the
+	// successor's flows.
 	if old, ok := s.reg.Fence(subj); ok && !old.Matches(fence) {
 		s.mu.Lock()
 		s.dropVault(subj)
+		delete(s.policies, subj)
+		s.purgePolicyFile(subj)
 		s.mu.Unlock()
-		log.Infof("subject %s: rebind (%s -> %s), vault slice purged", subj, old.RuntimeInstanceID, fence.RuntimeInstanceID)
+		log.Infof("subject %s: rebind (%s -> %s), vault slice and policy record purged", subj, old.RuntimeInstanceID, fence.RuntimeInstanceID)
 	}
 	// Egress-restart recovery (OSEP-0022 stage 2): a subject with no live
 	// vault slice reloads its persisted file here, fenced by the full runtime
-	// identity. This runs BEFORE the deny-first install so no interception
-	// entry can materialize an empty slice ahead of the reload. A removal
-	// binding skips the reload: with no policy to revalidate against, the
-	// file stays fenced on disk until the next registration or terminal purge.
+	// identity. The recorded policy reloads the same way — the committed file
+	// is authoritative over the replayed binding input. These run BEFORE the
+	// deny-first install so no interception entry can materialize an empty
+	// slice ahead of the reload. A removal binding skips the reloads: with no
+	// policy to revalidate against, the files stay fenced on disk until the
+	// next registration or terminal purge.
 	if !env.Binding.IsRemoval() {
-		s.rehydrateVaultReload(subj, fence, pol)
+		// Policy first: its reload result is the validation policy for the
+		// vault reload (a template clone's vault hosts are covered by the
+		// landed template policy, not by the replayed bootstrap input). A
+		// degraded policy record degrades the VAULT with it (fail-closed,
+		// file kept) instead of seeding the deny fallback — a deny-seeded
+		// vault validation would quarantine a healthy vault.
+		seed, policyDegraded := s.rehydratePolicyReload(subj, fence)
+		if seed == nil {
+			seed = pol
+		}
+		s.rehydrateVaultReload(subj, fence, seed, policyDegraded)
 	}
 	state, err := s.reg.RegisterAndEnforce(subj, subject.SubjectKey{SourceIP: att.IP}, fence, func() error {
 		return s.OnRegistered(subj, att)
@@ -209,12 +247,19 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 	if err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("deny-first install: %w", err)
 	}
-	s.recordBindingState(subj, att)
+	s.recordBindingState(subj, att, fence)
 	if env.Binding.IsRemoval() {
 		// Binding removed from a still-live sandbox: drop the pending policy
 		// (a re-added binding gets a fresh input — never apply the removed
-		// binding's policy to a policy-less subject).
+		// binding's policy to a policy-less subject) and purge the recorded
+		// policy, so deny-first is also the durable state.
 		s.clearPendingPolicy(subj)
+		if err := s.clearPolicyRecordLocked(subj); err != nil {
+			// The durable removal did not confirm: fail the action so the
+			// Fastlet's retry re-runs the purge/tombstone instead of acking
+			// a removal whose file may still carry the removed policy.
+			return http.StatusInternalServerError, fmt.Errorf("policy record removal: %w", err)
+		}
 		if state == subject.StateActive {
 			if err := s.revertToDenyFirst(subj, att); err != nil {
 				return http.StatusInternalServerError, err
@@ -223,15 +268,11 @@ func (s *fastSandboxPolicyServer) applySetBinding(env *actionhandler.Envelope) (
 		log.Infof("subject %s: binding removed (deny-first)", subj)
 		return http.StatusOK, nil
 	}
-	if state == subject.StateActive {
-		// Ordinary input update on an already-ready sandbox: apply in place,
-		// no Hook replay (the Fastlet does not send one for updates).
-		if err := s.applyPolicy(subj, pol); err != nil {
-			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
-		}
-	} else {
-		// Deny-first until sandbox.data-plane-ready activates the subject.
-		s.storePendingPolicy(subj, pol)
+	// Install the binding policy (or honor the file-backed record that
+	// supersedes it) through the policy commit protocol.
+	if err := s.applyBindingPolicyLocked(subj, fence, pol, state == subject.StateActive); err != nil {
+		log.Errorf("subject %s: binding policy commit failed: %v", subj, err)
+		return http.StatusInternalServerError, fmt.Errorf("binding policy commit: %w", err)
 	}
 	log.Infof("subject %s: SET_BINDING applied (state=%s)", subj, state)
 	return http.StatusOK, nil
@@ -260,10 +301,30 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 	case constants.HookRuntimeReady:
 		return http.StatusOK, nil
 	case constants.HookDataPlaneReady:
-		// Peek, do not consume: a transient nft failure must leave the
-		// pending policy in place so the Fastlet's retry of the same Hook
-		// succeeds instead of 409-ing forever with the subject deny-first.
-		pol := s.pendingPolicy(subj)
+		// Serialized with the policy relay commits (policyCommitMu): a
+		// relay write that passed its guards before this hook must either
+		// land first (the activation below then applies the relayed
+		// pending policy) or after (its apply-time state re-read then sees
+		// Active and updates enforcement in place) — it can never land
+		// after the activation as a pending-only write that nothing will
+		// ever consume.
+		s.policyCommitMu.Lock()
+		defer s.policyCommitMu.Unlock()
+		// Fence re-validation AND the pending peek under one s.mu hold
+		// (policyCommitMu → s.mu, the established order): fenceMatchesLocked
+		// reads subjFence, which terminal cleanup deletes under s.mu without
+		// policyCommitMu (dropSubjectState is called under the registry write
+		// lock from takeover) — an unsynchronized read here would race that
+		// delete. The pre-lock fence check above cannot see a rebind or
+		// removal that completes while this Hook waits on policyCommitMu —
+		// a stale Hook must never activate the successor.
+		s.mu.Lock()
+		stale := !s.fenceMatchesLocked(subj, fence)
+		pol := s.pendingPolicies[subj]
+		s.mu.Unlock()
+		if stale {
+			return http.StatusConflict, fmt.Errorf("stale %s (fence mismatch) for subject %s", env.Hook.Name, subj)
+		}
 		if pol == nil {
 			// No pending policy: SET_BINDING has not landed (protocol
 			// ordering violation) or the binding was removed. Fail closed —

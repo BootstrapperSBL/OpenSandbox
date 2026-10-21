@@ -547,9 +547,12 @@ func TestVaultPersistUnknownVersionDegradesButPreservesFile(t *testing.T) {
 func TestVaultPersistReloadValidationFailureDegrades(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	// The file's binding host is not covered by the replayed binding policy:
-	// the content cannot be revalidated, so the slice degrades (fail closed)
-	// instead of injecting uncovered credentials — and the file is
-	// quarantined, since it can never validate under this binding.
+	// the content cannot be revalidated, so the slice DEGRADES (fail closed)
+	// instead of injecting uncovered credentials — and the file is KEPT: the
+	// policy/vault divergence is a normal state (runtime relay commits never
+	// re-validate the vault), so quarantining would silently destroy
+	// persisted credentials. A policy heal + restart, or a vault relay
+	// write, revives the slice.
 	uncovered := `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 		`"bindings":[{"name":"api","match":{"hosts":["other.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
 	h.seedVaultFile(vaultTestUID, testFenceR, testFenceA, 5, uncovered)
@@ -563,7 +566,34 @@ func TestVaultPersistReloadValidationFailureDegrades(t *testing.T) {
 	// The vault slice stays empty — interception fails closed.
 	rec := doVault(t, h.srv, http.MethodGet, vaultTestUID, "", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.False(t, h.fileFor(vaultTestUID).exists, "content rejected by the binding policy is quarantined")
+	assert.True(t, h.fileFor(vaultTestUID).exists, "the uncovered-but-healthy vault file is kept (no quarantine)")
+
+	// Revival: a policy heal (the record now covers the vault's binding
+	// host) plus a restart reloads the kept vault at its preserved revision.
+	healed := `{"defaultAction":"deny","egress":[{"action":"allow","target":"other.example.com"}]}`
+	rec = doPolicy(t, h.srv, http.MethodPut, vaultTestUID, policyPutDoc(healed, 0, false, false), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	srv2, _, _ := fastSandboxTestServer(t)
+	vp2, err := newVaultPersistence(h.dir)
+	require.NoError(t, err)
+	vp2.newFile = h.vp.newFile
+	srv2.SetVaultFiles(vp2)
+
+	// The replayed binding covers the vault's binding host (other.example.com).
+	rec = doAction(t, srv2, bindBody(t, vaultTestUID, vaultTestIP, testFenceR, testFenceA, 2,
+		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"other.example.com"}]}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, vaultTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, vaultTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = doVault(t, srv2, http.MethodGet, vaultTestUID, "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"revision":5`)
+	status = mustStatus(t, srv2)
+	assert.Empty(t, status.DegradedVaults)
 }
 
 func TestVaultPersistDuplicateSetBindingKeepsLiveSlice(t *testing.T) {

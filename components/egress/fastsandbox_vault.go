@@ -123,8 +123,16 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 	// The body has been consumed; a late response must not try to read it.
 	r.Body.Close()
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// The whole write holds policyCommitMu: the validation policy must not
+	// change between the pre-read and the commit (policy mutations — relay
+	// PUT/DELETE, hooks, removals — serialize on the same mutex, and none
+	// of them bump the fence, so the commit-time fence re-check alone
+	// cannot catch this). Lock order: policyCommitMu → registry → s.mu.
+	s.policyCommitMu.Lock()
+	defer s.policyCommitMu.Unlock()
+
+	// Registry reads before s.mu (lock order: policyCommitMu → registry →
+	// s.mu).
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		http.Error(w, "unknown subject", http.StatusNotFound)
@@ -132,6 +140,23 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 	}
 	if inc := strings.TrimSpace(r.Header.Get(constants.EgressVaultIncarnationHeader)); inc != "" && inc != fence.RuntimeInstanceID {
 		http.Error(w, "expectedIncarnation mismatch", http.StatusPreconditionFailed)
+		return
+	}
+	// Pre-compute the validation policy BEFORE s.mu (registry → s.mu
+	// order): a vault op held to the data-plane-ready barrier must validate
+	// against the SAME policy the hook will enforce, operator always-rules
+	// included.
+	effective := s.vaultValidationPolicy(subj)
+
+	// The rest of the mutation holds s.mu, serializing per-subject writers
+	// and fencing rebind/terminal purges. The validation policy was fully
+	// pre-computed above — nothing inside the lock touches the registry.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Commit-time fence re-validation: the pre-read above cannot see a
+	// rebind that completed after it (see subjFence).
+	if !s.fenceMatchesLocked(subj, fence) {
+		http.Error(w, "unknown subject", http.StatusNotFound)
 		return
 	}
 	if s.vaultSealedLocked(subj) {
@@ -143,7 +168,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		return
 	}
 	store := s.vaultForLocked(subj, fence)
-	pol := s.vaultValidationPolicyLocked(subj)
+	pol := effective
 
 	var (
 		candidate *credentialvault.MutationCandidate
@@ -260,21 +285,25 @@ func writeVaultRelayWriteResponse(w http.ResponseWriter, r *http.Request, state 
 }
 
 // selectRelayVault decides registration, the expectedIncarnation
-// precondition, and the fence-bound store selection under one s.mu hold
-// (see vaultForLocked). A concurrent rebind then either purges before
-// selection — the stale incarnation mismatches the successor's fresh fence —
-// or purges after — the stale request holds the old store, which the purge
-// discards. Either way a stale writer never reaches the successor's store.
+// precondition, and the fence-bound store selection. Registry reads happen
+// BEFORE s.mu (lock order: registry → s.mu, see handleVaultRelayWrite); a
+// concurrent rebind then either purges before selection — the stale
+// incarnation mismatches the successor's fresh fence — or purges after —
+// the stale request holds the old store, which the purge discards. Either
+// way a stale writer never reaches the successor's store.
 // A nil store means the caller must write (status, msg).
 func (s *fastSandboxPolicyServer) selectRelayVault(r *http.Request, subj subject.Subject) (*credentialvault.Store, int, string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	fence, ok := s.reg.Fence(subj)
 	if !ok {
 		return nil, http.StatusNotFound, "unknown subject"
 	}
 	if inc := strings.TrimSpace(r.Header.Get(constants.EgressVaultIncarnationHeader)); inc != "" && inc != fence.RuntimeInstanceID {
 		return nil, http.StatusPreconditionFailed, "expectedIncarnation mismatch"
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.fenceMatchesLocked(subj, fence) {
+		return nil, http.StatusNotFound, "unknown subject"
 	}
 	if s.vaultSealedLocked(subj) {
 		return nil, http.StatusConflict, "subject vault is sealed (paused); the bundle copy is already taken"
@@ -289,16 +318,19 @@ func (s *fastSandboxPolicyServer) vaultSealedLocked(subj subject.Subject) bool {
 	return ok && e.sealed
 }
 
-// vaultValidationPolicyLocked returns the policy a vault op validates
-// against: the effective policy of an active subject, or — while the subject
-// is still denying — its pending binding policy (the op is held to the
-// data-plane-ready barrier, so validation must not depend on hook timing).
-// Callers hold s.mu.
-func (s *fastSandboxPolicyServer) vaultValidationPolicyLocked(subj subject.Subject) *policy.NetworkPolicy {
-	if pol := s.reg.EffectivePolicy(subj); pol != nil {
-		return pol
+// vaultValidationPolicy returns the policy a vault op validates against:
+// the effective policy of an active subject, or the pending policy merged
+// with the always overlay while denying (a barrier-held op must not depend
+// on hook timing). Call BEFORE s.mu — it reads the registry.
+func (s *fastSandboxPolicyServer) vaultValidationPolicy(subj subject.Subject) *policy.NetworkPolicy {
+	effective := s.reg.EffectivePolicy(subj)
+	if effective != nil {
+		return effective
 	}
-	if pending := s.pendingPolicies[subj]; pending != nil {
+	s.mu.Lock()
+	pending := s.pendingPolicies[subj]
+	s.mu.Unlock()
+	if pending != nil {
 		return s.reg.EffectiveOf(pending)
 	}
 	return nil

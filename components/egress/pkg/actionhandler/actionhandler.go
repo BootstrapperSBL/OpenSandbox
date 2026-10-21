@@ -16,8 +16,9 @@
 // protocol (docs/concepts/sandbox-actions.md, sandbox.fast.io/actions/v1)
 // from the egress side: the egress process IS the Handler, and the Fastlet
 // delivers Binding synchronization (SET_BINDING / REMOVE_BINDING), Lifecycle
-// Hooks, and the pause/resume vault snapshot transfer (VAULT_EXPORT /
-// VAULT_IMPORT) over two Pod-loopback HTTP endpoints.
+// Hooks, and the pause/resume snapshot transfer (VAULT_EXPORT / VAULT_IMPORT
+// for the credential vault, POLICY_EXPORT / POLICY_IMPORT for the recorded
+// egress policy) over two Pod-loopback HTTP endpoints.
 //
 // The package owns the wire model, parsing, and validation only. Lifecycle
 // semantics (deny-first registration, data-plane-ready activation) are wired
@@ -56,6 +57,10 @@ const (
 	// transfer.
 	OperationVaultExport Operation = "VAULT_EXPORT"
 	OperationVaultImport Operation = "VAULT_IMPORT"
+	// PolicyExport/Import carry the recorded policy across pause/resume
+	// with the same contract as the vault transfer.
+	OperationPolicyExport Operation = "POLICY_EXPORT"
+	OperationPolicyImport Operation = "POLICY_IMPORT"
 )
 
 // Lifecycle Hook names (v1). Unknown Hook names are rejected: the Handler
@@ -109,9 +114,23 @@ type Hook struct {
 }
 
 // SnapshotTransfer names the driver-provided staging file for one subject's
-// vault snapshot: the export target, or the bundle source at restore.
+// state snapshot (vault / recorded policy): the export target, or the bundle
+// source at restore.
 type SnapshotTransfer struct {
 	Path string `json:"path"`
+	// Seal selects the export semantics. Absent/nil = sealed (the
+	// checkpoint flow: the subject is locked out of the copied state until
+	// an import or teardown re-owns it). Seal=false = seal-free carry —
+	// the record is copied verbatim and the source keeps full relay CRUD
+	// (the template flow: the source stays live and the clone adopts the
+	// carried state at its first registration).
+	Seal *bool `json:"seal,omitempty"`
+}
+
+// Sealed reports the export semantics: nil means the checkpoint default
+// (sealed).
+func (t *SnapshotTransfer) Sealed() bool {
+	return t.Seal == nil || *t.Seal
 }
 
 // validatePath enforces the Pod-local absolute-path contract at parse time,
@@ -217,7 +236,8 @@ func (e *Envelope) Validate() error {
 		}
 	case OperationRemoveBinding:
 		// no payload required; terminal cleanup is identified by the sandbox ref
-	case OperationVaultExport, OperationVaultImport:
+	case OperationVaultExport, OperationVaultImport,
+		OperationPolicyExport, OperationPolicyImport:
 		if e.Snapshot == nil || strings.TrimSpace(e.Snapshot.Path) == "" {
 			return fmt.Errorf("%s requires a snapshot payload with a path", e.Operation)
 		}
@@ -291,4 +311,20 @@ type StatusResponse struct {
 	// as false: the Fastlet then skips the transfer (checkpoint proceeds
 	// without a vault) instead of failing it.
 	VaultTransfer bool `json:"vaultTransfer,omitempty"`
+	// PolicyTransfer reports that this Handler serves POLICY_EXPORT /
+	// POLICY_IMPORT and persists per-subject policy files.
+	PolicyTransfer bool `json:"policyTransfer,omitempty"`
+	// PolicyRecovery is true while the policy persistence recovery latch
+	// freezes policy relay writes until restart; DegradedPolicies lists
+	// subjects whose persisted policy failed to load (default-deny fail
+	// closed for them; a relay write heals).
+	PolicyRecovery   bool     `json:"policyRecovery,omitempty"`
+	DegradedPolicies []string `json:"degradedPolicies,omitempty"`
+	// TemplateStateExport reports that this Handler supports the
+	// seal-free template state carry (SnapshotTransfer.Seal=false exports
+	// keep the source live; imports land for the next registration).
+	// Absent on older builds decodes as false: the Fastlet's template
+	// snapshots then export nothing (handlers that always seal are never
+	// asked) — rolling upgrades are safe in both directions.
+	TemplateStateExport bool `json:"templateStateExport,omitempty"`
 }
