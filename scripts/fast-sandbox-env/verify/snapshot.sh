@@ -262,7 +262,7 @@ snapshot_verify() {
 	# 4. ARTIFACT (dump time): the published set carries the recorded policy
 	# file with EXACTLY the policy at dump time — rule #2 does not exist yet.
 wait_for "snapshot artifact carries policy.json (defaultAction allow)" 60 \
-	snapshot_bundle_policy_is '.defaultAction == "allow"'
+	snapshot_bundle_policy_is '.policy.defaultAction == "allow"'
 wait_for "snapshot artifact policy == dump-time rules (deny pypi.org only)" 60 \
 	snapshot_bundle_policy_is '.policy == {defaultAction: "allow", egress: [{action: "deny", target: "pypi.org"}]}'
 	pass "snapshot artifact carries the dump-time recorded policy (policy.json: allow + deny pypi.org only)"
