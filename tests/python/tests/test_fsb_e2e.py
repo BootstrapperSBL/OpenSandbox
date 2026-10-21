@@ -30,7 +30,7 @@ Requires the fsb integration stack to be up plus
 ``OPENSANDBOX_TEST_FSB_TEMPLATE_ID`` (the golden-image template built by
 the env script's ``template_up`` stage):
 
-    ./scripts/fast-sandbox-env/integration.sh up
+    ./scripts/fast-sandbox-env/integration-env.sh up
     cd tests/python
     OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" \
         uv run pytest tests/test_fsb_e2e.py

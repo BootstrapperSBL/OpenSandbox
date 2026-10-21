@@ -39,6 +39,7 @@ class TestRootCLI:
             "template",
             "snapshot",
             "command",
+            "terminal",
             "file",
             "egress",
             "credential-vault",
@@ -92,6 +93,14 @@ class TestFileHelp:
         assert result.exit_code == 0
         for subcmd in ("cat", "write", "upload", "download", "rm", "mv", "mkdir", "rmdir", "search", "info", "chmod", "replace"):
             assert subcmd in result.output
+
+
+class TestTerminalHelp:
+    def test_terminal_help(self, runner: CliRunner) -> None:
+        result = runner.invoke(cli, ["terminal", "--help"])
+        assert result.exit_code == 0
+        assert "SANDBOX_ID" in result.output
+        assert "--workdir" in result.output
 
 
 class TestEgressHelp:

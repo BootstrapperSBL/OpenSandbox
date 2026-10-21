@@ -15,7 +15,7 @@
 """create-bench.py — fsb sandbox create-latency bench for the fast-sandbox-env
 kind deployment, written against the OpenSandbox Python SDK.
 
-Run AFTER `./integration.sh up`:
+Run AFTER `./integration-env.sh up`:
 
     cd OpenSandbox/tests/python
     uv run python ../../scripts/fast-sandbox-env/create-bench.py

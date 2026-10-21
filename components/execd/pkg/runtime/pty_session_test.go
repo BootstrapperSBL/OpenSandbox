@@ -28,6 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/alibaba/opensandbox/internal/safego"
+
+	"github.com/alibaba/opensandbox/execd/pkg/binding"
 )
 
 func replayContains(t *testing.T, s *ptySession, substr string, timeout time.Duration) bool {
@@ -391,4 +393,34 @@ func waitForLine(ch <-chan string, target string, timeout time.Duration) bool {
 			return false
 		}
 	}
+}
+
+func TestPTYSessionEnvDefaultsTerm(t *testing.T) {
+	t.Setenv("EXECD_ENVS", "")
+	applyTestBinding(t, &binding.RuntimeBinding{SandboxID: "sandbox-1"})
+
+	t.Setenv("TERM", "")
+	require.Equal(
+		t,
+		[]string{"TERM=" + defaultPTYTerm},
+		terminalEntries(ptySessionEnv()),
+	)
+}
+
+func TestPTYSessionEnvKeepsExistingTerm(t *testing.T) {
+	t.Setenv("EXECD_ENVS", "")
+	applyTestBinding(t, &binding.RuntimeBinding{SandboxID: "sandbox-1"})
+
+	t.Setenv("TERM", "xterm")
+	require.Equal(t, []string{"TERM=xterm"}, terminalEntries(ptySessionEnv()))
+}
+
+func terminalEntries(env []string) []string {
+	var found []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "TERM=") {
+			found = append(found, kv)
+		}
+	}
+	return found
 }

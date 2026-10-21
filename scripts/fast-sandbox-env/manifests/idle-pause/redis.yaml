@@ -13,7 +13,7 @@
 # limitations under the License.
 #
 # OSEP-0024 profile: ephemeral Redis for activity keys and pause locks.
-# Applied into the opensandbox-system namespace by integration.sh.
+# Applied into the opensandbox-system namespace by integration-env.sh.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

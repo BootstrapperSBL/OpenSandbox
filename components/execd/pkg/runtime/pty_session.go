@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -246,6 +247,27 @@ func buildPTYCommand(command string) *exec.Cmd {
 	return exec.Command(shell, args...)
 }
 
+// defaultPTYTerm backs the TERM default in ptySessionEnv: execd runs as a
+// daemon whose environment normally carries no TERM, which makes interactive
+// programs disable colors and terminfo features.
+const defaultPTYTerm = "xterm-256color"
+
+// ptySessionEnv returns the user process environment with TERM defaulted for
+// the interactive PTY side; pipe mode is not a terminal and gets no default.
+func ptySessionEnv() []string {
+	env := UserProcessEnvironment()
+	for i, kv := range env {
+		if name, value, ok := strings.Cut(kv, "="); ok && name == "TERM" {
+			if value != "" {
+				return env
+			}
+			env[i] = "TERM=" + defaultPTYTerm
+			return env
+		}
+	}
+	return append(env, "TERM="+defaultPTYTerm)
+}
+
 // StartPTY launches the preferred shell via pty.StartWithSize.
 // Must be called with the WS lock held.
 func (s *ptySession) StartPTY() error {
@@ -262,7 +284,7 @@ func (s *ptySession) StartPTY() error {
 	cmd := buildPTYCommand(s.command)
 	// Resolve through the shared user-env layering (sandbox binding envs from
 	// /init < EXECD_ENVS file) instead of inheriting execd's raw environment.
-	cmd.Env = UserProcessEnvironment()
+	cmd.Env = ptySessionEnv()
 	if s.cwd != "" {
 		cmd.Dir = s.cwd
 	}
