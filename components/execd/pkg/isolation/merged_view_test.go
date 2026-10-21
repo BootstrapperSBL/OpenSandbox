@@ -333,6 +333,15 @@ func TestMergedView_RootLowerServesAllAbsolutePaths(t *testing.T) {
 	_, statErr := mv.Stat("/definitely-not-a-real-path-87953550")
 	assert.False(t, errors.Is(statErr, ErrPathOutsideOverlays), "root view must not reject absolute paths")
 	assert.True(t, os.IsNotExist(statErr))
+
+	// The returned path is workspace-relative, including for the root view.
+	rel, err := mv.safePath("/etc/passwd")
+	require.NoError(t, err)
+	assert.Equal(t, "etc/passwd", rel)
+
+	rel, err = mv.safePath("/")
+	require.NoError(t, err)
+	assert.Equal(t, ".", rel)
 }
 
 func TestMergedView_EmptyLowerRejectsAbsolutePaths(t *testing.T) {

@@ -93,9 +93,10 @@ def sync_detailed(
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
             present `workspace` is prepended to `overlays`. The session files API serves exactly the
-            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
-            namespace sees them, and absolute paths outside every session mount are rejected instead
-            of resolving against the workspace.
+            overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
+            absolute paths outside every overlay or bind are rejected instead of resolving against the
+            workspace (unlike binds, extra_writable paths are not served by the files API unless an
+            overlay covers them).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -128,9 +129,10 @@ def sync(
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
             present `workspace` is prepended to `overlays`. The session files API serves exactly the
-            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
-            namespace sees them, and absolute paths outside every session mount are rejected instead
-            of resolving against the workspace.
+            overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
+            absolute paths outside every overlay or bind are rejected instead of resolving against the
+            workspace (unlike binds, extra_writable paths are not served by the files API unless an
+            overlay covers them).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -158,9 +160,10 @@ async def asyncio_detailed(
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
             present `workspace` is prepended to `overlays`. The session files API serves exactly the
-            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
-            namespace sees them, and absolute paths outside every session mount are rejected instead
-            of resolving against the workspace.
+            overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
+            absolute paths outside every overlay or bind are rejected instead of resolving against the
+            workspace (unlike binds, extra_writable paths are not served by the files API unless an
+            overlay covers them).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -191,9 +194,10 @@ async def asyncio(
             mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays`
             list: at least one of `workspace` or `overlays` must be provided, and when both are
             present `workspace` is prepended to `overlays`. The session files API serves exactly the
-            session mounts (overlays, extra_writable, binds): paths under each mount resolve as the
-            namespace sees them, and absolute paths outside every session mount are rejected instead
-            of resolving against the workspace.
+            overlay and bind mounts: paths under each mount resolve as the namespace sees them, and
+            absolute paths outside every overlay or bind are rejected instead of resolving against the
+            workspace (unlike binds, extra_writable paths are not served by the files API unless an
+            overlay covers them).
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.

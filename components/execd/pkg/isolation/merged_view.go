@@ -83,6 +83,10 @@ func (m *MergedView) safePath(path string) (string, error) {
 		if cleaned == m.LowerDir {
 			return ".", nil
 		}
+		if m.LowerDir == "/" {
+			// No cleaned path starts with "//"; strip the single root slash.
+			return strings.TrimPrefix(cleaned, "/"), nil
+		}
 		return strings.TrimPrefix(cleaned, m.LowerDir+"/"), nil
 	}
 	if strings.HasPrefix(cleaned, "..") {
