@@ -32,6 +32,10 @@ namespace OpenSandbox;
 public sealed class SandboxManager : IAsyncDisposable
 {
     private readonly ISandboxes _sandboxes;
+    private readonly IDiagnostics? _diagnostics;
+
+    private IDiagnostics Diagnostics => _diagnostics
+        ?? throw new NotSupportedException("The adapter factory does not provide diagnostics.");
     private readonly ConnectionConfig _connectionConfig;
     private readonly HttpClientProvider _httpClientProvider;
     private readonly ILogger _logger;
@@ -41,9 +45,11 @@ public sealed class SandboxManager : IAsyncDisposable
         ISandboxes sandboxes,
         ConnectionConfig connectionConfig,
         HttpClientProvider httpClientProvider,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        IDiagnostics? diagnostics)
     {
         _sandboxes = sandboxes;
+        _diagnostics = diagnostics;
         _connectionConfig = connectionConfig;
         _httpClientProvider = httpClientProvider;
         _logger = (loggerFactory ?? NullLoggerFactory.Instance).CreateLogger("OpenSandbox.SandboxManager");
@@ -75,7 +81,7 @@ public sealed class SandboxManager : IAsyncDisposable
                 LoggerFactory = loggerFactory
             });
 
-            return new SandboxManager(lifecycleStack.Sandboxes, connectionConfig, httpClientProvider, loggerFactory);
+            return new SandboxManager(lifecycleStack.Sandboxes, connectionConfig, httpClientProvider, loggerFactory, lifecycleStack.Diagnostics);
         }
         catch (Exception ex)
         {
@@ -119,6 +125,18 @@ public sealed class SandboxManager : IAsyncDisposable
         _logger.LogDebug("Fetching sandbox info: {SandboxId}", sandboxId);
         return _sandboxes.GetSandboxAsync(sandboxId, cancellationToken);
     }
+
+    /// <summary>Gets backend context without connecting to execd.</summary>
+    public Task<DiagnosticContext> GetDiagnosticContextAsync(string sandboxId, CancellationToken cancellationToken = default) =>
+        Diagnostics.GetContextAsync(sandboxId, cancellationToken);
+
+    /// <summary>Gets a scoped diagnostic log descriptor.</summary>
+    public Task<DiagnosticContent> GetDiagnosticLogsAsync(string sandboxId, string scope, CancellationToken cancellationToken = default) =>
+        Diagnostics.GetLogsAsync(sandboxId, scope, cancellationToken);
+
+    /// <summary>Gets a scoped diagnostic event descriptor.</summary>
+    public Task<DiagnosticContent> GetDiagnosticEventsAsync(string sandboxId, string scope, CancellationToken cancellationToken = default) =>
+        Diagnostics.GetEventsAsync(sandboxId, scope, cancellationToken);
 
     /// <summary>
     /// Patches metadata for a sandbox.

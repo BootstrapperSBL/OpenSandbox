@@ -344,9 +344,10 @@ Use `--file -` to read a JSON/YAML payload from stdin. Do not pass plaintext cre
 
 ### Collect diagnostics
 
-Use the stable diagnostics commands for API-backed log and event descriptors.
+Use context to identify the runtime backend, then collect log and event descriptors.
 
 ```bash
+osb diagnostics context <sandbox-id> -o json
 osb diagnostics events <sandbox-id> --scope runtime -o raw
 osb diagnostics events <sandbox-id> --scope all -o raw
 osb diagnostics logs <sandbox-id> --scope container -o raw
@@ -355,7 +356,17 @@ osb diagnostics events <sandbox-id> --scope runtime -o json
 osb diagnostics logs <sandbox-id> --scope container -o yaml
 ```
 
-`--scope` is required for stable diagnostics. The built-in server supports `container` and `all` for logs, and `runtime` and `all` for events. It returns `DIAGNOSTICS_SCOPE_UNSUPPORTED` for unavailable scopes, including lifecycle events. Best-effort scopes may include a `warnings` field when the backend can only provide a subset. Raw output prints inline diagnostic text, or the content URL when diagnostics are delivered as a temporary URL. Structured CLI output follows the SDK/Python field style, for example `content_url`, `content_length`, and `expires_at`. Older server builds may still return `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
+`context` returns backend routing information without connecting to execd and
+supports table, JSON, and YAML output. `--scope` is required for logs/events.
+The built-in server supports
+`container` and `all` for logs, and `runtime` and `all` for events. It returns
+`DIAGNOSTICS_SCOPE_UNSUPPORTED` for unavailable scopes, including lifecycle events.
+Best-effort scopes may include a `warnings` field when the backend can only
+provide a subset. Raw output prints inline
+diagnostic text, or the content URL when diagnostics are delivered as a
+temporary URL. Structured CLI output follows the SDK/Python field style, for
+example `content_url`, `content_length`, and `expires_at`. Older server builds
+may still return `DIAGNOSTICS_NOT_IMPLEMENTED` for scoped diagnostics.
 
 Legacy DevOps diagnostics remain experimental. Prefer `osb diagnostics logs/events` for stable API-backed log and event collection.
 

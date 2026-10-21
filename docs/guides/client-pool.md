@@ -106,7 +106,13 @@ Default pool creators expose fewer options than standalone sandbox creation:
 | Snapshot restore | No | Yes | No | Yes |
 | Resource configuration | Yes | Yes | Yes | Yes |
 | Lifecycle hooks | No | Yes | No | No |
-| Credential Proxy | No | Yes | Yes | Yes |
+| Credential Proxy | Yes | Yes | Yes | Yes |
+
+For Python pools, pass `credential_proxy=CredentialProxyConfig(enabled=True)`
+in `PoolCreationSpec` alongside `network_policy`. Both `SandboxPoolSync` and
+`SandboxPoolAsync` apply it during warmup and direct creation. Omitting the field
+keeps the standalone creation default. See [Credential Vault](/guides/credential-vault)
+for the required network policy and credential configuration.
 
 All four standalone sandbox creation APIs accept these fields. Use a custom `sandbox_creator` / `sandboxCreator` when the default pool spec is insufficient, and honor the supplied connection config, readiness controls, and timeout.
 

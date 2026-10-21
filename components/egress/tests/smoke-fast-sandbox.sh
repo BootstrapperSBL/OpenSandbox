@@ -66,6 +66,12 @@ HOSTS_BACKUP=""
 VAULT_DIR=""
 VAULT_BODY=""
 
+# Per-subject policy files (egress-held policy): REQUIRED by the fast-sandbox
+# profile — the recorded policy is egress-held state, so a fresh directory
+# per run keeps the seeding assertions meaningful while surviving the in-run
+# restarts (Test 9/14 durability).
+POLICY_DIR=""
+
 info() { echo "[$(date +%H:%M:%S)] $*"; }
 pass() { info "PASS: $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -104,6 +110,7 @@ cleanup() {
   [ -n "${SSL_DIR:-}" ] && rm -rf "${SSL_DIR}" 2>/dev/null
   [ -n "${CA_SEED_DIR}" ] && rm -rf "${CA_SEED_DIR}" 2>/dev/null
   [ -n "${VAULT_DIR}" ] && rm -rf "${VAULT_DIR}" 2>/dev/null
+  [ -n "${POLICY_DIR}" ] && rm -rf "${POLICY_DIR}" 2>/dev/null
   [ -n "${VAULT_BODY}" ] && rm -f "${VAULT_BODY}" 2>/dev/null
   nft delete table inet opensandbox-fast-sandbox 2>/dev/null
 }
@@ -183,6 +190,34 @@ bind_and_ready() {
   lifecycle_hook "${uid}" "${runtime}" "${att}" sandbox.data-plane-ready
 }
 
+# relay_put_policy <uid> <input>: a runtime policy change through the
+# handler-relay surface (/policy/{uid}). The binding input only ever seeds a
+# fresh subject's policy — every later change rides this surface, which
+# applies in place on an active subject and holds pending on a denying one.
+relay_put_policy() {
+  local uid="$1" input="$2" code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT \
+    "http://127.0.0.1:${POLICY_PORT}/policy/${uid}" -d "{\"policy\":${input}}")"
+  case "${code}" in
+    200|201) ;;
+    *) fail "relay PUT /policy/${uid} failed: ${code}" ;;
+  esac
+}
+
+# relay_get_policy <uid> <name>: echoes the recorded policy document.
+relay_get_policy() {
+  curl -s "http://127.0.0.1:${POLICY_PORT}/policy/${1}"
+}
+
+# relay_delete_policy <uid>: DELETE lands an authoritative default-deny
+# tombstone at the successor revision (204).
+relay_delete_policy() {
+  local uid="$1" code
+  code="$(curl -s -o /dev/null -w '%{http_code}' -XDELETE \
+    "http://127.0.0.1:${POLICY_PORT}/policy/${uid}")"
+  [ "${code}" = "204" ] || fail "relay DELETE /policy/${uid} failed: ${code}"
+}
+
 dns_query() {
   # dns_query <netns-or-host> <name>
   local where="$1" name="$2"
@@ -258,6 +293,7 @@ start_egress() {
   OPENSANDBOX_EGRESS_BLOCK_DOH_443="${block_doh}" \
   OPENSANDBOX_EGRESS_DOH_BLOCKLIST="${doh_blocklist}" \
   OPENSANDBOX_EGRESS_VAULT_DIR="${VAULT_DIR}" \
+  OPENSANDBOX_EGRESS_POLICY_DIR="${POLICY_DIR}" \
   "${mitm_env[@]}" \
   "${upstream_env[@]}" \
   "${EGRESS_BIN}" >"${EGRESS_LOG}" 2>&1 &
@@ -324,6 +360,7 @@ printf '%s\n' '10.99.0.9' > "${ALWAYS_RULES_DIR}/deny.always"
 # writes run the commit protocol and the ack means durable (exercised by the
 # Test 14 restart reload).
 VAULT_DIR="$(mktemp -d -t fast-sandbox-vault.XXXXXX)"
+POLICY_DIR="$(mktemp -d -t fast-sandbox-policy.XXXXXX)"
 VAULT_BODY="$(mktemp -t fast-sandbox-vault-body.XXXXXX)"
 
 info "Building egress binary"
@@ -374,10 +411,13 @@ expect_rcode osb-sandbox-a allow.test 3
 pass "deny-first registered (nft + NXDOMAIN, policy pending)"
 
 ###############################################################################
-info "Test 2: data-plane-ready activates the subject (dns+nft)"
-set_binding a 10.10.0.5 2 runtime-a att-a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"10.99.0.2"}]}'
+info "Test 2: data-plane-ready activates the subject; the relay owns runtime changes"
 lifecycle_hook a runtime-a att-a sandbox.runtime-ready
 lifecycle_hook a runtime-a att-a sandbox.data-plane-ready
+# The binding input seeded deny at spec 1; the allow policy is a RUNTIME
+# change through the handler-relay surface, applied in place on the active
+# subject. A same-fence SET_BINDING with a new input would be superseded.
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"10.99.0.2"}]}'
 expect_answers osb-sandbox-a allow.test 1.1.1.1
 expect_answers osb-sandbox-a other.test 1.1.1.2
 expect_rcode osb-sandbox-a nope.test 3
@@ -410,8 +450,8 @@ fi
 pass "forward drop (default deny)"
 
 ###############################################################################
-info "Test 4: deny CIDR overrides allow (nft layer, in-place update)"
-set_binding a 10.10.0.5 3 runtime-a att-a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"deny","target":"10.99.0.0/24"}]}'
+info "Test 4: deny CIDR overrides allow (nft layer, relay update)"
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"deny","target":"10.99.0.0/24"}]}'
 if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null http://10.99.0.2:8080/ 2>/dev/null; then
   fail "deny CIDR must block 10.99.0.2"
 fi
@@ -430,8 +470,13 @@ http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPOST \
   "http://127.0.0.1:${POLICY_PORT}/credential-vault" -d '{}')"
 [ "${http_code}" = "404" ] || fail "superseded /credential-vault must be gone (404), got ${http_code}"
 http_code="$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:${POLICY_PORT}/policy")"
-[ "${http_code}" = "404" ] || fail "superseded /policy must be gone (404), got ${http_code}"
-pass "superseded proxy-route surfaces removed (policy rides the binding only)"
+case "${http_code}" in
+  301|307|308) ;; # redirects into the /policy/{uid} relay subtree
+  *) fail "bare /policy must redirect into the relay subtree, got ${http_code}" ;;
+esac
+location="$(curl -s -D - -o /dev/null "http://127.0.0.1:${POLICY_PORT}/policy" | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+[ "${location}" = "/policy/" ] || fail "bare /policy redirect target must be /policy/, got ${location:-none}"
+pass "superseded proxy-route surfaces removed (relay surfaces only)"
 
 set_up_netns b 10.10.0.6
 bind_and_ready b 10.10.0.6 1 runtime-b att-b '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
@@ -459,6 +504,11 @@ info "Test 9: restart recovery (reset -> action replay -> active)"
 # Refresh the DNS-learned dyn lease (1.1.1.1) right before the restart, so
 # the post-restart "stale wiped" assertions are meaningful.
 expect_answers osb-sandbox-a allow.test 1.1.1.1
+# Durability probe: relay a policy DISTINCT from the replayed binding input;
+# after the restart + SET_BINDING replay the recorded file must supersede
+# the input — asserted by the marker target surviving the GET below
+# (vault parity, Test 14e).
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"},{"action":"allow","target":"durability.test"},{"action":"allow","target":"10.99.0.0/24"}]}'
 wait_for 10 "dyn lease present before restart" nft_has '1.1.1.1'
 kill "${EGRESS_PID}" 2>/dev/null
 wait "${EGRESS_PID}" 2>/dev/null || true
@@ -469,7 +519,35 @@ expect_rcode osb-sandbox-a allow.test 3
 # The Fastlet's instanceId replay: SET_BINDING + reached Hooks.
 bind_and_ready a 10.10.0.5 5 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
 expect_answers osb-sandbox-a allow.test 1.1.1.1
-pass "restart recovery (stale wiped, action replay reactivates)"
+# The durability probe's relay write survived the restart: the recorded
+# file superseded the replayed binding input.
+recorded="$(curl -s "http://127.0.0.1:${POLICY_PORT}/policy/a")"
+echo "${recorded}" | grep -q 'durability.test' || fail "the relayed policy must survive the restart (file supersedes the replayed binding input), got: ${recorded}"
+# Enforcement, not just the record: the probe's static allow must be live
+# in nft (the replayed input does not contain it — a regression where the
+# replay overrode the reload would lose this element).
+nft_has '10.99.0.0/24' || fail "the reloaded policy must be ENFORCED (10.99.0.0/24 missing from nft)"
+pass "restart durability (recorded policy supersedes the replayed binding input, enforced)"
+# Restore the lineage: under file-supersedes-input, every later section
+# starts from the recorded policy — put back what the binding inputs intend.
+relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"*.test"}]}'
+# DELETE tombstone: an authoritative default-deny at the successor
+# revision (204); the stale expectedRevision precondition is a 412 on the
+# handler contract (the server remaps it to 409 on the public API).
+http_code="$(curl -s -o /dev/null -w '%{http_code}' -XPUT "http://127.0.0.1:${POLICY_PORT}/policy/a" -d '{"policy":{"defaultAction":"deny","egress":[]},"expectedRevision":99}')"
+[ "${http_code}" = "412" ] || fail "stale expectedRevision must be 412, got ${http_code}"
+relay_delete_policy a
+recorded="$(relay_get_policy a)"
+echo "${recorded}" | grep -q '"defaultAction":"deny"' \
+  || fail "the DELETE tombstone must be an authoritative default-deny record, got: ${recorded}"
+pass "DELETE tombstone (default-deny record persisted, stale revision 412)"
+
+# The tombstone survives the Test 10 restart + binding replay: the
+# replayed bootstrap binding (deny) is superseded by the identical tombstone
+# at the SAME revision — no resurrection of the pre-delete allow, no
+# revision reset.
+relay_get_policy a | grep -q '"defaultAction":"deny"' \
+  || fail "the tombstone must survive the restart, got: $(relay_get_policy a)"
 
 ###############################################################################
 info "Test 10: strict DoH mode (no blocklist) drops all tcp 443 globally"
@@ -481,7 +559,11 @@ set_binding a 10.10.0.5 6 runtime-a-2 att-a-2 '{"defaultAction":"deny"}'
 wait_for 15 "subject a re-registered after strict-mode restart" dns_rcode_is osb-sandbox-a allow.test 3
 nft_has 'tcp dport 443 drop' || fail "strict mode must install a bare tcp 443 drop"
 nft_has 'doh_block_v4' && fail "strict mode must not create blocklist sets"
-pass "strict DoH mode enforced (bare 443 drop, no blocklist sets)"
+# The tombstone revision is preserved across the restart + replay — the
+# binding input was superseded, not re-seeded.
+relay_get_policy a | grep -q '"defaultAction":"deny"' \
+  || fail "the tombstone must survive the strict-mode restart + replay"
+pass "strict DoH mode enforced (bare 443 drop, no blocklist sets); tombstone survives replay"
 
 ###############################################################################
 info "Test 11: MITM data plane — shared mitmdump + per-subject DNAT + subject-aware active vault"
@@ -592,8 +674,10 @@ else
   # rejected), so the sandbox curls the ext netns with an explicit Host
   # header; the policy keeps allowing the real daddr 10.99.0.2 so the nft
   # layers pass the packet.
-  set_binding a 10.10.0.5 8 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   lifecycle_hook a runtime-a-2 att-a-2 sandbox.runtime-ready
+  # A relay write while denying is held to the data-plane-ready barrier
+  # (pending-policy validation semantics, same as the vault).
+  relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   lifecycle_hook a runtime-a-2 att-a-2 sandbox.data-plane-ready
   code="$(curl -s -o /dev/null -w '%{http_code}' --unix-socket "${ACTIVE_SOCK}" 'http://localhost/credential-vault/_active?clientIp=10.10.0.5')"
   [ "${code}" = "404" ] || fail "active API: subject a has no vault yet (relay not wired), got ${code}"
@@ -803,10 +887,9 @@ else
   # Default-allow subject: still dropped — the containment is profile-wide,
   # above every per-subject rule. Control first: non-proxy traffic flows, so
   # only the proxy endpoint is unreachable. Subject a is still active, so
-  # this in-place binding update applies immediately — no data-plane-ready
-  # replay (the protocol sends no Hook for updates; a redundant one 409s on
-  # the fail-closed "no pending policy" guard).
-  set_binding a 10.10.0.5 11 runtime-a-2 att-a-2 '{"defaultAction":"allow"}'
+  # this relay update applies immediately (no data-plane-ready replay —
+  # relay writes apply in place on an active subject).
+  relay_put_policy a '{"defaultAction":"allow"}'
   out="$(ip netns exec osb-sandbox-a curl -s -m 5 -H 'Host: ext.test' http://10.99.0.2:8080/)"
   echo "${out}" | grep -qi "client=10.10.0.5" || fail "default-allow control request failed (subject inactive?); got: ${out}"
   if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null --proxytunnel -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
@@ -827,6 +910,10 @@ else
   wait_for 15 "drop set re-seeded after restart" bash -c \
     "nft list set inet opensandbox-fast-sandbox upstream_proxy_v4 2>/dev/null | grep -q '10.99.0.2'"
   bind_and_ready a 10.10.0.5 12 runtime-a-2 att-a-2 '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
+  # The default-allow control write (spec 11) survived this restart — the
+  # file supersedes the replayed input — so re-assert the allow-list
+  # through the relay before the containment assertions.
+  relay_put_policy a '{"defaultAction":"deny","egress":[{"action":"allow","target":"10.99.0.2"},{"action":"allow","target":"ext.test"}]}'
   if ip netns exec osb-sandbox-a curl -s -m 3 -o /dev/null --proxytunnel -x http://10.99.0.2:3128 http://10.99.0.2:8080/ 2>/dev/null; then
     fail "containment must survive egress restart"
   fi
@@ -869,6 +956,7 @@ else
   EGRESS_PID=""
   EGRESS_MITM=1 start_egress
   bind_and_ready a 10.10.0.5 13 runtime-a-2 att-a-2 "${VAULT_POLICY_A}"
+  relay_put_policy a "${VAULT_POLICY_A}"
   wait_for 15 "per-subject DNAT (vault preamble)" bash -c "nft list table inet opensandbox_gateway_mitm 2>/dev/null | grep -q 'ip saddr 10.10.0.5 '"
 
   # vault_relay <subject> <method> [body] [incarnation]: one relay op;
@@ -993,6 +1081,9 @@ else
   # credential while a keeps a separate one.
   VB_BODY='{"credentials":[{"name":"smoke-b-token","source":{"type":"inline","value":"smoke-b-secret"}}],"bindings":[{"name":"ext-bearer","match":{"hosts":["ext.test"],"schemes":["http"],"paths":["/private*"]},"auth":{"type":"bearer","credential":"smoke-b-token"}}]}'
   set_binding b 10.10.0.6 3 runtime-b att-b "${VAULT_POLICY_B}"
+  # b's record survived the restarts (MITM section) and supersedes the
+  # binding input — the vault validation policy rides the relay.
+  relay_put_policy b "${VAULT_POLICY_B}"
   code="$(vault_relay b POST "${VB_BODY}")"
   [ "${code}" = "201" ] || fail "relay POST must accept a denying subject (pending-policy validation), got ${code}: $(cat "${VAULT_BODY}")"
   lifecycle_hook b runtime-b att-b sandbox.runtime-ready

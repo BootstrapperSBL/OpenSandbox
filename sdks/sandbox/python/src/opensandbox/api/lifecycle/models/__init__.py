@@ -99,6 +99,7 @@ from .policy_status_response import PolicyStatusResponse
 from .pvc import PVC
 from .renew_sandbox_expiration_request import RenewSandboxExpirationRequest
 from .renew_sandbox_expiration_response import RenewSandboxExpirationResponse
+from .renewal_policy import RenewalPolicy
 from .resource_limits import ResourceLimits
 from .sandbox import Sandbox
 from .sandbox_extensions import SandboxExtensions
@@ -191,6 +192,7 @@ __all__ = (
     "PlatformSpecOs",
     "PolicyStatusResponse",
     "PVC",
+    "RenewalPolicy",
     "RenewSandboxExpirationRequest",
     "RenewSandboxExpirationResponse",
     "ResourceLimits",

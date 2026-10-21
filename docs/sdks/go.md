@@ -415,7 +415,12 @@ Credential Vault is unavailable for template-backed sandboxes: they have no sand
 
 Use `NewSandboxPoolBuilder` with an in-memory store or the Redis adapter in `github.com/alibaba/OpenSandbox/sdks/sandbox/go/poolredis`. Go supports all four acquire policies, namespace retirement, and per-acquire TTL/health-check overrides.
 
-Go uses `ReconcileInterval` and `WarmupConcurrency`; it does not expose the Python/JVM/JavaScript create-QPS, initial-delay, or post-prepare-check settings. See [Client Pool](/guides/client-pool) for defaults, examples, and cleanup. Go does not currently emit built-in pool warmup traces or expose stable remote diagnostics; use [CLI or HTTP diagnostics](/api/#diagnostics).
+Go uses `ReconcileInterval` and `WarmupConcurrency`; it does not expose the
+Python/JVM/JavaScript create-QPS, initial-delay, or post-prepare-check settings.
+See [Client Pool](/guides/client-pool) for defaults, examples, and cleanup.
+Go does not currently emit built-in pool warmup traces.
+Both `SandboxManager` and `Sandbox` expose `GetDiagnosticContext`,
+`GetDiagnosticLogs`, and `GetDiagnosticEvents`; see [SDK diagnostics](/sdks/#diagnostics).
 
 ## Lifecycle Hooks
 
@@ -470,6 +475,19 @@ sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreate
 ```
 
 `ActiveProbe` lets the application veto a pause while real work runs without producing ingress traffic: declare an endpoint answering `{"active": bool, "message"?: string}` and the server polls it when the sandbox is otherwise idle; a busy answer resets the idle clock. Invalid policies fail fast client-side through `IdlePolicy.Validate()`.
+
+### Renewal policy (renew-on-access)
+
+`SandboxLifecycle.RenewalPolicy.ExtendSeconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + ExtendSeconds, current expiresAt)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` — see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0. Invalid policies fail fast client-side through `RenewalPolicy.Validate()`.
+
+```go
+sandbox, err := opensandbox.CreateSandbox(ctx, config, opensandbox.SandboxCreateOptions{
+    Image: "ubuntu:24.04",
+    Lifecycle: &opensandbox.SandboxLifecycle{
+        RenewalPolicy: &opensandbox.RenewalPolicy{ExtendSeconds: 3600},
+    },
+})
+```
 
 ### Wake retry
 

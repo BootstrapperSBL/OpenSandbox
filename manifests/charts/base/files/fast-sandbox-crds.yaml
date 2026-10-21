@@ -1286,6 +1286,47 @@ spec:
           spec:
             description: SandboxTemplateSpec defines the desired golden-image build.
             properties:
+              egressMitmCertificate:
+                description: |-
+                  EgressMITMCertificate bakes the egress MITM proxy CA certificate into
+                  the template: the builder places it at /opt/opensandbox/mitmproxy-ca-cert.pem
+                  (the execd bootstrap contract path) and enables the trust gate, so
+                  the bootstrap installs it into the guest trust store and client env
+                  vars at the snapshot boot. Restored sandboxes trust the CA from first
+                  boot; the CA is cluster-global, so the field is pool-agnostic.
+                properties:
+                  key:
+                    default: ca.crt
+                    description: |-
+                      Key is the Secret data entry holding the PEM certificate. Only this
+                      key is projected into the build Pod, so the CA private key never
+                      enters the build. The builder accepts entries consisting solely of
+                      PEM CERTIFICATE blocks — private keys, other PEM blocks, and trailing
+                      non-PEM data are rejected — and bakes them re-encoded; CA constraints
+                      (BasicConstraints CA:TRUE) are not verified.
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  secretRef:
+                    description: |-
+                      SecretRef references the Secret carrying the certificate; it must
+                      live in the template's namespace.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                required:
+                - key
+                - secretRef
+                type: object
               entrypoint:
                 description: |-
                   Entrypoint is the guest business command as an argv list; empty

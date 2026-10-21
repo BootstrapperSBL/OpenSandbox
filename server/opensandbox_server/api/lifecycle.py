@@ -24,7 +24,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response
 
-from opensandbox_server.extensions import validate_extensions
+from opensandbox_server.extensions import validate_extensions, validate_renew_policy_conflict
 from opensandbox_server.config import get_config
 from opensandbox_server.api.schema import (
     CreateSnapshotRequest,
@@ -113,6 +113,7 @@ async def create_sandbox(
         HTTPException: If sandbox creation scheduling fails
     """
     validate_extensions(request.extensions)
+    validate_renew_policy_conflict(request.lifecycle, request.extensions)
     # Resolve snapshotId before backend routing: the owning backend recorded
     # on the snapshot row selects the fsb vs pod backend for restores.
     if not (request.template_id or "").strip():

@@ -385,6 +385,46 @@ func TestVaultPersistApplyFailureRollsBackFile(t *testing.T) {
 const reloadVaultBody = `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 	`"bindings":[{"name":"api","match":{"hosts":["api.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
 
+// Construction restricts a dedicated 0777 emptyDir volume root (an
+// untrusted ancestor for the atomic machinery), leaves one holding foreign
+// entries alone, and keeps already-restrictive roots as they are.
+func TestVaultPersistRestrictsDedicatedVolumeRoot(t *testing.T) {
+	t.Run("dedicated root is restricted", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "vault")
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		require.NoError(t, os.Chmod(root, 0o777))
+		_, err := newVaultPersistence(dir)
+		require.NoError(t, err)
+		info, err := os.Stat(root)
+		require.NoError(t, err)
+		assert.Zero(t, info.Mode().Perm()&0o022, "group/world write cleared on the dedicated volume root")
+	})
+	t.Run("root with foreign entries is untouched", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "vault")
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		require.NoError(t, os.Chmod(root, 0o777))
+		require.NoError(t, os.WriteFile(filepath.Join(root, "confdir"), []byte("x"), 0o600))
+		_, err := newVaultPersistence(dir)
+		require.NoError(t, err)
+		info, err := os.Stat(root)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o777), info.Mode().Perm(), "shared volume root left for the manifest to fix")
+	})
+	t.Run("restrictive root is a no-op", func(t *testing.T) {
+		root := t.TempDir()
+		dir := filepath.Join(root, "vault")
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		require.NoError(t, os.Chmod(root, 0o755))
+		_, err := newVaultPersistence(dir)
+		require.NoError(t, err)
+		info, err := os.Stat(root)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+	})
+}
+
 func TestVaultPersistReloadAtSetBinding(t *testing.T) {
 	h := newVaultPersistHarness(t)
 
@@ -507,9 +547,12 @@ func TestVaultPersistUnknownVersionDegradesButPreservesFile(t *testing.T) {
 func TestVaultPersistReloadValidationFailureDegrades(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	// The file's binding host is not covered by the replayed binding policy:
-	// the content cannot be revalidated, so the slice degrades (fail closed)
-	// instead of injecting uncovered credentials — and the file is
-	// quarantined, since it can never validate under this binding.
+	// the content cannot be revalidated, so the slice DEGRADES (fail closed)
+	// instead of injecting uncovered credentials — and the file is KEPT: the
+	// policy/vault divergence is a normal state (runtime relay commits never
+	// re-validate the vault), so quarantining would silently destroy
+	// persisted credentials. A policy heal + restart, or a vault relay
+	// write, revives the slice.
 	uncovered := `{"credentials":[{"name":"tok","source":{"type":"inline","value":"sekret"}}],` +
 		`"bindings":[{"name":"api","match":{"hosts":["other.example.com"]},"auth":{"type":"bearer","credential":"tok"}}]}`
 	h.seedVaultFile(vaultTestUID, testFenceR, testFenceA, 5, uncovered)
@@ -523,7 +566,34 @@ func TestVaultPersistReloadValidationFailureDegrades(t *testing.T) {
 	// The vault slice stays empty — interception fails closed.
 	rec := doVault(t, h.srv, http.MethodGet, vaultTestUID, "", "")
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.False(t, h.fileFor(vaultTestUID).exists, "content rejected by the binding policy is quarantined")
+	assert.True(t, h.fileFor(vaultTestUID).exists, "the uncovered-but-healthy vault file is kept (no quarantine)")
+
+	// Revival: a policy heal (the record now covers the vault's binding
+	// host) plus a restart reloads the kept vault at its preserved revision.
+	healed := `{"defaultAction":"deny","egress":[{"action":"allow","target":"other.example.com"}]}`
+	rec = doPolicy(t, h.srv, http.MethodPut, vaultTestUID, policyPutDoc(healed, 0, false, false), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	srv2, _, _ := fastSandboxTestServer(t)
+	vp2, err := newVaultPersistence(h.dir)
+	require.NoError(t, err)
+	vp2.newFile = h.vp.newFile
+	srv2.SetVaultFiles(vp2)
+
+	// The replayed binding covers the vault's binding host (other.example.com).
+	rec = doAction(t, srv2, bindBody(t, vaultTestUID, vaultTestIP, testFenceR, testFenceA, 2,
+		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"other.example.com"}]}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, vaultTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv2, hookBody(t, vaultTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = doVault(t, srv2, http.MethodGet, vaultTestUID, "", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"revision":5`)
+	status = mustStatus(t, srv2)
+	assert.Empty(t, status.DegradedVaults)
 }
 
 func TestVaultPersistDuplicateSetBindingKeepsLiveSlice(t *testing.T) {
@@ -693,6 +763,9 @@ func TestVaultPersistHealthyStatusOmitsFields(t *testing.T) {
 	assert.True(t, status.Ready)
 	assert.False(t, status.Recovery)
 	assert.Empty(t, status.DegradedVaults)
+	// Vault persistence configured: the capability the Fastlet's
+	// pause/resume vault transfer probes for.
+	assert.True(t, status.VaultTransfer)
 	assert.NotContains(t, rec.Body.String(), "degradedVaults", "healthy vault fields stay omitted")
 	assert.Equal(t, http.StatusOK, doRequest(t, h.srv, http.MethodGet, "/healthz", "").Code)
 }

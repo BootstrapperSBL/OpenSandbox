@@ -100,7 +100,12 @@ Use `destroy()` for create-use-discard workflows. It calls `kill()` before `clos
 
 Use `SandboxPoolSync` for synchronous applications and `SandboxPoolAsync` for asyncio. Both provide in-memory and Redis-backed stores, four acquire policies, and staged warmup controls. See [Client Pool](/guides/client-pool) for examples, configuration, cleanup, and distributed deployment.
 
-Enable `ConnectionConfig(enable_tracing=True)` or `ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/sdks/observability#pool-warmup-tracing). For remote logs/events, use the [Diagnostics](/api/#diagnostics) manager API. Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
+Enable `ConnectionConfig(enable_tracing=True)` or
+`ConnectionConfigSync(enable_tracing=True)` for [pool warmup traces](/sdks/observability#pool-warmup-tracing).
+For backend context and remote logs/events, use `SandboxManager.get_diagnostic_context`,
+`get_diagnostic_logs`, and `get_diagnostic_events`. These methods also exist on
+`Sandbox`; see [SDK diagnostics](/sdks/#diagnostics).
+Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/observability#creation-metrics).
 
 ## Lifecycle Hooks
 
@@ -140,10 +145,12 @@ The Server validates `timeout_seconds`; `pre_start` accepts 1–10800 seconds, w
 `SandboxLifecycle.idle_policy` (OSEP-0024, fast-sandbox only) tells the control plane to auto-pause the sandbox after `idle_timeout_seconds` (30–86400) of continuously idle ingress-observed traffic, and to wake it on the next request. It is control-plane state: it never reaches the guest, is allowed in template mode (`Sandbox.create_from_template(idle_policy=...)`), and is rejected by non-fast-sandbox backends. Omitting it preserves non-automated behavior exactly.
 
 ```python
+from datetime import timedelta
+
 sandbox = await Sandbox.create(
     "ubuntu:24.04",
     connection_config=config,
-    timeout_seconds=86400,
+    timeout=timedelta(seconds=86400),
     lifecycle=SandboxLifecycle(
         idle_policy=IdlePolicy(
             idle_timeout_seconds=300,
@@ -161,6 +168,23 @@ IdlePolicy(
     idle_timeout_seconds=300,
     on_idle="pause",
     active_probe=ActivityProbe(port=8080, path="/active", timeout_seconds=2),
+)
+```
+
+### Renewal policy (renew-on-access)
+
+`SandboxLifecycle.renewal_policy.extend_seconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + extend_seconds, current expires_at)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` — see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0.
+
+```python
+from datetime import timedelta
+
+sandbox = await Sandbox.create(
+    "ubuntu:24.04",
+    connection_config=config,
+    timeout=timedelta(seconds=3600),
+    lifecycle=SandboxLifecycle(
+        renewal_policy=RenewalPolicy(extend_seconds=3600),
+    ),
 )
 ```
 

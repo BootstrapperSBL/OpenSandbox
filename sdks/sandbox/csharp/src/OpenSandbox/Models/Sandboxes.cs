@@ -1194,6 +1194,41 @@ public class IdlePolicy
 }
 
 /// <summary>
+/// Renew-on-access behavior (OSEP-0009): observed access moves the expiration
+/// to <c>max(now + ExtendSeconds, current)</c>. Control-plane policy;
+/// supersedes the deprecated <c>extensions["access.renew.extend.seconds"]</c> key.
+/// <para>
+/// Honored by the docker and Kubernetes (pod) backends; the fast-sandbox
+/// backend rejects it with HTTP 400. Fires only when the server enables
+/// <c>[renew_intent]</c>.
+/// </para>
+/// </summary>
+public class RenewalPolicy
+{
+    /// <summary>
+    /// Gets or sets the extension window X in seconds (300-86400) for each
+    /// access-driven renewal.
+    /// </summary>
+    [JsonPropertyName("extendSeconds")]
+    public int ExtendSeconds { get; set; }
+
+    /// <summary>
+    /// Validates the policy against the server's create-time rules so invalid
+    /// policies fail fast client-side.
+    /// </summary>
+    public void Validate()
+    {
+        if (ExtendSeconds is < 300 or > 86400)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(ExtendSeconds),
+                ExtendSeconds,
+                "RenewalPolicy.ExtendSeconds must be between 300 and 86400.");
+        }
+    }
+}
+
+/// <summary>
 /// Optional lifecycle configuration applied during sandbox creation.
 /// </summary>
 public class SandboxLifecycle
@@ -1217,6 +1252,14 @@ public class SandboxLifecycle
     /// </summary>
     [JsonPropertyName("idlePolicy")]
     public IdlePolicy? IdlePolicy { get; set; }
+
+    /// <summary>
+    /// Gets or sets the renew-on-access behavior (OSEP-0009). Control-plane
+    /// policy; supersedes the deprecated
+    /// <c>extensions["access.renew.extend.seconds"]</c> key.
+    /// </summary>
+    [JsonPropertyName("renewalPolicy")]
+    public RenewalPolicy? RenewalPolicy { get; set; }
 }
 
 /// <summary>

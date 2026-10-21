@@ -124,6 +124,12 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 
 	// Capture a response while committing; no network output holds s.mu.
 	respond := func() func() {
+		if s.subjectRebinding(subj) {
+			return func() { http.Error(w, "subject rebind in progress", http.StatusServiceUnavailable) }
+		}
+		s.policyCommitMu.Lock()
+		defer s.policyCommitMu.Unlock()
+		effective := s.vaultValidationPolicy(subj)
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.subjectRebindingLocked(subj) {
@@ -150,7 +156,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		if store == nil {
 			return func() { http.Error(w, "unknown subject", http.StatusNotFound) }
 		}
-		pol := s.vaultValidationPolicyLocked(subj)
+		pol := effective
 
 		var (
 			candidate *credentialvault.MutationCandidate
@@ -292,16 +298,19 @@ func (s *fastSandboxPolicyServer) vaultSealedLocked(subj subject.Subject) bool {
 	return ok && e.sealed
 }
 
-// vaultValidationPolicyLocked returns the policy a vault op validates
-// against: the effective policy of an active subject, or — while the subject
-// is still denying — its pending binding policy (the op is held to the
-// data-plane-ready barrier, so validation must not depend on hook timing).
-// Callers hold s.mu.
-func (s *fastSandboxPolicyServer) vaultValidationPolicyLocked(subj subject.Subject) *policy.NetworkPolicy {
-	if pol := s.reg.EffectivePolicy(subj); pol != nil {
-		return pol
+// vaultValidationPolicy returns the policy a vault op validates against:
+// the effective policy of an active subject, or the pending policy merged
+// with the always overlay while denying (a barrier-held op must not depend
+// on hook timing). Call BEFORE s.mu — it reads the registry.
+func (s *fastSandboxPolicyServer) vaultValidationPolicy(subj subject.Subject) *policy.NetworkPolicy {
+	effective := s.reg.EffectivePolicy(subj)
+	if effective != nil {
+		return effective
 	}
-	if pending := s.pendingPolicies[subj]; pending != nil {
+	s.mu.Lock()
+	pending := s.pendingPolicies[subj]
+	s.mu.Unlock()
+	if pending != nil {
 		return s.reg.EffectiveOf(pending)
 	}
 	return nil

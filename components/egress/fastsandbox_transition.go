@@ -101,3 +101,11 @@ func (s *fastSandboxPolicyServer) logPendingRebind(subj subject.Subject, token *
 		log.Warnf("subject_rebind_pending")
 	}
 }
+
+// subjectRebinding permits fail-fast rejection before waiting on a policy commit.
+// Commit paths must repeat this check under mu after acquiring their commit lock.
+func (s *fastSandboxPolicyServer) subjectRebinding(subj subject.Subject) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.subjectRebindingLocked(subj)
+}

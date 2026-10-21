@@ -352,10 +352,25 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 	}
 	s.mu.Unlock()
 
+	return reportRunResult(request, waitErr, exitCode, startAt)
+}
+
+// reportRunResult maps the shell's wait result and parsed exit code onto the
+// request hooks: a non-exit wait error is returned, a non-zero exit code is
+// reported via OnExecuteError, and a clean run via OnExecuteComplete.
+func reportRunResult(request *ExecuteCodeRequest, waitErr error, exitCode *int, startAt time.Time) error {
 	var exitCodeErr exitCoder
 	if waitErr != nil && !errors.As(waitErr, &exitCodeErr) {
 		log.Error("bash session: wait: %v (command: %q)", waitErr, log.SanitizeCommand(request.Code))
 		return waitErr
+	}
+	// A shell terminated by a signal (e.g. `kill -TERM $$`) never prints the
+	// exit marker and reports ExitCode() == -1, which the >= 0 check above
+	// skips. Take the code from the wait error so the run is reported as a
+	// failure (exit_code -1) rather than as a successful completion.
+	if exitCode == nil && exitCodeErr != nil {
+		code := exitCodeErr.ExitCode()
+		exitCode = &code
 	}
 
 	userExitCode := 0
@@ -373,6 +388,7 @@ func (s *bashSession) run(ctx context.Context, request *ExecuteCodeRequest) erro
 				EName:     "CommandExecError",
 				EValue:    strconv.Itoa(userExitCode),
 				Traceback: []string{errMsg},
+				ExitCode:  &userExitCode,
 			})
 		}
 		log.Error("bash session: command error: %s (command: %q)", errMsg, log.SanitizeCommand(request.Code))

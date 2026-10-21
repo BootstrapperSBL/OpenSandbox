@@ -538,6 +538,18 @@ export interface IdlePolicy extends Record<string, unknown> {
   activeProbe?: ActivityProbe;
 }
 
+/**
+ * Renew-on-access behavior (OSEP-0009): observed access moves the expiration
+ * to `max(now + extendSeconds, current)`. Control-plane policy; supersedes the
+ * deprecated `extensions["access.renew.extend.seconds"]` key.
+ */
+export interface RenewalPolicy extends Record<string, unknown> {
+  /**
+   * Extension window X in seconds (300-86400) for each access-driven renewal.
+   */
+  extendSeconds: number;
+}
+
 /** Extensible container for sandbox lifecycle configuration. */
 export interface SandboxLifecycle extends Record<string, unknown> {
   /**
@@ -556,6 +568,11 @@ export interface SandboxLifecycle extends Record<string, unknown> {
    * policy: it never reaches the guest.
    */
   idlePolicy?: IdlePolicy;
+  /**
+   * Renew-on-access behavior (OSEP-0009). Control-plane policy; supersedes
+   * the deprecated `extensions["access.renew.extend.seconds"]` key.
+   */
+  renewalPolicy?: RenewalPolicy;
 }
 
 export interface CreateSandboxRequest extends Record<string, unknown> {

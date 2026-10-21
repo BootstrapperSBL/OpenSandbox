@@ -239,6 +239,37 @@ def test_create_projects_crd_with_server_side_inputs(service, crs):
     assert spec["output"]["format"] == "native"
     assert spec["output"]["publish"] == "s3://sandbox-images/publish"
     assert spec["output"]["publishSecretRef"] == {"name": "sandbox-oss-credentials"}
+    # CA wiring is opt-in: unconfigured servers create CA-free templates.
+    assert "egressMitmCertificate" not in spec
+
+
+def test_create_bakes_configured_mitm_ca(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    config = _config()
+    config.kubernetes = KubernetesRuntimeConfig(
+        namespace="ns-1",
+        template_s3_publish_secret="sandbox-oss-credentials",
+        template_mitm_ca_secret="opensandbox-mitm-ca-v1",
+    )
+    svc = FastSandboxTemplateService(config, repository=repo, k8s_client=k8s)
+    try:
+        svc.create_template(_create_request())
+        assert crs.created[-1]["spec"]["egressMitmCertificate"] == {
+            "secretRef": {"name": "opensandbox-mitm-ca-v1"},
+            "key": "ca.crt",
+        }
+
+        config.kubernetes.template_mitm_ca_secret_key = "tls.crt"
+        svc.create_template(_create_request(image="alpine:3.20"))
+        assert crs.created[-1]["spec"]["egressMitmCertificate"] == {
+            "secretRef": {"name": "opensandbox-mitm-ca-v1"},
+            "key": "tls.crt",
+        }
+    finally:
+        svc.close()
 
 
 def test_create_defaults_machine_and_entrypoint(service, crs):

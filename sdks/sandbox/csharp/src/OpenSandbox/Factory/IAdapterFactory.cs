@@ -82,6 +82,9 @@ public class CreateExecdStackOptions
 /// </summary>
 public class LifecycleStack
 {
+    /// <summary>Gets optional diagnostics support for custom factories.</summary>
+    public IDiagnostics? Diagnostics { get; init; }
+
     /// <summary>
     /// Gets the sandboxes service.
     /// </summary>

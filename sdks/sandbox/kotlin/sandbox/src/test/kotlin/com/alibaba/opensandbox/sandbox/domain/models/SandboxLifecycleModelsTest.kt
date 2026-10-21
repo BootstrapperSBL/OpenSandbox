@@ -23,6 +23,7 @@ import com.alibaba.opensandbox.sandbox.api.models.SandboxLifecycle
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.ActivityProbe
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.IdlePolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.OnIdleAction
+import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.RenewalPolicy
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxImageSpec
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.SandboxModelConverter
 import kotlinx.serialization.encodeToString
@@ -223,6 +224,76 @@ class SandboxLifecycleModelsTest {
                 IdlePolicy.builder().build()
             }
         assertEquals("IdlePolicy must set at least one field", error.message)
+    }
+
+    @Test
+    fun `renewal policy validation bounds and required field`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            RenewalPolicy.builder().extendSeconds(299).build()
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            RenewalPolicy.builder().extendSeconds(86401).build()
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            RenewalPolicy.builder().build()
+        }
+        assertEquals(300, RenewalPolicy.builder().extendSeconds(300).build().extendSeconds)
+        assertEquals(86400, RenewalPolicy.builder().extendSeconds(86400).build().extendSeconds)
+    }
+
+    @Test
+    fun `renewal policy maps into create request`() {
+        val request =
+            SandboxModelConverter.toApiCreateSandboxRequest(
+                spec = SandboxImageSpec.builder().image("python:3.11").build(),
+                entrypoint = listOf("python"),
+                env = emptyMap(),
+                metadata = emptyMap(),
+                timeout = null,
+                resource = emptyMap(),
+                platform = null,
+                networkPolicy = null,
+                credentialProxy = null,
+                secureAccess = false,
+                extensions = emptyMap(),
+                volumes = null,
+                snapshotId = null,
+                lifecycle =
+                    DomainSandboxLifecycle.builder()
+                        .renewalPolicy { extendSeconds(3600) }
+                        .build(),
+            )
+
+        assertEquals(3600, request.lifecycle?.renewalPolicy?.extendSeconds)
+    }
+
+    @Test
+    fun `renewal-only lifecycle is not treated as empty`() {
+        val lifecycle =
+            DomainSandboxLifecycle.builder()
+                .renewalPolicy { extendSeconds(3600) }
+                .build()
+
+        val request =
+            SandboxModelConverter.toApiCreateSandboxRequest(
+                spec = SandboxImageSpec.builder().image("python:3.11").build(),
+                entrypoint = listOf("python"),
+                env = emptyMap(),
+                metadata = emptyMap(),
+                timeout = null,
+                resource = emptyMap(),
+                platform = null,
+                networkPolicy = null,
+                credentialProxy = null,
+                secureAccess = false,
+                extensions = emptyMap(),
+                volumes = null,
+                snapshotId = null,
+                lifecycle = lifecycle,
+            )
+
+        // A renewal-only lifecycle must reach the wire, not be dropped as empty.
+        assertEquals(3600, request.lifecycle?.renewalPolicy?.extendSeconds)
     }
 
     @Test

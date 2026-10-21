@@ -53,7 +53,8 @@ public sealed class DefaultAdapterFactory : IAdapterFactory
 
         return new LifecycleStack
         {
-            Sandboxes = sandboxes
+            Sandboxes = sandboxes,
+            Diagnostics = new DiagnosticsAdapter(clientWrapper)
         };
     }
 

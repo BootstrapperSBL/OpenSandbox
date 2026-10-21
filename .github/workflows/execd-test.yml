@@ -31,6 +31,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/execd/go.sum
 
       - name: Check gofmt
         working-directory: components/execd
@@ -130,6 +131,8 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache: ${{ matrix.os != 'self-hosted' }}
+          cache-dependency-path: components/execd/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -177,6 +180,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: components/execd
         run: bash tests/mitm_ca_nss.sh
+
+      - name: MITM CA JDK bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: python3 tests/test_mitm_ca_jdk.py
 
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
@@ -226,6 +235,7 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version: '1.25.9'
+          cache-dependency-path: components/execd/go.sum
 
       - name: Build latest bubblewrap (v0.11.2)
         run: |

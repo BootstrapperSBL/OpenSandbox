@@ -2759,7 +2759,7 @@ components:
               example: "NameError"
             evalue:
               type: string
-              description: Error value/message
+              description: "Error value/message. For `CommandExecError` this is the stringified exit status when the command ran and exited non-zero, and a free-form message when the process could not be started; use `exit_code` to tell the two apart."
               example: "name 'undefined_var' is not defined"
             traceback:
               type: array
@@ -2770,6 +2770,10 @@ components:
                 - "Traceback (most recent call last):"
                 - '  File "<stdin>", line 1, in <module>'
                 - "NameError: name 'undefined_var' is not defined"
+            exit_code:
+              type: integer
+              description: "Exit status of a command that ran and finished with a non-zero status (-1 when it was terminated by a signal). Present only on `CommandExecError` events emitted after the process ran; omitted when the process failed to start and for non-command errors."
+              example: 3
 
     FileInfo:
       type: object
@@ -2978,7 +2982,14 @@ components:
             (which mounts source==destination read-write), each entry may map
             a distinct destination path and be mounted read-only. The source
             path of every entry must fall within the configured writable
-            allowlist.
+            allowlist. The session files API also serves paths under each
+            dest from the host source directory: reads and writes are live
+            in both directions, symlinked entries are followed like the
+            namespace view, and writes are rejected for readonly binds.
+            Destinations must be unique across entries and must not be a
+            strict ancestor of another mount destination (binds, overlays,
+            extra_writable) or fall under /run, /dev, or /proc; such
+            overlapping configurations are rejected at session creation.
           items:
             $ref: "#/components/schemas/BindMount"
         share_net:

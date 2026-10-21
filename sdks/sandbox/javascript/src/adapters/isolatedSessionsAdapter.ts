@@ -18,6 +18,7 @@ import { parseJsonEventStream } from "./sse.js";
 import type { components as ExecdComponents } from "../api/execd.js";
 import type { CommandExecution, ServerStreamEvent } from "../models/execd.js";
 import type { ExecutionHandlers } from "../models/execution.js";
+import { inferExecutionExitCode } from "../models/execution.js";
 import { ExecutionEventDispatcher } from "../models/executionEventDispatcher.js";
 import type { SandboxFiles } from "../services/filesystem.js";
 import type {
@@ -56,17 +57,6 @@ function assertNonBlank(value: string, field: string): void {
 
 function utf8ByteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
-}
-
-function inferExitCode(execution: CommandExecution): number | null {
-  const errorValue = execution.error?.value?.trim();
-  const parsedExitCode =
-    errorValue && /^-?\d+$/.test(errorValue) ? Number(errorValue) : Number.NaN;
-  return execution.error != null
-    ? (Number.isFinite(parsedExitCode) ? parsedExitCode : null)
-    : execution.complete
-      ? 0
-      : null;
 }
 
 export interface IsolatedSessionsAdapterOptions {
@@ -253,7 +243,7 @@ export class IsolatedSessionsAdapter implements IsolationService {
       await dispatcher.dispatch(ev as any);
     }
 
-    execution.exitCode = inferExitCode(execution);
+    execution.exitCode = inferExecutionExitCode(execution);
     return execution;
   }
 

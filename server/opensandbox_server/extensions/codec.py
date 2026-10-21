@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, MutableMapping, Optional
+from typing import TYPE_CHECKING, Dict, Mapping, MutableMapping, Optional
 
 from opensandbox_server.extensions.keys import (
     ACCESS_RENEW_EXTEND_SECONDS_KEY,
@@ -23,18 +23,41 @@ from opensandbox_server.extensions.keys import (
     ANNOTATION_METADATA_PREFIX,
 )
 
+if TYPE_CHECKING:
+    from opensandbox_server.api.schema import SandboxLifecycle
+
+
+def access_renew_extend_seconds_from_lifecycle(
+    lifecycle: Optional["SandboxLifecycle"],
+) -> Optional[int]:
+    """Renew-on-access seconds from ``lifecycle.renewalPolicy``, or None."""
+    if lifecycle is None:
+        return None
+    policy = lifecycle.renewal_policy
+    if policy is None:
+        return None
+    return int(policy.extend_seconds)
+
 
 def apply_access_renew_extend_seconds_to_mapping(
     mapping: MutableMapping[str, str],
     extensions: Optional[Dict[str, str]],
     *,
+    lifecycle: Optional["SandboxLifecycle"] = None,
     metadata_key: str = ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY,
 ) -> None:
     """
-    If ``extensions`` include ``access.renew.extend.seconds``, set ``mapping[metadata_key]``.
+    Persist the renew-on-access opt-in onto ``mapping`` (Kubernetes
+    annotations or Docker labels): ``lifecycle.renewalPolicy`` preferred,
+    deprecated extensions key as fallback (values already validated equal).
 
-    ``mapping`` may be Kubernetes annotations or Docker container labels.
+    TODO(2.0): drop the legacy ``extensions`` fallback with the request
+    entry (#2289); the lifecycle branch and metadata key stay.
     """
+    declared = access_renew_extend_seconds_from_lifecycle(lifecycle)
+    if declared is not None:
+        mapping[metadata_key] = str(declared)
+        return
     if not extensions:
         return
     raw = extensions.get(ACCESS_RENEW_EXTEND_SECONDS_KEY)

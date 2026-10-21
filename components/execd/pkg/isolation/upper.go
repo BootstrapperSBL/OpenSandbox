@@ -167,7 +167,10 @@ func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair,
 
 	if m.maxBytes > 0 {
 		usage, usageErr := m.usageLocked()
-		if usageErr == nil && usage >= m.maxBytes {
+		if usageErr != nil {
+			return "", nil, fmt.Errorf("upper: measure usage before allocation: %w", usageErr)
+		}
+		if usage >= m.maxBytes {
 			return "", nil, fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
 		}
 	}
@@ -284,16 +287,15 @@ func (m *UpperManager) Usage() (int64, error) {
 }
 
 // usageLocked calculates usage without acquiring the mutex. Caller must hold m.mu.
-// Entries whose upper directory no longer exists (e.g. a stale residue entry
-// partially removed before a GC retry) contribute zero instead of failing the
-// whole sum.
+// Missing released upper directories are tolerated as cleanup residue. A missing
+// in-use upper makes the measurement invalid instead of reporting false zero.
 func (m *UpperManager) usageLocked() (int64, error) {
 	var total int64
 	for _, e := range m.entries {
 		for _, p := range e.Pairs {
 			size, err := dirSize(p.UpperDir)
 			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
+				if errors.Is(err, fs.ErrNotExist) && !e.InUse {
 					continue
 				}
 				return 0, err
@@ -481,9 +483,9 @@ func dirExists(path string) bool {
 
 func dirSize(path string) (int64, error) {
 	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	err := filepath.Walk(path, func(walkedPath string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return dirSizeWalkError(path, walkedPath, walkErr)
 		}
 		if !info.IsDir() {
 			size += info.Size()
@@ -491,4 +493,13 @@ func dirSize(path string) (int64, error) {
 		return nil
 	})
 	return size, err
+}
+
+// Missing descendants can disappear during a live walk; only a missing root
+// invalidates the upper measurement. Other I/O failures remain fatal.
+func dirSizeWalkError(root, walkedPath string, walkErr error) error {
+	if errors.Is(walkErr, fs.ErrNotExist) && walkedPath != root {
+		return nil
+	}
+	return walkErr
 }

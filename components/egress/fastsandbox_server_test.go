@@ -95,7 +95,43 @@ func fastSandboxTestServer(t *testing.T) (*fastSandboxPolicyServer, *subject.Mem
 	// no-op the gateway DNS redirect (no iptables/nft in unit tests)
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
 	srv.dnsRedirectRemove = func() error { return nil }
+	// Policy persistence is REQUIRED in the fast-sandbox profile — every
+	// test server carries a store, mirroring the production posture (no
+	// memory-only mode). The file seam defaults to a cross-platform fake
+	// keyed by path (the atomic machinery itself is Linux-only); tests that
+	// need real files or outcome injection build their own harness.
+	pp, err := newPolicyPersistence(t.TempDir())
+	require.NoError(t, err)
+	files := make(map[string]*fakeVaultFile)
+	pp.newFile = func(path string) (vaultFileStore, error) {
+		f, ok := files[path]
+		if !ok {
+			f = newFakeVaultFile(path)
+			files[path] = f
+		}
+		return f, nil
+	}
+	srv.SetPolicyFiles(pp)
 	return srv, reg, nft
+}
+
+// wireTestPolicyPersistence attaches the required temp-dir-backed policy
+// persistence to a server constructed directly (bypassing
+// fastSandboxTestServer).
+func wireTestPolicyPersistence(t *testing.T, srv *fastSandboxPolicyServer) {
+	t.Helper()
+	pp, err := newPolicyPersistence(t.TempDir())
+	require.NoError(t, err)
+	files := make(map[string]*fakeVaultFile)
+	pp.newFile = func(path string) (vaultFileStore, error) {
+		f, ok := files[path]
+		if !ok {
+			f = newFakeVaultFile(path)
+			files[path] = f
+		}
+		return f, nil
+	}
+	srv.SetPolicyFiles(pp)
 }
 
 func doRequest(t *testing.T, srv *fastSandboxPolicyServer, method, path, body string) *httptest.ResponseRecorder {
@@ -238,6 +274,9 @@ func TestActionsStatus(t *testing.T) {
 	assert.Equal(t, constants.ActionsAPIVersion, status.APIVersion)
 	assert.True(t, status.Ready)
 	assert.NotEmpty(t, status.InstanceID)
+	// No vault persistence configured: the capability stays false.
+	assert.False(t, status.VaultTransfer)
+	assert.NotContains(t, rec.Body.String(), "vaultTransfer", "the capability field stays omitted when false")
 
 	// instanceId is stable for the process incarnation
 	rec = doRequest(t, srv, http.MethodGet, constants.ActionsStatusPath, "")
@@ -295,20 +334,31 @@ func TestActionsSetBindingDenyFirstThenHookActivates(t *testing.T) {
 	assert.Equal(t, "allow", eff.Evaluate("example.com"))
 }
 
-func TestActionsSetBindingUpdateWhileActiveDoesNotReplay(t *testing.T) {
+// TestActionsSetBindingReplayNeverMutatesRecordedPolicy: the binding input
+// only seeds a fresh subject's policy. A same-fence SET_BINDING carrying a
+// different input (the superseded CRD-driven update path, or an at-least-once
+// replay) must never mutate the recorded policy — runtime changes go through
+// the relay surface.
+func TestActionsSetBindingReplayNeverMutatesRecordedPolicy(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`
 	s := setBindingAndReady(t, srv, reg, testUID, testIP, &input)
+	nft.mu.Lock()
 	denyFirstInstalls := len(nft.denyFirst)
+	appliedAfterSeed := len(nft.policyApplied)
+	nft.mu.Unlock()
 
-	// plain input update (new spec generation, same fence): applied in place
+	// same-fence binding with a different input: the recorded policy wins
 	newInput := `{"defaultAction":"deny","egress":[{"action":"allow","target":"updated.com"}]}`
 	rec := doAction(t, srv, bindBody(t, testUID, testIP, testFenceR, testFenceA, 2, &newInput))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
-	require.Equal(t, 2, nft.appliedCount())
-	require.Equal(t, denyFirstInstalls, len(nft.denyFirst), "an update must not re-install deny-first")
-	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("updated.com"))
+	nft.mu.Lock()
+	assert.Equal(t, appliedAfterSeed, len(nft.policyApplied), "a replayed binding must not re-apply a policy")
+	assert.Equal(t, denyFirstInstalls, len(nft.denyFirst), "a replayed binding must not re-install deny-first")
+	nft.mu.Unlock()
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"), "the seeded policy survives the replay")
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("updated.com"))
 }
 
 func TestActionsSetBindingNullRemovesPolicy(t *testing.T) {
@@ -361,14 +411,20 @@ func TestActionsRebindDiscardsPolicy(t *testing.T) {
 	require.Equal(t, subject.StateDenying, mustState(reg.Get(s)))
 	assert.Nil(t, reg.EffectivePolicy(s), "old policy must not survive a rebind")
 
-	// the new instance's data-plane-ready activates with its own policy
-	newInput := `{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`
-	rec = doAction(t, srv, bindBody(t, testUID, testIP, "runtime-2", "attachment-2", 6, &newInput))
-	require.Equal(t, http.StatusOK, rec.Code)
+	// the new instance's data-plane-ready activates with its own (re-seeded)
+	// policy
 	rec = doAction(t, srv, hookBody(t, testUID, "runtime-2", "attachment-2", constants.HookDataPlaneReady))
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("old.com"))
+
+	// a runtime policy change goes through the relay: the relayed policy is
+	// what the successor enforces
+	rec = doPolicy(t, srv, http.MethodPut, testUID, policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"new.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("new.com"))
+	assert.Equal(t, "deny", reg.EffectivePolicy(s).Evaluate("old.com"))
 	require.Greater(t, len(nft.denyFirst), 0)
 }
 
@@ -455,6 +511,38 @@ func TestActionsHookForUnregisteredSubjectConflict(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// TestHookRemoveConcurrentNoRace (review: subjFence map race): a
+// data-plane-ready hook (holding policyCommitMu, reading subjFence under
+// s.mu) racing terminal cleanup (which deletes subjFence under s.mu without
+// policyCommitMu) must be data-race-free and converge to a consistent
+// outcome. Run under -race in CI.
+func TestHookRemoveConcurrentNoRace(t *testing.T) {
+	srv, reg, _ := fastSandboxTestServer(t)
+	s := subject.FromSandboxUID(policyTestUID)
+
+	rec := doAction(t, srv, bindBody(t, policyTestUID, vaultTestIP, testFenceR, testFenceA, 1, strPtr(policyAllow())))
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookRuntimeReady))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r := doAction(t, srv, removeBody(t, policyTestUID, testFenceR, testFenceA))
+		assert.Equal(t, http.StatusOK, r.Code)
+	}()
+	rec = doAction(t, srv, hookBody(t, policyTestUID, testFenceR, testFenceA, constants.HookDataPlaneReady))
+	hookCode := rec.Code
+	<-done
+
+	// The removal always completes (we waited), so the converged terminal
+	// state is absent regardless of the hook's outcome (200 activation
+	// first → removal reverts; removal first → the hook is a 404/409).
+	assert.Contains(t, []int{http.StatusOK, http.StatusNotFound, http.StatusConflict}, hookCode)
+	_, present := reg.Get(s)
+	assert.False(t, present, "terminal cleanup wins: the subject is gone")
+}
+
 // Stale-subject takeover on slot reuse (OSEP-0022)
 // ---------------------------------------------------------------------------
 
@@ -607,6 +695,7 @@ func TestActionsSetBindingTakeoverGatewayRefcountConsistent(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -669,11 +758,16 @@ func TestActionsInvalidEnvelopesRejected(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestFastSandboxServerSupersededRoutesGone: the UID-header-routed /policy and
-// /credential-vault surfaces are removed — policy rides only the SET_BINDING
-// binding input and the vault moves to the relay-only /vault/{sandboxUid}
-// surface, so the mux must not serve the old routes.
+// /credential-vault surfaces are removed — policy rides the SET_BINDING
+// binding input at create and the relay surface /policy/{sandboxUid} at
+// runtime, and the vault moves to the relay-only /vault/{sandboxUid} surface.
+// The bare /policy path redirects into the relay subtree; /credential-vault
+// must stay gone.
 func TestFastSandboxServerSupersededRoutesGone(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
+	// The bare /policy path redirects into the relay subtree; the old
+	// UID-header surface stays gone. The exact 3xx code varies by method
+	// (and Go version) — assert the redirect class and the Location target.
 	for _, tc := range []struct {
 		method, path string
 	}{
@@ -681,6 +775,14 @@ func TestFastSandboxServerSupersededRoutesGone(t *testing.T) {
 		{http.MethodPut, "/policy"},
 		{http.MethodPost, "/policy"},
 		{http.MethodDelete, "/policy"},
+	} {
+		rec := doRequest(t, srv, tc.method, tc.path, `{}`)
+		require.True(t, rec.Code >= 300 && rec.Code < 400, "%s %s: want a redirect, got %d", tc.method, tc.path, rec.Code)
+		assert.Equal(t, "/policy/", rec.Header().Get("Location"), "%s %s", tc.method, tc.path)
+	}
+	for _, tc := range []struct {
+		method, path string
+	}{
 		{http.MethodGet, "/credential-vault"},
 		{http.MethodPost, "/credential-vault"},
 		{http.MethodPatch, "/credential-vault"},
@@ -989,6 +1091,7 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	reg := subject.NewRegistry([]policy.EgressRule{alwaysDeny}, []policy.EgressRule{alwaysAllow})
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { return nil }
 	srv.dnsRedirectRemove = func() error { return nil }
 
@@ -1010,25 +1113,43 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 
 // TestFastSandboxServerNftFailureKeepsRegistryState: a failed nft apply must leave
 // the registry (DNS dispatch) on the PREVIOUS policy — nft commits before registry
-// state.
+// state, and the relay write NACKs with last-good kept on both sides.
 func TestFastSandboxServerNftFailureKeepsRegistryState(t *testing.T) {
 	srv, reg, nft := fastSandboxTestServer(t)
 	input := `{"defaultAction":"deny"}`
 	s := setBindingAndReady(t, srv, reg, "u-1", testIP, &input)
 	require.Equal(t, subject.StateActive, mustState(reg.Get(s)))
 
-	// in-place binding update fails at nft: registry must stay on the FIRST
-	// policy
+	// relay write fails at nft: 500, the registry must stay on the FIRST
+	// policy (the record was seeded at revision 1; the write targeted
+	// revision 2)
 	nft.mu.Lock()
 	nft.policyErr = errors.New("nft busy")
 	nft.mu.Unlock()
-	rec := doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 2,
-		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)))
+	rec := doPolicy(t, srv, http.MethodPut, "u-1", policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`, 1, false, true), "")
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 
 	eff := reg.EffectivePolicy(s)
 	require.NotNil(t, eff)
 	assert.Equal(t, "deny", eff.Evaluate("example.com"), "failed nft apply must not publish the new policy")
+
+	// a same-fence binding replay never carries the new policy either
+	rec = doAction(t, srv, bindBody(t, "u-1", testIP, testFenceR, testFenceA, 2,
+		strPtr(`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`)))
+	require.Equal(t, http.StatusOK, rec.Code)
+	eff = reg.EffectivePolicy(s)
+	require.NotNil(t, eff)
+	assert.Equal(t, "deny", eff.Evaluate("example.com"), "the recorded policy is authoritative over binding replays")
+
+	// the retry with a working nft lands
+	nft.mu.Lock()
+	nft.policyErr = nil
+	nft.mu.Unlock()
+	rec = doPolicy(t, srv, http.MethodPut, "u-1", policyPutDoc(
+		`{"defaultAction":"deny","egress":[{"action":"allow","target":"example.com"}]}`, 1, false, true), "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "allow", reg.EffectivePolicy(s).Evaluate("example.com"))
 }
 
 // TestFastSandboxServerGatewayRedirectRefcounted: the shared prerouting REDIRECT
@@ -1038,6 +1159,7 @@ func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -1167,6 +1289,7 @@ func TestFastSandboxServerGatewayRedirectDuplicateSetBindingIdempotent(t *testin
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }
@@ -1187,6 +1310,7 @@ func TestFastSandboxServerGatewayRedirectRebindMovesGateway(t *testing.T) {
 	reg := subject.NewRegistry(nil, nil)
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
+	wireTestPolicyPersistence(t, srv)
 	var installs, removes int
 	srv.dnsRedirectInstall = func(netip.Addr, int) error { installs++; return nil }
 	srv.dnsRedirectRemove = func() error { removes++; return nil }

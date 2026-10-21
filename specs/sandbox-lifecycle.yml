@@ -59,11 +59,10 @@ paths:
       operationId: getSandboxNetworkPolicy
       summary: Read sandbox network policy
       description: |
-        For Fsb, reads persisted egress Action Binding intent in the tenant's
-        Sandbox CR, not live enforcement state. An absent binding defaults to
-        deny-first when an egress handler is configured; this is not proof of
-        enforcement on a pool without that handler. Other backends proxy the
-        sandbox-side egress service. Requires lifecycle API authentication.
+        Fsb reads the egress-held policy record — the response reflects
+        exactly what the egress enforces, not the create-time binding input.
+        Other backends proxy the sandbox-side egress service. Requires
+        lifecycle API authentication.
       responses:
         '200':
           description: Policy intent (Fsb) or sidecar policy (other backends).
@@ -80,6 +79,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalServerError'
         '503':
@@ -94,9 +95,12 @@ paths:
       summary: Replace the complete sandbox network policy
       description: |
         Replaces defaultAction and all rules, rather than merging them. Fsb
-        commits the egress binding through FastPath, preserving unrelated bindings
-        with UID/generation conflict protection. Success does not imply handler
-        convergence. Other backends proxy the sandbox-side egress service.
+        relays the replacement to the egress-held policy record through the
+        FastPath handler relay — the ack means the egress applied it (and, with
+        policy persistence, that it is durable). The create-time binding input
+        is the bootstrap only; runtime changes never rewrite it, and a paused
+        (sealed) sandbox rejects mutations until resume. Other backends proxy
+        the sandbox-side egress service.
       requestBody:
         required: true
         content:
@@ -141,9 +145,10 @@ paths:
         take priority over existing rules with the same target and replace
         them in place; within one patch payload, the first rule for a target
         wins; existing rules for other targets and the current defaultAction
-        are preserved. Fsb commits the merged binding through FastPath with
-        UID/generation conflict protection. Other backends proxy the
-        sandbox-side egress service.
+        are preserved. Fsb composes the merge server-side (relay GET → merge
+        → relay PUT carrying the read revision) — a concurrent writer wins
+        and the stale merge is a 409. Other backends proxy the sandbox-side
+        egress service.
       requestBody:
         required: true
         content:
@@ -2024,9 +2029,9 @@ components:
         fields without changing the semantics of existing fields.
 
         `preStart` and `periodic` are hooks executed inside the sandbox by
-        execd. `idlePolicy` is control-plane policy (OSEP-0024): it tells the
-        server how to treat the sandbox's state machine and never reaches the
-        guest.
+        execd. `idlePolicy` (OSEP-0024) and `renewalPolicy` (OSEP-0009) are
+        control-plane policies: they tell the server how to treat the
+        sandbox's state machine and never reach the guest.
       properties:
         preStart:
           $ref: '#/components/schemas/LifecycleHook'
@@ -2049,6 +2054,39 @@ components:
             by the fast-sandbox backend; other backends reject the field.
             Omitting `idlePolicy` preserves non-automated behavior exactly:
             the sandbox is never auto-paused and never auto-woken.
+        renewalPolicy:
+          $ref: '#/components/schemas/RenewalPolicy'
+          description: |
+            Renew-on-access behavior (OSEP-0009): each ingress-observed or
+            proxied access extends the sandbox expiration. Control-plane
+            state and never reaches the guest. Supported by the docker and
+            Kubernetes (pod) backends; the fast-sandbox backend rejects the
+            field. Supersedes the deprecated
+            `extensions["access.renew.extend.seconds"]` creation key, which
+            remains supported throughout 1.x and is removed in 2.0.
+      additionalProperties: false
+    RenewalPolicy:
+      type: object
+      description: |
+        Renew-on-access behavior declared by the sandbox (OSEP-0009). The
+        policy is desired control-plane state: when the ingress gateway or
+        the server proxy observes traffic for the sandbox, the server extends
+        the sandbox expiration without client involvement. The policy never
+        reaches the guest.
+
+        Setting the policy has no effect unless the server operator enabled
+        the renew-intent integration (`[renew_intent]`). A missing policy
+        means the sandbox never auto-renews.
+      required: [extendSeconds]
+      properties:
+        extendSeconds:
+          type: integer
+          minimum: 300
+          maximum: 86400
+          description: |
+            Extension window X in seconds for each access-driven renewal:
+            the expiration is moved to `max(now + X, current expiresAt)`.
+            Must be between 300 (5 minutes) and 86400 (24 hours) inclusive.
       additionalProperties: false
     IdlePolicy:
       type: object
@@ -2279,6 +2317,13 @@ components:
             lifecycle hook transport reject hooks. `lifecycle.idlePolicy` is
             not a hook and may accompany `extensions.poolRef`; it is honored
             only by the fast-sandbox backend and rejected by others.
+            `lifecycle.renewalPolicy` is likewise not a hook: it may
+            accompany `extensions.poolRef` and is honored by the docker and
+            Kubernetes (pod) backends, while the fast-sandbox backend rejects
+            it. Setting both `lifecycle.renewalPolicy` and the deprecated
+            `extensions["access.renew.extend.seconds"]` is accepted only when
+            their parsed values match; conflicting values are rejected with
+            HTTP 400.
 
         entrypoint:
           type: array
@@ -2316,6 +2361,11 @@ components:
             Optional outbound network policy for the sandbox.
             Shape matches the sidecar `/policy` endpoint. If omitted or empty,
             the sidecar starts in allow-all mode until updated.
+            For Fsb, an omitted policy still registers an egress binding,
+            seeded with a no-op default-allow record (the sandbox behaves
+            like a policy-less one until changed): runtime changes go
+            through the networkpolicy endpoints (handler relay), which
+            require that registration.
             Not supported together with `extensions.poolRef`; pooled pods are
             pre-created, so the server rejects this combination instead of
             silently ignoring the requested policy.
@@ -2367,7 +2417,17 @@ components:
             - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
 
             **Well-known keys**:
-            - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24 hours inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit to disable. Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint via `validate_extensions` in server `src/extensions/validation.py`).
+            - `access.renew.extend.seconds` (**deprecated**): Decimal integer
+              string from **300** to **86400** (5 minutes to 24 hours
+              inclusive). Opts the sandbox into OSEP-0009 renew-on-access and
+              sets per-renewal extension seconds. Omit to disable. Invalid
+              values are rejected at creation with HTTP 400 (validated on the
+              lifecycle create endpoint via `validate_extensions` in server
+              `src/extensions/validation.py`). Superseded by
+              `lifecycle.renewalPolicy.extendSeconds`: prefer the structured
+              field in new code. The extensions key remains supported
+              throughout 1.x and is removed in 2.0; when both are set, their
+              parsed values must match or creation fails with HTTP 400.
     ResourceLimits:
       type: object
       description: |

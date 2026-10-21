@@ -79,6 +79,8 @@ func TestBashSession_NonZeroExitEmitsError(t *testing.T) {
 	require.NotNil(t, gotErr, "expected non-nil error output")
 	require.Equal(t, "CommandExecError", gotErr.EName)
 	require.Equal(t, "7", gotErr.EValue)
+	require.NotNil(t, gotErr.ExitCode, "expected exit_code for a command that ran")
+	require.Equal(t, 7, *gotErr.ExitCode)
 	require.NotEmpty(t, sessionID, "expected session id to be set")
 	require.Equal(t, "before", stdoutLine)
 
@@ -895,4 +897,54 @@ func TestBashSession_NormalExitKeepsBackgroundJob(t *testing.T) {
 		_, err := os.Stat(marker)
 		return err == nil
 	}, 5*time.Second, 50*time.Millisecond, "background job was killed after a normal run")
+}
+
+func TestBashSession_SignalKillEmitsError(t *testing.T) {
+	requireBash(t)
+
+	c := NewController("", "")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var (
+		errCh      = make(chan *execute.ErrorOutput, 1)
+		completeCh = make(chan struct{}, 1)
+	)
+
+	req := &ExecuteCodeRequest{
+		Language: Bash,
+		// The shell kills itself before the wrapper can print its exit marker.
+		Code:    `kill -TERM $$`,
+		Cwd:     t.TempDir(),
+		Timeout: 5 * time.Second,
+		Hooks: ExecuteResultHook{
+			OnExecuteError: func(err *execute.ErrorOutput) { errCh <- err },
+			OnExecuteComplete: func(_ time.Duration) {
+				completeCh <- struct{}{}
+			},
+		},
+	}
+
+	session, err := c.createBashSession(&CreateContextRequest{})
+	require.NoError(t, err)
+	req.Context = session
+	require.NoError(t, c.runBashSession(ctx, req))
+
+	select {
+	case <-completeCh:
+		require.Fail(t, "did not expect completion hook when the shell was killed by a signal")
+	default:
+	}
+
+	var gotErr *execute.ErrorOutput
+	select {
+	case gotErr = <-errCh:
+	case <-time.After(2 * time.Second):
+		require.Fail(t, "expected error hook to be called for a signal-killed shell")
+	}
+	require.Equal(t, "CommandExecError", gotErr.EName)
+	require.Equal(t, "-1", gotErr.EValue)
+	require.NotNil(t, gotErr.ExitCode, "expected exit_code for a signal-killed shell")
+	require.Equal(t, -1, *gotErr.ExitCode)
 }

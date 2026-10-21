@@ -366,6 +366,31 @@ class TestFsbE2E:
         try:
             assert sandbox.origin == SandboxOrigin.TEMPLATE
 
+            context = await manager.get_diagnostic_context(sandbox.id)
+            current = await sandbox.get_diagnostic_context()
+            assert context.sandbox_id == current.sandbox_id == sandbox.id
+            assert context.backend_type == current.backend_type == "fast-sandbox"
+            assert context.backend_identifiers == current.backend_identifiers == {}
+            assert context.state
+            logger.info("Fast Sandbox diagnostic context: %s", context.model_dump())
+            for scope in ("runtime", "all"):
+                for events in (
+                    await manager.get_diagnostic_events(sandbox.id, scope),
+                    await sandbox.get_diagnostic_events(scope),
+                ):
+                    assert events.sandbox_id == sandbox.id
+                    assert events.kind == "events"
+                    assert events.scope == scope
+                    assert events.delivery == "inline"
+                    assert isinstance(events.content, str)
+            for get_logs in (
+                lambda: manager.get_diagnostic_logs(sandbox.id, "container"),
+                lambda: sandbox.get_diagnostic_logs("container"),
+            ):
+                with pytest.raises(SandboxApiException) as error:
+                    await get_logs()
+                assert error.value.status_code == 501
+
             # HTTP-level enforcement probe: busybox wget performs a real
             # HTTPS request, covering both gates of the fsb dns+nft chain
             # (DNS resolution and transport).

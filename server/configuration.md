@@ -167,6 +167,8 @@ The kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side; these fi
 | `fastpath_wait_ready_seconds` | number | `30.0` | Bounded readiness wait for DataPlaneReady after Create. |
 | `fastpath_resource_pool` | string | `"default-pool"` | SandboxPool when `extensions.poolRef` is unset. |
 | `template_s3_publish_secret` | string | `"sandbox-oss-credentials"` | Object-store credentials secret for server-created SandboxTemplates. |
+| `template_mitm_ca_secret` | string \| omitted | `null` | Secret holding the pinned cluster MITM CA certificate (OSEP-0022). When set, server-created SandboxTemplates bake `spec.egressMitmCertificate` from it (certificate entry only, never the private key); unset keeps templates CA-free. The Secret must exist in each template's namespace (ops-runbook distribution); a missed copy fails the build observably. |
+| `template_mitm_ca_secret_key` | string | `"ca.crt"` | Secret entry holding the CA certificate when `template_mitm_ca_secret` is set. |
 
 ---
 
@@ -309,7 +311,7 @@ Auto-renew sandbox expiration on observed access (lifecycle proxy and/or Redis q
 | `redis.queue_key` | string | `"opensandbox:renew:intent"` | Redis list key. |
 | `redis.consumer_concurrency` | integer | `8` | Concurrent BRPOP workers (≥ 1). |
 
-Per-sandbox enablement uses create request extensions (OSEP-0009).
+Per-sandbox enablement uses `lifecycle.renewalPolicy.extendSeconds` at create time (OSEP-0009). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported throughout 1.x and is removed in 2.0; when both are set, their parsed values must match or creation fails with HTTP 400. See the [Renew-on-Access guide](../docs/guides/renew-on-access.md).
 
 ---
 

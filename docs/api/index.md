@@ -81,7 +81,18 @@ Defines structured routing context and best-effort troubleshooting descriptors f
 
 `scope` is required. Docker and Kubernetes support `container`/`all` for logs and `runtime`/`all` for events. Fast Sandbox supports `runtime`/`all` events; log collection is not implemented there. Unsupported scopes return `DIAGNOSTICS_SCOPE_UNSUPPORTED`.
 
-Responses use `delivery: inline` with `content`, or `delivery: url` with `contentUrl` and an optional expiry. The SDK does not download URL content; inspect `truncated` and `warnings` before treating results as complete. Python models and CLI JSON/YAML use snake_case fields such as `content_url`. CLI raw output prints the content or URL without following it.
+Context does not take a scope and is available independently of execd readiness.
+The built-in server returns `docker` with container identifiers,
+`kubernetes` with namespace/workload identifiers and an allocated Pod name when
+available, or `fast-sandbox` with an empty identifier map. Kubernetes context
+can be queried before a Pod is allocated. Unknown sandboxes return 404;
+backends without context support return 501 `DIAGNOSTICS_NOT_IMPLEMENTED`.
+
+Responses use `delivery: inline` with `content`, or `delivery: url` with
+`contentUrl` and an optional expiry. The SDK does not download URL content;
+inspect `truncated` and `warnings` before treating results as complete.
+Python models and CLI JSON/YAML use snake_case fields such as `content_url`.
+CLI raw output prints the content or URL without following it.
 
 See [SDK diagnostics](/sdks/#diagnostics) for language support and [CLI diagnostics](/cli/#collect-diagnostics) for command examples.
 

@@ -1422,9 +1422,9 @@ export interface components {
          *     fields without changing the semantics of existing fields.
          *
          *     `preStart` and `periodic` are hooks executed inside the sandbox by
-         *     execd. `idlePolicy` is control-plane policy (OSEP-0024): it tells the
-         *     server how to treat the sandbox's state machine and never reaches the
-         *     guest.
+         *     execd. `idlePolicy` (OSEP-0024) and `renewalPolicy` (OSEP-0009) are
+         *     control-plane policies: they tell the server how to treat the
+         *     sandbox's state machine and never reach the guest.
          */
         SandboxLifecycle: {
             /**
@@ -1446,6 +1446,35 @@ export interface components {
              *     the sandbox is never auto-paused and never auto-woken.
              */
             idlePolicy?: components["schemas"]["IdlePolicy"];
+            /**
+             * @description Renew-on-access behavior (OSEP-0009): each ingress-observed or
+             *     proxied access extends the sandbox expiration. Control-plane
+             *     state and never reaches the guest. Supported by the docker and
+             *     Kubernetes (pod) backends; the fast-sandbox backend rejects the
+             *     field. Supersedes the deprecated
+             *     `extensions["access.renew.extend.seconds"]` creation key, which
+             *     remains supported throughout 1.x and is removed in 2.0.
+             */
+            renewalPolicy?: components["schemas"]["RenewalPolicy"];
+        };
+        /**
+         * @description Renew-on-access behavior declared by the sandbox (OSEP-0009). The
+         *     policy is desired control-plane state: when the ingress gateway or
+         *     the server proxy observes traffic for the sandbox, the server extends
+         *     the sandbox expiration without client involvement. The policy never
+         *     reaches the guest.
+         *
+         *     Setting the policy has no effect unless the server operator enabled
+         *     the renew-intent integration (`[renew_intent]`). A missing policy
+         *     means the sandbox never auto-renews.
+         */
+        RenewalPolicy: {
+            /**
+             * @description Extension window X in seconds for each access-driven renewal:
+             *     the expiration is moved to `max(now + X, current expiresAt)`.
+             *     Must be between 300 (5 minutes) and 86400 (24 hours) inclusive.
+             */
+            extendSeconds: number;
         };
         /**
          * @description Idle behavior declared by the sandbox (OSEP-0024). The policy is
@@ -1647,6 +1676,13 @@ export interface components {
              *     lifecycle hook transport reject hooks. `lifecycle.idlePolicy` is
              *     not a hook and may accompany `extensions.poolRef`; it is honored
              *     only by the fast-sandbox backend and rejected by others.
+             *     `lifecycle.renewalPolicy` is likewise not a hook: it may
+             *     accompany `extensions.poolRef` and is honored by the docker and
+             *     Kubernetes (pod) backends, while the fast-sandbox backend rejects
+             *     it. Setting both `lifecycle.renewalPolicy` and the deprecated
+             *     `extensions["access.renew.extend.seconds"]` is accepted only when
+             *     their parsed values match; conflicting values are rejected with
+             *     HTTP 400.
              */
             lifecycle?: components["schemas"]["SandboxLifecycle"];
             /**
@@ -1723,7 +1759,17 @@ export interface components {
              *     - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
              *
              *     **Well-known keys**:
-             *     - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24 hours inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit to disable. Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint via `validate_extensions` in server `src/extensions/validation.py`).
+             *     - `access.renew.extend.seconds` (**deprecated**): Decimal integer
+             *       string from **300** to **86400** (5 minutes to 24 hours
+             *       inclusive). Opts the sandbox into OSEP-0009 renew-on-access and
+             *       sets per-renewal extension seconds. Omit to disable. Invalid
+             *       values are rejected at creation with HTTP 400 (validated on the
+             *       lifecycle create endpoint via `validate_extensions` in server
+             *       `src/extensions/validation.py`). Superseded by
+             *       `lifecycle.renewalPolicy.extendSeconds`: prefer the structured
+             *       field in new code. The extensions key remains supported
+             *       throughout 1.x and is removed in 2.0; when both are set, their
+             *       parsed values must match or creation fails with HTTP 400.
              */
             extensions?: {
                 [key: string]: string;

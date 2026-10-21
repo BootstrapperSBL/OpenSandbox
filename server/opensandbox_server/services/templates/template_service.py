@@ -397,6 +397,18 @@ class FastSandboxTemplateService:
         env = record.spec.get("env") or {}
         if env:
             spec["envs"] = [{"name": name, "value": value} for name, value in env.items()]
+        # OSEP-0022 CA wiring: bake the pinned MITM CA Secret's certificate
+        # entry (never the private key) into every server-created template
+        # when configured. The Secret must exist in the template's
+        # namespace (ops-runbook distribution); a missed copy fails the
+        # build observably.
+        if self._k8s_config.template_mitm_ca_secret:
+            mitm_certificate: dict = {
+                "secretRef": {"name": self._k8s_config.template_mitm_ca_secret}
+            }
+            if self._k8s_config.template_mitm_ca_secret_key:
+                mitm_certificate["key"] = self._k8s_config.template_mitm_ca_secret_key
+            spec["egressMitmCertificate"] = mitm_certificate
         # The CRD requires the readiness object itself (structural
         # defaulting fills warmupSeconds=60); always emit it, empty when the
         # request carried no readiness gate.

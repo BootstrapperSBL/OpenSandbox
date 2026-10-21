@@ -31,7 +31,7 @@ OpenSandbox provides five sandbox SDKs for lifecycle management, command executi
 | Isolated sessions | Yes | Yes | Yes | Yes | Yes |
 | [Client Pool](/guides/client-pool), including Redis | Yes | Yes | Yes | Yes | No |
 | [Pool warmup tracing](/sdks/observability#pool-warmup-tracing) | Yes | Yes, fewer attributes | Yes | No | No |
-| [Remote diagnostic logs/events](/api/#diagnostics) | Yes | No | Yes | No | No |
+| [Diagnostic context, logs/events](/api/#diagnostics) | Yes | Yes | Yes | Yes | Yes |
 | [Create-latency telemetry](/sdks/observability#creation-metrics) | Yes | Yes | Yes | Yes | Yes |
 
 ### Differences that affect application code
@@ -51,9 +51,23 @@ Template-backed sandboxes require an explicit TTL and inherit their workload con
 
 ## Diagnostics
 
-Python and Kotlin/Java expose remote logs/events on both `Sandbox` and `SandboxManager`. Use a manager when execd is not ready. Python methods are `get_diagnostic_logs` / `get_diagnostic_events`; JVM methods are `getDiagnosticLogs` / `getDiagnosticEvents`. Pass a sandbox ID to manager methods and an explicit scope such as `container` for logs or `runtime` for events.
+All sandbox SDKs expose diagnostic context, logs, and events on both `Sandbox`
+and `SandboxManager`. Use a manager when execd is not ready: these requests go
+to the lifecycle server without connecting to the sandbox.
 
-JavaScript, Go, and C# can use the [CLI](/cli/#collect-diagnostics) or [HTTP API](/api/#diagnostics). C# `SdkDiagnosticsOptions` controls local SDK logging. See the API reference for supported scopes and inline/URL delivery.
+| Language | Context | Logs / events |
+| --- | --- | --- |
+| Python async/sync | `get_diagnostic_context` | `get_diagnostic_logs` / `get_diagnostic_events` |
+| Kotlin/Java, JavaScript | `getDiagnosticContext` | `getDiagnosticLogs` / `getDiagnosticEvents` |
+| Go | `GetDiagnosticContext` | `GetDiagnosticLogs` / `GetDiagnosticEvents` |
+| C# | `GetDiagnosticContextAsync` | `GetDiagnosticLogsAsync` / `GetDiagnosticEventsAsync` |
+
+Manager methods take a sandbox ID; sandbox methods use the current instance.
+Context returns the backend type, backend-defined identifiers, and lifecycle state
+when available. Log/event methods also require a scope such as `container` or
+`runtime`. Availability depends on the server backend. URL-delivered content is
+not downloaded automatically; inspect `truncated` and `warnings`.
+C# `SdkDiagnosticsOptions` separately controls local SDK logging.
 
 ## Lifecycle and cleanup
 
