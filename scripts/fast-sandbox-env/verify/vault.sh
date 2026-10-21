@@ -15,7 +15,32 @@
 
 # verify/vault.sh — credential-vault lifecycle over the server relay (OSEP-0022)
 #
-# Vault create (create-only 409), export into the checkpoint bundle on pause, reload + revision preservation across resume and an egress crash, and delete/re-create.
+# Coverage (all assertions on the live egress sidecar via the fastlet
+# Actions channel; log markers are read from the pool's egress containers):
+#
+#   1. Subject registration: the sandbox is created with a create-carried
+#      default-deny egress policy (allow ext.test) — a policy-less create
+#      produces no egress binding at all, so the subject would never
+#      register. The verify waits for the egress log marker
+#      "subject s-<uid>: data-plane-ready, policy active".
+#   2. Vault create over the server relay: POST
+#      /sandboxes/{id}/credential-vault (inline credential `tok` + an
+#      apiKey binding for host ext.test) must ack with a numeric revision.
+#   3. Create-only invariant: a duplicate POST must be rejected with 409.
+#   4. Pause/resume vault transfer: pause exports the vault into the
+#      checkpoint bundle ("vault exported to snapshot bundle" marker);
+#      the pause's REMOVE_BINDING purges the subject, so on resume the
+#      import lands through the unregistered branch and the file reloads
+#      at the SET_BINDING replay ("vault reloaded from file" marker). The
+#      relay GET must report the SAME revision across the round trip.
+#   5. Egress crash recovery: the egress process is pkilled in every pool
+#      pod; when the containers come back (fresh instanceId -> SET_BINDING
+#      replay -> vault file reload by incarnation) the relay must still
+#      report the original revision. Skipped on pods without pkill.
+#   6. Delete/re-create: DELETE -> GET 404; a fresh POST starts again at
+#      revision 1.
+#   7. Cleanup: kill the sandbox and wait until GET 404s.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 

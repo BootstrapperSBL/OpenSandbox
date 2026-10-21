@@ -15,7 +15,33 @@
 
 # verify/sandbox.sh — end-to-end sandbox verify (CLI create -> gateway -> execd /ping)
 #
-# Cold + warm sandbox creates through the full wire-up, egress policy enforcement and update convergence, and the remaining lifecycle surface (get/list/metadata/renew).
+# Coverage:
+#
+#   1. Full create wire-up, 6 sandboxes: `osb sandbox create` -> lifecycle
+#      server (fsb runtime) -> FastPath gRPC -> fastlet -> firecracker
+#      microVM -> signed gateway route -> fastlet-proxy -> guest execd
+#      /ping 200. Cold #1 pulls the golden image set through DART (600s
+#      ping budget); warm #2 may still pull on the peer node via its DART
+#      peer (600s); warm #3-6 hit the node-local caches (120s budgets).
+#      Each create logs the create latency, the create -> /ping-200
+#      latency, and the Sandbox CR state at ping time (runtime/dataPlane
+#      states, infraComponents, actionBindings, Ready condition).
+#   2. Egress policy enforcement on every create: each create carries a
+#      default-deny policy (allow example.com + *.opensandbox.ai), so the
+#      networkPolicy -> egress action binding -> nft chain must converge
+#      and GET /networkpolicy must report mode=enforcing with the
+#      example.com rule (120s budget) before the sandbox counts as done.
+#   3. Policy update path (raw PUT; the CLI only has merge-style patches):
+#      PUT /networkpolicy with a github.com allow rule -> ReplaceActionBindings
+#      -> the egress sidecar hot-swaps the nft rules -> the policy reports
+#      the new target as enforcing (120s budget).
+#   4. Lifecycle surface on the first sandbox: GET returns the created id;
+#      the paginated list contains it; PATCH /metadata exercises JSON Merge
+#      Patch (RFC 7396) — non-null upsert and null-delete; renew 2h
+#      advances expiresAt and the advanced value is visible via GET
+#      (compared as epoch seconds, with string equality as fallback).
+#   5. Cleanup: kill all six sandboxes and wait until each GET 404s.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 

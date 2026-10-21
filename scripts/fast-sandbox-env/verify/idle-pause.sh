@@ -15,10 +15,38 @@
 
 # verify/idle-pause.sh — idle-pause / wake-on-access verify (OSEP-0024 profile)
 #
-# Auto-pause after the idle window, wake on the next gateway request, the wakeOnAccess=false compatibility invariant, and pause behavior while Redis is down / flushed.
+# Requires the idle-pause profile: IDLE_PAUSE=1 up (or the $WORK/idle-pause
+# marker it leaves) — Redis + the server [automation.idle_pause] sweeper +
+# the gateway activity/wake flags. The opted-in sandbox is created through
+# the raw lifecycle API because the CLI has no lifecycle.idlePolicy yet;
+# idleTimeoutSeconds=30 (the server rejects X < 30) with onIdle=pause.
+#
+# Coverage:
+#
+#   1. Auto-pause + wake-on-access, IDLE_PAUSE_ROUNDS rounds (default 3):
+#      with zero traffic the sandbox must reach Paused within X + sweep
+#      interval + checkpoint window (240s per round); the next gateway
+#      request must then WAKE it — traffic is driven at the paused
+#      sandbox until /ping is served again, with no resume API call
+#      (10min wake budget, marked 503s tolerated). Per-round pause/wake
+#      latencies and the CR placement.attempt counter are logged.
+#   2. wakeOnAccess=false invariant: such a sandbox is auto-paused as
+#      well, but gateway traffic must NEVER wake it (a 200 — or even a
+#      wake-503 — after traffic fails the round) and the state must stay
+#      Paused until a MANUAL resume brings it back to Running.
+#   3. Redis outage: scaling idle-pause-redis to 0 must suppress pausing
+#      entirely — a sandbox must not be paused while the sweeper cannot
+#      reach Redis. After Redis is scaled back, the missing-activity
+#      tombstone produces a pause only after a full idle window.
+#   4. Redis data loss: FLUSHALL must not accelerate the pause — activity
+#      keys disappearing must be treated as "activity unknown", so the
+#      pause happens only after a complete fresh idle window (a pause
+#      within X-5s of the flush fails the round; the pause must still
+#      arrive within a 300s budget).
+#   5. Cleanup: kill the sandbox and wait until GET 404s.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
-# Requires the idle-pause profile: IDLE_PAUSE=1 up (or the $WORK/idle-pause marker it leaves).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
 # --- stage: idle-pause / wake-on-access verify (OSEP-0024 profile) --------------

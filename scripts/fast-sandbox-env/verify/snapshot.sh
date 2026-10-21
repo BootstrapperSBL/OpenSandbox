@@ -15,7 +15,34 @@
 
 # verify/snapshot.sh — snapshot round trip (CLI -> SandboxSnapshot CR -> restore)
 #
-# Snapshot a Running sandbox to Ready (re-entry fencing included), keep the source serving, restore a new sandbox from the snapshot id, list, and clean up.
+# Coverage:
+#
+#   1. Snapshot create: a Running, /ping-healthy source sandbox is
+#      snapshotted via `osb snapshot create`; the POST returns
+#      status=Creating and the server row converges from the
+#      SandboxSnapshot CR via its watcher to Ready (300s budget).
+#   2. Re-entry fencing during the dump window: a second snapshot POST
+#      for the same sandbox must be fenced with 409 — or, during fence
+#      cache lag, accepted with 202 and then resolved to a terminal
+#      phase (a stuck accepted snapshot would block all future
+#      snapshots through the fence).
+#   3. Source survival: once the snapshot is terminal, the pause window
+#      must be released — the source sandbox is Running and /ping-200
+#      again.
+#   4. Repeat snapshot: a second snapshot of the same source after the
+#      first is terminal must produce a distinct id and reach Ready.
+#   5. Listing: `osb snapshot list --sandbox-id` must contain both
+#      required snapshots (and any accepted re-entry one) as Ready.
+#   6. Restore: `osb sandbox create --snapshot-id` (resource flags
+#      restating the pool profile) boots the artifact set published at
+#      dump time — the restored sandbox reaches Running and serves
+#      execd /ping through the gateway.
+#   7. Cleanup: kill the restored and source sandboxes and delete every
+#      snapshot row (the server forwards per-row artifact deletion).
+#
+# The snapshot ids are shared through SNAPSHOT_ID / SNAPSHOT_ID2 /
+# SNAPSHOT_EXTRA.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 

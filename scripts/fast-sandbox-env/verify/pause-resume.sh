@@ -15,7 +15,26 @@
 
 # verify/pause-resume.sh — pause/resume round trip (CLI -> FastPath checkpoint)
 #
-# Pause until the checkpoint is durable and the signed route stops serving, resume back to Running, and /ping through a fresh route.
+# Coverage:
+#
+#   1. Baseline: create a sandbox via `osb sandbox create` (template,
+#      skip-health-check), poll it to Running, and confirm execd /ping
+#      returns 200 through a freshly resolved signed gateway route.
+#   2. Pause semantics (durable-first): POST pause, then poll GET until
+#      state=Paused. Paused means the checkpoint is fully durable in the
+#      artifact store AND the fastlet capacity is released — not merely
+#      that the call was accepted. The pause -> Paused latency is logged.
+#   3. Route release (negative assertion): after Paused, the OLD signed
+#      route must no longer serve /ping — the gateway must reject a
+#      route whose sandbox is not running. A still-serving paused
+#      sandbox fails the verify.
+#   4. Resume: POST resume, poll GET back to Running (checkpoint
+#      restored from the artifact store), then /ping must return 200
+#      through a FRESH route — resume advances the route generation, so
+#      re-resolving the endpoint is mandatory and the old route staying
+#      valid would indicate a generation bug.
+#   5. Cleanup: kill the sandbox and wait until GET 404s.
+#
 # Runs as part of `integration.sh up` (the entry chains every verify
 # script) or standalone against a live stack from `env.sh up`.
 
