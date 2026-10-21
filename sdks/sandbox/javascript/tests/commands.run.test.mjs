@@ -35,23 +35,25 @@ function createAdapter(responseBody, opts = {}) {
   );
 }
 
-test("CommandsAdapter.run populates complete and exitCode for successful foreground commands", async () => {
-  const adapter = createAdapter(
-    [
-      'data: {"type":"init","text":"cmd-1","timestamp":1}',
-      'data: {"type":"stdout","text":"hi","timestamp":2}',
-      'data: {"type":"execution_complete","timestamp":3,"execution_time":4}',
-      "",
-    ].join("\n"),
-  );
+for (const explicitExitCode of [false, true]) {
+  test(`CommandsAdapter.run populates complete and exitCode for successful foreground commands (explicit exit code: ${explicitExitCode})`, async () => {
+    const adapter = createAdapter(
+      [
+        'data: {"type":"init","text":"cmd-1","timestamp":1}',
+        'data: {"type":"stdout","text":"hi","timestamp":2}',
+        `data: ${JSON.stringify({ type: "execution_complete", timestamp: 3, execution_time: 4, ...(explicitExitCode ? { exit_code: 0 } : {}) })}`,
+        "",
+      ].join("\n"),
+    );
 
-  const execution = await adapter.run("echo hi");
+    const execution = await adapter.run("echo hi");
 
-  assert.equal(execution.id, "cmd-1");
-  assert.equal(execution.logs.stdout[0].text, "hi");
-  assert.equal(execution.complete?.executionTimeMs, 4);
-  assert.equal(execution.exitCode, 0);
-});
+    assert.equal(execution.id, "cmd-1");
+    assert.equal(execution.logs.stdout[0].text, "hi");
+    assert.equal(execution.complete?.executionTimeMs, 4);
+    assert.equal(execution.exitCode, 0);
+  });
+}
 
 test("CommandsAdapter.run infers non-zero exitCode from final error state", async () => {
   const adapter = createAdapter(

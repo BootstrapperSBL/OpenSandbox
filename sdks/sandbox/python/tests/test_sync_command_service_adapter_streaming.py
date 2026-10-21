@@ -44,7 +44,8 @@ LITERAL_ARGV = [
 
 
 class _SseTransport(httpx.BaseTransport):
-    def __init__(self) -> None:
+    def __init__(self, explicit_exit_code: bool = False) -> None:
+        self.explicit_exit_code = explicit_exit_code
         self.last_request: httpx.Request | None = None
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -58,6 +59,8 @@ class _SseTransport(httpx.BaseTransport):
                 b'data: {"type":"stdout","text":"hi","timestamp":2}\n\n'
                 b'data: {"type":"execution_complete","timestamp":4,"execution_time":5}\n\n'
             )
+            if self.explicit_exit_code:
+                sse = sse.replace(b'"execution_time":5}', b'"execution_time":5,"exit_code":0}')
             return httpx.Response(
                 200,
                 headers={"Content-Type": "text/event-stream"},
@@ -178,8 +181,9 @@ def test_sync_run_command_rejects_negative_timeout(timeout: timedelta) -> None:
         adapter.run("pwd", opts=RunCommandOpts(timeout=timeout))
 
 
-def test_sync_run_command_streaming_happy_path_updates_execution() -> None:
-    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport())
+@pytest.mark.parametrize("explicit_exit_code", [False, True])
+def test_sync_run_command_streaming_happy_path_updates_execution(explicit_exit_code: bool) -> None:
+    cfg = ConnectionConfigSync(protocol="http", transport=_SseTransport(explicit_exit_code))
     endpoint = SandboxEndpoint(endpoint="localhost:44772", port=44772)
     adapter = CommandsAdapterSync(cfg, endpoint)
 
