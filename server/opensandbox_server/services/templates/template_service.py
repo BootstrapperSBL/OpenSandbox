@@ -301,7 +301,7 @@ class FastSandboxTemplateService:
         record = self._repo().get(template_id, namespace)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
-        return self._sync_status(record)
+        return record
 
     def list_templates(
         self,
@@ -319,7 +319,6 @@ class FastSandboxTemplateService:
                 page_size=page_size,
             )
         )
-        self._sync_status_bulk(namespace, result.items)
         return result.items, result.total_items
 
     def delete_template(self, template_id: str) -> None:
@@ -354,12 +353,22 @@ class FastSandboxTemplateService:
         warmImages and older clients. Template-mode Create uses this:
         unknown or non-Succeeded templates both yield 404, so no existence
         information leaks.
+
+        The DB row is the read authority: the watch reactor is the only
+        writer of build-phase transitions (CR status -> watch event -> row),
+        so this gate is a pure DB read on the sandbox-create hot path.
         """
         namespace = self._resolve_namespace()
         record = self._repo().get(template_id, namespace)
         if record is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
-        record = self._sync_status(record)
+        if record.phase in (FastSandboxTemplatePhase.PENDING, FastSandboxTemplatePhase.BUILDING):
+            # Non-terminal row on the create gate: make sure the namespace
+            # watch is alive so the row still converges (e.g. the watch
+            # failed to start when the template was created). Healthy
+            # deployments pay a set-membership check; start() is
+            # non-blocking either way.
+            self._ensure_namespace_watch(namespace)
         if record.phase is not FastSandboxTemplatePhase.SUCCEEDED:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_TEMPLATE_NOT_FOUND)
         entrypoint = list(record.spec.get("entrypoint") or DEFAULT_ENTRYPOINT)
@@ -432,62 +441,12 @@ class FastSandboxTemplateService:
         }
 
     # -- status sync -------------------------------------------------------------
-
-    def _sync_status(self, record: FastSandboxTemplateRecord) -> FastSandboxTemplateRecord:
-        crd = self._read_crd(record.namespace, record.crd_name)
-        if crd is None:
-            # A build that never finished cannot finish once the CRD is gone;
-            # a Succeeded row keeps its artifact reference.
-            if record.phase in (FastSandboxTemplatePhase.PENDING, FastSandboxTemplatePhase.BUILDING):
-                self._update_phase(
-                    record, FastSandboxTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
-                )
-            return record
-        crd_status = crd.get("status") or {}
-        phase = _map_phase(crd_status.get("phase"))
-        if phase is None:
-            return record
-        manifest_ref = crd_status.get("manifestRef") or None
-        message = _failure_message(crd_status)
-        if (
-            phase is not record.phase
-            or manifest_ref != record.manifest_ref
-            or (phase is FastSandboxTemplatePhase.FAILED and message != record.message)
-        ):
-            self._update_phase(record, phase, manifest_ref, message)
-        return record
-
-    def _sync_status_bulk(self, namespace: str, records: list[FastSandboxTemplateRecord]) -> None:
-        if not records:
-            return
-        try:
-            crds = self._kubernetes().list_custom_objects(
-                GROUP, VERSION, namespace, PLURAL, ignore_not_found=True
-            ) or []
-        except Exception as exc:  # noqa: BLE001 - reads converge on the next request
-            logger.warning(f"SandboxTemplate CR list failed during sync: {exc}")
-            return
-        by_name = {crd.get("metadata", {}).get("name", ""): crd for crd in crds}
-        for record in records:
-            crd = by_name.get(record.crd_name)
-            if crd is None:
-                if record.phase in (FastSandboxTemplatePhase.PENDING, FastSandboxTemplatePhase.BUILDING):
-                    self._update_phase(
-                        record, FastSandboxTemplatePhase.FAILED, None, "SandboxTemplate CRD is gone."
-                    )
-                continue
-            crd_status = crd.get("status") or {}
-            phase = _map_phase(crd_status.get("phase"))
-            if phase is None:
-                continue
-            manifest_ref = crd_status.get("manifestRef") or None
-            message = _failure_message(crd_status)
-            if (
-                phase is not record.phase
-                or manifest_ref != record.manifest_ref
-                or (phase is FastSandboxTemplatePhase.FAILED and message != record.message)
-            ):
-                self._update_phase(record, phase, manifest_ref, message)
+    #
+    # The watch reactor (start_background_sync / _on_template_event) is the
+    # ONLY path that moves CR build phase into the DB rows; reads (including
+    # the sandbox-create gate) trust the DB projection and never re-read the
+    # CR. "CRD is gone" is likewise event-driven: the DELETED watch event
+    # fails the row (template_service watch handler below).
 
     def _update_phase(
         self,
@@ -510,21 +469,6 @@ class FastSandboxTemplateService:
             )
         except Exception as exc:  # noqa: BLE001 - reads converge on the next request
             logger.warning(f"Template status persist failed: {exc}")
-
-    def _read_crd(self, namespace: str, crd_name: str) -> Optional[dict]:
-        try:
-            return self._kubernetes().get_custom_object(
-                GROUP, VERSION, namespace, PLURAL, crd_name
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"SandboxTemplate CR read failed: {exc}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "code": SandboxErrorCodes.FSB_API_ERROR,
-                    "message": "SandboxTemplate CRDs are unavailable.",
-                },
-            ) from exc
 
 
 def _map_phase(value) -> Optional[FastSandboxTemplatePhase]:

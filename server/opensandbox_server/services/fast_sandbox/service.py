@@ -268,7 +268,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         if self._template_service is None:
             self._template_service = FastSandboxTemplateService(self._app_config)
             # Keep template rows converged even without /templates traffic
-            # (template-mode create resolves against the synced row).
+            # (template-mode create resolves against the watch-converged row).
             self._template_service.start_background_sync()
         return self._template_service
 

@@ -68,8 +68,9 @@ def _get_template_service() -> FastSandboxTemplateService:
             detail=_TEMPLATE_NOT_K8S_DETAIL,
         )
     _service = FastSandboxTemplateService(config)
-    # Watch-driven convergence: DB rows track the CRD build phase even when
-    # nobody polls the read API.
+    # Watch-driven convergence: the watch reactor is the only path that moves
+    # CR build phase into the DB rows; reads (including the create gate) trust
+    # the DB and never re-read the CR.
     _service.start_background_sync()
     return _service
 

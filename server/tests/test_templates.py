@@ -122,6 +122,17 @@ class _FakeTemplateCRs:
         self.crs[(namespace, name)]["status"] = deepcopy(status)
 
 
+def _converge(service, crs, namespace: str, name: str, event: str = "MODIFIED") -> None:
+    """Deliver the CR store's current state through the watch reactor — the
+    only path that moves build phase into DB rows (reads never re-read the
+    CR, so tests must simulate the event to converge a row)."""
+    handler = service._on_template_event(namespace)
+    if event == "DELETED":
+        handler("DELETED", {"metadata": {"name": name}})
+        return
+    handler("MODIFIED", deepcopy(crs.crs[(namespace, name)]))
+
+
 @pytest.fixture
 def repo(tmp_path):
     repository = SQLiteFastSandboxTemplateRepository(tmp_path / "templates.db")
@@ -324,13 +335,14 @@ def test_create_rolls_back_row_on_crd_conflict(service, crs, repo):
     assert excinfo.value.status_code == 409
 
 
-def test_get_syncs_phase_from_crd(service, crs, repo):
+def test_get_reads_watch_converged_row(service, crs, repo):
     record = service.create_template(_create_request())
     crs.set_status(
         "ns-1",
         record.crd_name,
         {"phase": "Succeeded", "manifestRef": "s3://sandbox-images/publish/<build>/manifest.json"},
     )
+    _converge(service, crs, "ns-1", record.crd_name)
     synced = service.get_template(record.template_id)
     assert synced.phase is FastSandboxTemplatePhase.SUCCEEDED
     assert synced.manifest_ref.startswith("s3://")
@@ -340,6 +352,7 @@ def test_get_syncs_phase_from_crd(service, crs, repo):
 def test_get_marks_failed_when_crd_gone(service, crs, repo):
     record = service.create_template(_create_request())
     crs.crs.pop(("ns-1", record.crd_name))
+    _converge(service, crs, "ns-1", record.crd_name, event="DELETED")
     synced = service.get_template(record.template_id)
     assert synced.phase is FastSandboxTemplatePhase.FAILED
     assert synced.manifest_ref is None
@@ -352,15 +365,17 @@ def test_failed_phase_carries_message(service, crs):
         record.crd_name,
         {"phase": "Failed", "conditions": [{"type": "Failed", "message": "kernel panic"}]},
     )
+    _converge(service, crs, "ns-1", record.crd_name)
     synced = service.get_template(record.template_id)
     assert synced.phase is FastSandboxTemplatePhase.FAILED
     assert synced.message == "kernel panic"
 
 
-def test_list_bulk_syncs_and_filters(service, crs):
+def test_list_shows_watch_converged_phases(service, crs):
     first = service.create_template(_create_request(metadata={"env": "prod"}))
     second = service.create_template(_create_request(metadata={"env": "dev"}))
     crs.set_status("ns-1", first.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", first.crd_name)
     items, total = service.list_templates(metadata={"env": "prod"})
     assert total == 1
     assert items[0].template_id == first.template_id
@@ -425,9 +440,44 @@ def test_resolve_artifact_requires_succeeded(service, crs):
     assert excinfo.value.status_code == 404
 
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
     artifact_ref, entrypoint = service.resolve_template_artifact(record.template_id)
     assert artifact_ref == record.template_id
     assert entrypoint == ["sleep", "1"]
+
+
+def test_resolve_gate_trusts_db_row_not_crd(service, crs):
+    """The create gate reads the DB projection only; CR state reaches it
+    exclusively through the watch reactor."""
+    record = service.create_template(_create_request(entrypoint=["sleep", "1"]))
+
+    # CR already says Succeeded but the event has not been delivered: 404.
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    with pytest.raises(Exception) as excinfo:
+        service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+
+    # Event lands -> row converges -> gate passes, and it keeps passing even
+    # if the CR store regresses afterwards (the gate never re-reads the CR).
+    _converge(service, crs, "ns-1", record.crd_name)
+    crs.set_status("ns-1", record.crd_name, {"phase": "Failed"})
+    artifact_ref, entrypoint = service.resolve_template_artifact(record.template_id)
+    assert artifact_ref == record.template_id
+    assert entrypoint == ["sleep", "1"]
+
+
+def test_resolve_restarts_watch_for_non_terminal_rows(service, crs, repo):
+    """A row that never converged (its namespace watch failed to start when
+    the template was created) still gets a watch retry on the create gate,
+    so PENDING rows cannot get stuck permanently."""
+    record = service_record("tpl-stuck", "ns-1")
+    repo.create(record)
+    assert "ns-1" not in service._watched_namespaces
+
+    with pytest.raises(Exception) as excinfo:
+        service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+    assert "ns-1" in service._watched_namespaces
 
 
 @pytest.fixture
@@ -439,7 +489,7 @@ def client(service, monkeypatch):
         yield test_client
 
 
-def test_routes_template_lifecycle(client, crs):
+def test_routes_template_lifecycle(client, crs, service):
     response = client.post(
         "/v1/templates",
         json={
@@ -457,6 +507,7 @@ def test_routes_template_lifecycle(client, crs):
     template_id = body["templateId"]
 
     crs.set_status("ns-1", template_id, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", template_id)
 
     detail = client.get(f"/v1/templates/{template_id}")
     assert detail.status_code == 200
@@ -553,6 +604,7 @@ def test_template_mode_create_maps_artifact_and_entrypoint(service, crs):
 
     record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
@@ -607,6 +659,7 @@ def test_composite_routes_template_id_create_to_fsb(service, crs):
 
     record = service.create_template(_create_request(entrypoint=["python", "app.py"]))
     crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/m"})
+    _converge(service, crs, "ns-1", record.crd_name)
 
     with patch.object(K8sClient, "_load_config"):
         k8s = K8sClient(KubernetesRuntimeConfig())
