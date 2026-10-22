@@ -122,6 +122,13 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 	// The body has been consumed; a late response must not try to read it.
 	r.Body.Close()
 
+	if s.subjectRebindingNow(subj) {
+		http.Error(w, "subject rebind in progress", http.StatusServiceUnavailable)
+		return
+	}
+	// Capture the request identity before either serialization lock. A queued
+	// headerless write must not adopt a successor published while it waits.
+	fence, registered := s.reg.Fence(subj)
 	// Capture a response while committing; no network output holds s.mu.
 	respond := func() func() {
 		if s.subjectRebinding(subj) {
@@ -135,8 +142,7 @@ func (s *fastSandboxPolicyServer) handleVaultRelayWrite(w http.ResponseWriter, r
 		if s.subjectRebindingLocked(subj) {
 			return func() { http.Error(w, "subject rebind in progress", http.StatusServiceUnavailable) }
 		}
-		fence, ok := s.reg.Fence(subj)
-		if !ok {
+		if !registered || !s.fenceMatchesLocked(subj, fence) {
 			return func() { http.Error(w, "unknown subject", http.StatusNotFound) }
 		}
 		if inc := strings.TrimSpace(r.Header.Get(constants.EgressVaultIncarnationHeader)); inc != "" && inc != fence.RuntimeInstanceID {
@@ -268,13 +274,16 @@ func writeVaultRelayWriteResponse(w http.ResponseWriter, r *http.Request, state 
 // readRelayVault captures an independent inline result under the subject lock;
 // sending it afterwards cannot delay lifecycle state changes.
 func (s *fastSandboxPolicyServer) readRelayVault(r *http.Request, subj subject.Subject) (credentialvault.FullRevision, int, string, error) {
+	if s.subjectRebindingNow(subj) {
+		return credentialvault.FullRevision{}, http.StatusServiceUnavailable, "subject rebind in progress", nil
+	}
+	fence, registered := s.reg.Fence(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.subjectRebindingLocked(subj) {
 		return credentialvault.FullRevision{}, http.StatusServiceUnavailable, "subject rebind in progress", nil
 	}
-	fence, ok := s.reg.Fence(subj)
-	if !ok {
+	if !registered || !s.fenceMatchesLocked(subj, fence) {
 		return credentialvault.FullRevision{}, http.StatusNotFound, "unknown subject", nil
 	}
 	if inc := strings.TrimSpace(r.Header.Get(constants.EgressVaultIncarnationHeader)); inc != "" && inc != fence.RuntimeInstanceID {

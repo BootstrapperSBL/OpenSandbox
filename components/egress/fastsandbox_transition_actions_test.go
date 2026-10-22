@@ -92,20 +92,13 @@ func TestTransitionTakeoverRelayLockChain(t *testing.T) {
 	takeover := transitionRequest(srv, context.Background(), http.MethodPost, constants.ActionsDispatchPath, bindBody(t, "successor", testIP, "new-r", "new-a", 1, vaultAllowPolicy()))
 	<-entered // callback owns registry write lock, with kernel removal paused
 	relay := transitionRequest(srv, context.Background(), http.MethodGet, constants.VaultRelayPathPrefix+testUID, "")
-	// The callback cannot yet own s.mu. Once TryLock fails, the real relay has
-	// acquired it and is waiting for registry.Fence: the reverse lock edge.
-	deadline := time.Now().Add(time.Second)
-	for {
-		if !srv.mu.TryLock() {
-			break
-		}
+	// A relay waiting behind kernel I/O must not pin the shared state lock.
+	transitionWaitForMutex(t, "readRelayVault")
+	unlocked := srv.mu.TryLock()
+	if unlocked {
 		srv.mu.Unlock()
-		if time.Now().After(deadline) {
-			close(release)
-			t.Fatal("relay did not reach registry read while holding s.mu")
-		}
-		time.Sleep(time.Millisecond)
 	}
+	assert.True(t, unlocked, "registry wait must not hold s.mu")
 	close(release)
 	require.Equal(t, http.StatusNotFound, transitionResult(t, relay).Code)
 	require.Equal(t, http.StatusOK, transitionResult(t, takeover).Code)

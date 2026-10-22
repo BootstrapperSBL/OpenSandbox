@@ -109,3 +109,13 @@ func (s *fastSandboxPolicyServer) subjectRebinding(subj subject.Subject) bool {
 	defer s.mu.Unlock()
 	return s.subjectRebindingLocked(subj)
 }
+
+// subjectRebindingNow is only an early rejection hint. It never queues before
+// the request's registry pre-read; the authoritative guard is repeated under mu.
+func (s *fastSandboxPolicyServer) subjectRebindingNow(subj subject.Subject) bool {
+	if !s.mu.TryLock() {
+		return false
+	}
+	defer s.mu.Unlock()
+	return s.subjectRebindingLocked(subj)
+}

@@ -62,6 +62,9 @@ type fastSandboxPolicyServer struct {
 	// for a mutex holder. Vault transactions use mu, never this gate.
 	actionGate chan struct{}
 
+	// Never acquire mu while holding a registry lock (including callbacks).
+	// Registry lookups also stay outside mu so kernel I/O cannot pin mu.
+	// Pre-read identities are validated against subjFence under mu.
 	mu      sync.Mutex
 	rebinds map[subject.Subject]*subjectRebind
 	// pendingPolicies holds the SET_BINDING input of a still-denying subject
@@ -74,7 +77,8 @@ type fastSandboxPolicyServer struct {
 	// failed enforcement, for same-fence comparison and old-IP cleanup.
 	subjAtt map[subject.Subject]actionhandler.NetworkAttachment
 	// subjFence mirrors the registered fence per subject: the relay paths
-	// pre-read the registry before s.mu (lock order: registry → s.mu), and
+	// finish registry pre-reads before taking s.mu; no registry lock spans mu.
+	// The mirror is published after successful registration, and
 	// this in-lock comparison rejects requests whose pre-read went stale
 	// across a rebind.
 	subjFence map[subject.Subject]subject.Fencing
@@ -368,11 +372,12 @@ func (s *fastSandboxPolicyServer) handleCredentialVaultActive(w http.ResponseWri
 		http.Error(w, fmt.Sprintf("invalid clientIp %q", raw), http.StatusBadRequest)
 		return
 	}
+	subj, resolved := s.reg.Resolve(subject.SubjectKey{SourceIP: ip})
+	fence, registered := s.reg.Fence(subj)
 	respond := func() func(http.ResponseWriter) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		subj, ok := s.reg.Resolve(subject.SubjectKey{SourceIP: ip})
-		if !ok {
+		if !resolved {
 			return func(w http.ResponseWriter) { http.Error(w, "no subject for clientIp", http.StatusNotFound) }
 		}
 		if s.subjectRebindingLocked(subj) {
@@ -380,7 +385,9 @@ func (s *fastSandboxPolicyServer) handleCredentialVaultActive(w http.ResponseWri
 				http.Error(w, "subject rebind in progress", http.StatusServiceUnavailable)
 			}
 		}
-		fence, _ := s.reg.Fence(subj)
+		if !registered || !s.fenceMatchesLocked(subj, fence) || s.subjAtt[subj].IP != ip {
+			return func(w http.ResponseWriter) { http.Error(w, "no subject for clientIp", http.StatusNotFound) }
+		}
 		return captureActiveVaultSnapshot(r, s.vaultForLocked(subj, fence))
 	}()
 	respond(w)
@@ -435,14 +442,17 @@ type vaultEntry struct {
 // (same-UID rebind without REMOVE_BINDING, or a TOCTOU store materialized
 // against an unregistered subject) is dropped, never inherited — a reset
 // never carries old credentials into a new sandbox (OSEP-0022). The fence is
-// read under s.mu, serialized with the rebind purge in applySetBinding.
+// pre-read outside s.mu and checked against the published mirror under s.mu.
 func (s *fastSandboxPolicyServer) vaultFor(subj subject.Subject) *credentialvault.Store {
+	fence, registered := s.reg.Fence(subj)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.subjectRebindingLocked(subj) {
 		return nil
 	}
-	fence, _ := s.reg.Fence(subj)
+	if !registered || !s.fenceMatchesLocked(subj, fence) {
+		return nil
+	}
 	return s.vaultForLocked(subj, fence)
 }
 
@@ -549,7 +559,7 @@ func (s *fastSandboxPolicyServer) OnUnloaded(subj subject.Subject, _ actionhandl
 
 // unloadEnforcement tears down kernel/redirect state only. It must never
 // acquire s.mu or read the registry: takeover calls it under the registry
-// write lock, while vault transactions acquire s.mu before registry reads.
+// write lock. Registry calls and their callbacks never span s.mu acquisition.
 // nft removal goes first; failure retains the existing cleanup retry boundary.
 func (s *fastSandboxPolicyServer) unloadEnforcement(subj subject.Subject) error {
 	nftCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)

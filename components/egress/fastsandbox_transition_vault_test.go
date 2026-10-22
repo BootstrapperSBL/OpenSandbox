@@ -15,10 +15,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -218,7 +221,7 @@ type transitionDeleteProbe struct {
 
 func (f *transitionDeleteProbe) Delete() (policy.FileMutationState, error) { return f.remove() }
 
-func TestTransitionTerminalPurgeRetryStaysAfterUnregisterUnderLock(t *testing.T) {
+func TestTransitionTerminalPurgeIsBestEffortAfterUnregister(t *testing.T) {
 	h := newVaultPersistHarness(t)
 	subj := h.snapshotSubject(t)
 	file := h.fileFor(snapshotTestUID)
@@ -243,7 +246,7 @@ func TestTransitionTerminalPurgeRetryStaysAfterUnregisterUnderLock(t *testing.T)
 	h.vp.files[subj] = probe
 	h.vp.mu.Unlock()
 	require.Equal(t, http.StatusOK, doAction(t, h.srv, removeBody(t, snapshotTestUID, testFenceR, testFenceA)).Code)
-	require.Equal(t, 2, calls, "terminal cleanup is a bounded retry, not a loop")
+	require.Equal(t, 1, calls, "terminal cleanup makes one best-effort attempt")
 	require.True(t, file.exists)
 	require.Empty(t, h.srv.vaults)
 	vf, _, err := credentialvault.DecodeVaultFile(file.data)
@@ -253,4 +256,87 @@ func TestTransitionTerminalPurgeRetryStaysAfterUnregisterUnderLock(t *testing.T)
 	fail = false
 	require.Equal(t, http.StatusOK, doAction(t, h.srv, removeBody(t, snapshotTestUID, testFenceR, testFenceA)).Code)
 	require.False(t, file.exists)
+}
+
+// Wait for the actual HTTP handler to queue on a held mutex, not an arbitrary
+// sleep. The enclosing test controls publication while that request is parked.
+func transitionWaitForMutex(t *testing.T, handler string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		for _, stack := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(stack, handler) && (strings.Contains(stack, "sync.Mutex.Lock") || strings.Contains(stack, "sync.RWMutex.RLock")) {
+				return
+			}
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("handler did not queue on the controlled mutex")
+}
+
+func TestTransitionHeaderlessRelayCannotAdoptSuccessor(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			h := newVaultPersistHarness(t)
+			subj := h.snapshotSubject(t)
+			before := append([]byte(nil), h.fileFor(snapshotTestUID).data...)
+			body := ""
+			if method == http.MethodPost {
+				body = vaultCredential()
+			}
+			if method == http.MethodPut {
+				body = vaultPut("1")
+			}
+			if method == http.MethodGet {
+				h.srv.mu.Lock()
+			} else {
+				h.srv.policyCommitMu.Lock()
+			}
+			unlock := func() {
+				if method == http.MethodGet {
+					h.srv.mu.Unlock()
+				} else {
+					h.srv.policyCommitMu.Unlock()
+				}
+			}
+			locked := true
+			defer func() {
+				if locked {
+					unlock()
+				}
+			}()
+			result := transitionRequest(h.srv, context.Background(), method, constants.VaultRelayPathPrefix+snapshotTestUID, body)
+			handler := "readRelayVault"
+			if method != http.MethodGet {
+				handler = "handleVaultRelayWrite.func1"
+			}
+			transitionWaitForMutex(t, handler)
+			// Model the completed publication while the request is queued: registry,
+			// mirror and vault all belong to the successor, and no rebind token remains.
+			// Registry changes here have no callbacks; this is a controlled test fixture.
+			next := subject.Fencing{RuntimeInstanceID: "successor", AttachmentID: "successor-att"}
+			h.reg.Unregister(subj)
+			h.reg.Register(subj, subject.SubjectKey{SourceIP: netip.MustParseAddr(testIP)}, next)
+			if method != http.MethodGet {
+				h.srv.mu.Lock()
+			}
+			h.srv.subjFence[subj] = next
+			entry := h.srv.vaults[subj]
+			entry.fence = next
+			h.srv.vaults[subj] = entry
+			delete(h.srv.rebinds, subj)
+			if method != http.MethodGet {
+				h.srv.mu.Unlock()
+			}
+			unlock()
+			locked = false
+			rec := transitionResult(t, result)
+			require.Equal(t, http.StatusNotFound, rec.Code)
+			require.NotContains(t, rec.Body.String(), "credentials")
+			require.Equal(t, before, h.fileFor(snapshotTestUID).data)
+			require.True(t, h.fileFor(snapshotTestUID).exists)
+		})
+	}
 }

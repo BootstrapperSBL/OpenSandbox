@@ -92,8 +92,8 @@ func (s *fastSandboxPolicyServer) handlePolicyRelay(w http.ResponseWriter, r *ht
 // and the recorded policy. Held across the whole read so the policy body
 // and its revision come from the same commit (the server's GET→merge→PUT
 // PATCH uses the revision as its precondition). Lock order:
-// policyCommitMu → registry → s.mu (see fastsandbox_server.go's takeover
-// path; the reverse order deadlocks the DNS hot path).
+// policyCommitMu spans the transaction; registry reads finish before s.mu.
+// Registry callbacks never acquire s.mu, and no registry call runs under it.
 func (s *fastSandboxPolicyServer) selectRelayPolicy(r *http.Request, subj subject.Subject) (*policyRelayDocument, int, string) {
 	if s.subjectRebinding(subj) {
 		return nil, http.StatusServiceUnavailable, "subject rebind in progress"

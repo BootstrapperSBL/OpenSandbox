@@ -212,13 +212,14 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	// Serialize registration and rebind cleanup with policy and vault commits.
 	s.policyCommitMu.Lock()
 	defer s.policyCommitMu.Unlock()
+	old, registered := s.reg.Fence(subj)
+	oldState, _ := s.reg.Get(subj)
 	s.mu.Lock()
 	// Waiting for an in-progress Vault commit may outlive the request too.
 	if err := s.actionCanceled(ctx); err != nil {
 		s.mu.Unlock()
 		return http.StatusServiceUnavailable, fmt.Errorf("action canceled: %w", err)
 	}
-	old, registered := s.reg.Fence(subj)
 	oldAtt, knownNetwork := s.subjAtt[subj]
 	knownNetwork = knownNetwork && oldAtt.IP.IsValid()
 	token := s.rebinds[subj]
@@ -228,7 +229,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		oldAtt, knownNetwork = token.oldNetwork, true
 	}
 	if token == nil && registered && old.Matches(fence) && !knownNetwork {
-		if state, _ := s.reg.Get(subj); state == subject.StateActive {
+		if oldState == subject.StateActive {
 			// Successful registration always records an attempt before becoming
 			// active. Missing metadata here is an internal inconsistency, not a
 			// reason to mutate a live subject or acknowledge an uninstalled update.
@@ -480,13 +481,11 @@ func (s *fastSandboxPolicyServer) applyRemoveBinding(env *actionhandler.Envelope
 		return http.StatusInternalServerError, fmt.Errorf("enforcement removal: %w", err)
 	}
 	prev := s.reg.Unregister(subj)
-	// Preserve the existing retry opportunity for a transient file-delete
-	// failure. Both attempts follow Unregister in one Vault transaction, so a
-	// valid pre-SET import cannot land between cleanup and its retry.
+	// Terminal file cleanup remains best-effort after Unregister. A failed
+	// delete leaves the file fenced to the old identity; this acknowledgement
+	// does not promise automatic cleanup retry.
 	s.mu.Lock()
-	if err := s.dropSubjectStateLocked(subj); err != nil {
-		s.purgeVaultFile(subj)
-	}
+	s.dropSubjectStateLocked(subj)
 	cleared := token != nil && s.rebinds[subj] == token
 	if cleared {
 		delete(s.rebinds, subj)
