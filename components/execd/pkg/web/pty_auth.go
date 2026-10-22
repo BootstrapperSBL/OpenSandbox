@@ -19,33 +19,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
-
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
-// requestAccessToken accepts the browser credential only on an actual PTY
-// WebSocket upgrade. It strips credential entries before downstream handshake
-// negotiation, including when an explicit API-token header takes precedence.
-func requestAccessToken(ctx *gin.Context) (string, bool) {
-	r := ctx.Request
-	token := ""
-	if r.Method == http.MethodGet && ctx.FullPath() == "/pty/:sessionId/ws" && websocket.IsWebSocketUpgrade(r) {
-		var valid bool
-		token, valid = ptyWebSocketAccessToken(r)
-		if !valid {
-			return "", false
-		}
-	}
-	// Presence, not a non-empty value, determines precedence. A bad explicit
-	// header must not be rescued by a valid subprotocol credential.
-	if _, present := r.Header[http.CanonicalHeaderKey(model.ApiAccessTokenHeader)]; present {
-		return r.Header.Get(model.ApiAccessTokenHeader), true
-	}
-	return token, true
-}
-
+// ptyWebSocketAccessToken extracts and strips the credential subprotocol before
+// the PTY handler negotiates the application subprotocol.
 func ptyWebSocketAccessToken(r *http.Request) (string, bool) {
 	const header = "Sec-WebSocket-Protocol"
 	var protocols []string
