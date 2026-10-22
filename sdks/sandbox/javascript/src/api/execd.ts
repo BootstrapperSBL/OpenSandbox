@@ -1,11 +1,11 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -1647,7 +1647,7 @@ export interface components {
              */
             message: string;
         };
-        /** @description Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are present `workspace` is prepended to `overlays`. */
+        /** @description Creates an isolated session with one or more overlay mounts. The legacy `workspace` field is kept as sugar for a single-element `overlays` list: at least one of `workspace` or `overlays` must be provided, and when both are present `workspace` is prepended to `overlays`. The session files API serves exactly the overlay and bind mounts: paths under each mount resolve as the namespace sees them, and absolute paths outside every overlay or bind are rejected instead of resolving against the workspace (unlike binds, extra_writable paths are not served by the files API unless an overlay covers them). */
         CreateIsolatedSessionRequest: {
             /** @enum {string} */
             profile?: "strict" | "balanced";
@@ -1675,7 +1675,7 @@ export interface components {
             /** @enum {string} */
             mode?: "rw" | "overlay" | "ro";
         };
-        /** @description One overlay mount inside the isolated namespace. `mode=overlay` mounts a copy-on-write view: with `persist=true` (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the session ends. `rw` and `ro` bind the host path directly; `persist` applies to overlay mode only and must be omitted for them (execd rejects the request otherwise). */
+        /** @description One overlay mount inside the isolated namespace. `mode=overlay` mounts a copy-on-write view: with `persist=true` (default) writes land in a host upper directory tracked and usage-accounted by execd (the substrate for the diff/commit endpoints); with `persist=false` the upper is an ephemeral tmpfs whose writes are discarded when the session ends. `rw` and `ro` bind the host path directly; `persist` applies to overlay mode only and must be omitted for them (execd rejects the request otherwise). Overlay mode is one-directional for the session files API: while the session runs, files-API writes land in the host upper directory and are not visible to runs inside the namespace (the kernel caches overlayfs directory entries at mount time), while the run-to-files direction works; use `rw` or `binds` for bidirectional file exchange. */
         IsolatedOverlaySpec: {
             /**
              * @description Mount destination inside the namespace (absolute).
