@@ -23,7 +23,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 @Serializable
-data class EventNode(
+data class EventNode @JvmOverloads constructor(
     val type: String,
     val timestamp: Long,
     val text: String? = null,
@@ -51,7 +51,7 @@ value class ResultData(val raw: JsonObject) {
 }
 
 @Serializable
-data class ErrorData(
+data class ErrorData @JvmOverloads constructor(
     @SerialName("ename")
     val name: String? = null,
     @SerialName("evalue")
