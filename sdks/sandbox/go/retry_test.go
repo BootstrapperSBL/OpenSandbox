@@ -291,10 +291,11 @@ func TestRetry_StreamingConnectionNotRetried(t *testing.T) {
 	defer srv.Close()
 
 	client := NewExecdClient(srv.URL, "tok", WithRetry(RetryConfig{
-		MaxRetries:     2,
-		InitialBackoff: 10 * time.Millisecond,
-		MaxBackoff:     100 * time.Millisecond,
-		Multiplier:     2.0,
+		MaxRetries:                        2,
+		InitialBackoff:                    10 * time.Millisecond,
+		MaxBackoff:                        100 * time.Millisecond,
+		Multiplier:                        2.0,
+		RetryableStatusCodesNonIdempotent: []int{http.StatusServiceUnavailable},
 	}))
 
 	var events []StreamEvent
@@ -636,6 +637,27 @@ func TestIsTransientError(t *testing.T) {
 			&net.OpError{Op: "read", Net: "tcp", Err: fmt.Errorf("connection reset")},
 			nil,
 			false,
+		},
+		{
+			"redirect dial after send POST",
+			http.MethodPost,
+			&requestSentError{err: &net.OpError{Op: "dial", Net: "tcp", Err: fmt.Errorf("connection refused")}},
+			nil,
+			false,
+		},
+		{
+			"TLS handshake POST",
+			http.MethodPost,
+			&preSendError{err: fmt.Errorf("tls handshake failed")},
+			nil,
+			true,
+		},
+		{
+			"proxy connect POST",
+			http.MethodPost,
+			&net.OpError{Op: "proxyconnect", Net: "tcp", Err: fmt.Errorf("connection refused")},
+			nil,
+			true,
 		},
 		{
 			"read failure GET",

@@ -119,6 +119,57 @@ func TestRetry_NonIdempotentTransportFailures(t *testing.T) {
 	}
 }
 
+func TestRetry_NonIdempotentRedirectDialNotRetried(t *testing.T) {
+	targetListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	target := "http://" + targetListener.Addr().String() + "/next"
+	require.NoError(t, targetListener.Close())
+
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+
+	client := NewExecdClient(srv.URL, "token", WithRetry(RetryConfig{
+		MaxRetries:     1,
+		InitialBackoff: time.Millisecond,
+	}))
+
+	_, err = client.CreateSession(context.Background())
+	require.Error(t, err)
+	require.Equal(t, int32(1), attempts.Load(), "a redirected POST must not replay its first hop")
+}
+
+func TestRetry_NonIdempotentTLSHandshakeFailureRetried(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	var accepts atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			_ = conn.Close()
+		}
+	}()
+
+	client := NewClient("https://"+ln.Addr().String(), "token", "OPEN-SANDBOX-API-KEY",
+		WithHTTPClient(&http.Client{Transport: &http.Transport{TLSHandshakeTimeout: time.Second}}),
+		WithRetry(RetryConfig{MaxRetries: 1, InitialBackoff: time.Millisecond}),
+	)
+	err = client.doRequest(context.Background(), http.MethodPost, "/", map[string]string{"a": "b"}, nil)
+	require.Error(t, err)
+	require.Equal(t, int32(2), accepts.Load(), "a failed TLS handshake is a pre-send failure")
+}
+
 type retryRoundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f retryRoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
