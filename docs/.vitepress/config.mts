@@ -413,8 +413,9 @@ export default defineConfig({
     ],
 
     footer: {
-      message: "Released under the Apache 2.0 License.",
-      copyright: "Copyright © 2024-present OpenSandbox Contributors",
+      message: "Copyright © OpenSandbox a Series of LF Projects, LLC",
+      copyright:
+        'For web site terms of use, trademark policy and other project policies please see <a href="https://lfprojects.org/">https://lfprojects.org/</a>.',
     },
 
     search: {
