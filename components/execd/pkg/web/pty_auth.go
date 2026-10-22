@@ -32,40 +32,10 @@ func requestAccessToken(ctx *gin.Context) (string, bool) {
 	r := ctx.Request
 	token := ""
 	if r.Method == http.MethodGet && ctx.FullPath() == "/pty/:sessionId/ws" && websocket.IsWebSocketUpgrade(r) {
-		const header = "Sec-WebSocket-Protocol"
-		var protocols []string
-		var encoded string
-		credentialCount := 0
-		hasPTYProtocol := false
-		for _, value := range r.Header.Values(header) {
-			for _, part := range strings.Split(value, ",") {
-				protocol := strings.TrimSpace(part)
-				if strings.HasPrefix(protocol, model.PTYWebSocketTokenPrefix) {
-					credentialCount++
-					encoded = strings.TrimPrefix(protocol, model.PTYWebSocketTokenPrefix)
-					continue
-				}
-				if protocol == model.PTYWebSocketProtocol {
-					hasPTYProtocol = true
-				}
-				if protocol != "" {
-					protocols = append(protocols, protocol)
-				}
-			}
-		}
-		r.Header.Del(header)
-		if len(protocols) > 0 {
-			r.Header.Set(header, strings.Join(protocols, ", "))
-		}
-		if credentialCount > 0 {
-			if credentialCount != 1 || !hasPTYProtocol {
-				return "", false
-			}
-			decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
-			if err != nil || len(decoded) == 0 || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
-				return "", false
-			}
-			token = string(decoded)
+		var valid bool
+		token, valid = ptyWebSocketAccessToken(r)
+		if !valid {
+			return "", false
 		}
 	}
 	// Presence, not a non-empty value, determines precedence. A bad explicit
@@ -74,4 +44,43 @@ func requestAccessToken(ctx *gin.Context) (string, bool) {
 		return r.Header.Get(model.ApiAccessTokenHeader), true
 	}
 	return token, true
+}
+
+func ptyWebSocketAccessToken(r *http.Request) (string, bool) {
+	const header = "Sec-WebSocket-Protocol"
+	var protocols []string
+	var encoded string
+	credentialCount := 0
+	hasPTYProtocol := false
+	for _, value := range r.Header.Values(header) {
+		for _, part := range strings.Split(value, ",") {
+			protocol := strings.TrimSpace(part)
+			if strings.HasPrefix(protocol, model.PTYWebSocketTokenPrefix) {
+				credentialCount++
+				encoded = strings.TrimPrefix(protocol, model.PTYWebSocketTokenPrefix)
+				continue
+			}
+			if protocol == model.PTYWebSocketProtocol {
+				hasPTYProtocol = true
+			}
+			if protocol != "" {
+				protocols = append(protocols, protocol)
+			}
+		}
+	}
+	r.Header.Del(header)
+	if len(protocols) > 0 {
+		r.Header.Set(header, strings.Join(protocols, ", "))
+	}
+	if credentialCount == 0 {
+		return "", true
+	}
+	if credentialCount != 1 || !hasPTYProtocol {
+		return "", false
+	}
+	decoded, err := base64.RawURLEncoding.Strict().DecodeString(encoded)
+	if err != nil || len(decoded) == 0 || base64.RawURLEncoding.EncodeToString(decoded) != encoded {
+		return "", false
+	}
+	return string(decoded), true
 }
