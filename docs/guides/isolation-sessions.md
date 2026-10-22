@@ -252,6 +252,10 @@ Background run semantics:
 
 Overlay upper dirs live under `upper_root` (default `/var/lib/execd/isolation`).
 
+::: warning Overlay mode is one-directional for the files API
+While a session is running, files-API writes on an `overlay` workspace land in the host upper directory and are **not visible to `session.run`**: the kernel caches the overlayfs directory entries at mount time, so host-side writes bypass the overlay the namespace already holds. The `session.run` → `session.files` direction always works. For bidirectional file exchange between the two views, use workspace `mode: "rw"` or a bind mount instead of `overlay`.
+:::
+
 Because isolated-session state lives only in execd's memory, every session left under `upper_root` when execd exits is stale. Before publishing a new session, execd creates a durable cleanup record at `<upper_root>/.execd-cleanup/<session-id>`; on startup it recovers those records and removes the exact matching session directories. A record is retired only after the entire session subtree has been deleted, so partial deletion and transient filesystem failure retain a retryable identity across restarts. Residue that cannot be removed yet — e.g. an upper still referenced by a mount from the previous lifetime — stays counted toward `upper_max_bytes` and is retried by the idle collector.
 
 Only recorded session directories are removed. Unrecorded children under `upper_root`, including allocator-shaped directory trees, are treated as operator data and are never reclaimed automatically. Directories left by execd versions that predate the cleanup registry therefore require explicit migration or manual cleanup; keep `upper_root` dedicated to execd and do not modify the reserved `.execd-cleanup` registry. In pooled / pre-provisioned sandboxes this prevents one occupant's session data from leaking to the next.
@@ -279,7 +283,7 @@ A session can carry **several independent overlay mounts** via the `overlays` re
 - Each entry has its own mount semantics, so workspace files, system-level changes (`apt install` → `/usr`, config → `/etc`), and additional project directories get **independent copy-on-write uppers**.
 - Mounts are applied shallow-first; a nested overlay (e.g. `/workspace` on top of a `/` root overlay) shadows its ancestors within its own subtree. Paths must be absolute and unique.
 - `persist` (overlay mode only, default `true`): `true` allocates a host upper directory under `upper_root`; `false` uses an ephemeral tmpfs upper whose writes are discarded when the session ends. `rw`/`ro` entries must not set `persist`. An ephemeral upper lives inside the namespace only, so the files API serves `persist=false` overlays from their host-side content: in-session writes under such an overlay are not observable through the files API and files-API writes into it are rejected.
-- The files API routes each request to the session mount (overlay or bind) whose mount path is the longest prefix of the requested path; relative paths resolve against the first overlay.
+- The files API routes each request to the session mount (overlay or bind) whose mount path is the longest prefix of the requested path; relative paths resolve against the first overlay. Paths outside every session mount — a `binds` destination that was not configured, a strict profile's private `/tmp`, `/etc`, ... — are rejected with an error instead of being silently resolved against the workspace.
 - Background runs use the **first** overlay for their log location: it must be `rw`, or `overlay` with `persist: true`; otherwise background runs are rejected.
 
 ---
@@ -340,7 +344,7 @@ Private Sessions are not recoverable across an execd restart. Deployments that e
 
 ## Filesystem Proxy
 
-Reads and writes the session's **merged** mount view — the workspace overlays plus every `binds` destination — from outside the namespace. This is how SDKs `upload`, `download`, and `list` without spawning a shell, including against bind-mounted persistent data. All paths are per session under `/v1/isolated/session/{id}/`:
+Reads and writes the session's **merged** mount view — the workspace overlays plus every `binds` destination — from outside the namespace. This is how SDKs `upload`, `download`, and `list` without spawning a shell, including against bind-mounted persistent data. The files API serves exactly those session mounts: absolute paths outside every mount (namespace-only locations such as a strict profile's private `/tmp`, or unconfigured `binds` destinations) are rejected with an error rather than resolving to a different file. All paths are per session under `/v1/isolated/session/{id}/`:
 
 | Method | Path |
 |---|---|
@@ -356,7 +360,7 @@ Reads and writes the session's **merged** mount view — the workspace overlays 
 | `POST` | `directories` |
 | `DELETE` | `directories?path=...` |
 
-Writes on a `ro` workspace fail; writes on `overlay` land in the upper dir and vanish on `DELETE`; writes on a `readonly` bind fail.
+Writes on a `ro` workspace fail; writes on `overlay` land in the upper dir and vanish on `DELETE`, and while the session runs they are not visible to `session.run` (see [Workspace Modes](#workspace-modes)); writes on a `readonly` bind fail.
 
 ---
 

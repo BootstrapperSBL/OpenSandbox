@@ -321,6 +321,8 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 		}
 		s.rehydrateVaultReload(subj, fence, seed, policyDegraded)
 	}
+	setBindingStarted := time.Now()
+	installStarted := time.Now()
 	// Record even failed first installs: partial kernel effects otherwise have
 	// no network identity for a later same-fence retry or changed-fence rebind.
 	s.recordBindingState(subj, att)
@@ -342,6 +344,7 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	if err != nil {
 		return http.StatusInternalServerError, fmt.Errorf("deny-first install: %w", err)
 	}
+	denyFirstInstall := time.Since(installStarted)
 	s.recordRegisteredFence(subj, fence)
 	if env.Binding.IsRemoval() {
 		// Binding removed from a still-live sandbox: drop the pending policy
@@ -366,12 +369,15 @@ func (s *fastSandboxPolicyServer) applySetBinding(ctx context.Context, env *acti
 	}
 	// Install the binding policy (or honor the file-backed record that
 	// supersedes it) through the policy commit protocol.
+	policyStarted := time.Now()
 	if err := s.applyBindingPolicyLocked(subj, fence, pol, state == subject.StateActive); err != nil {
 		log.Errorf("subject %s: binding policy commit failed: %v", subj, err)
 		return http.StatusInternalServerError, fmt.Errorf("binding policy commit: %w", err)
 	}
 	s.finishRebind(subj, token)
-	log.Infof("subject %s: SET_BINDING applied (state=%s)", subj, state)
+	policyCommit := time.Since(policyStarted)
+	log.Infof("subject %s: SET_BINDING applied (state=%s) total=%dms denyFirstInstall=%dms policyCommit=%dms",
+		subj, state, time.Since(setBindingStarted).Milliseconds(), denyFirstInstall.Milliseconds(), policyCommit.Milliseconds())
 	return http.StatusOK, nil
 }
 
@@ -432,11 +438,12 @@ func (s *fastSandboxPolicyServer) applyLifecycleHook(env *actionhandler.Envelope
 			// the subject must never activate without its current policy.
 			return http.StatusConflict, fmt.Errorf("data-plane-ready for subject %s with no pending policy", subj)
 		}
+		applyStarted := time.Now()
 		if err := s.applyPolicy(subj, pol); err != nil {
 			return http.StatusInternalServerError, fmt.Errorf("policy apply: %w", err)
 		}
 		s.clearPendingPolicy(subj)
-		log.Infof("subject %s: data-plane-ready, policy active", subj)
+		log.Infof("subject %s: data-plane-ready, policy active applyPolicy=%dms", subj, time.Since(applyStarted).Milliseconds())
 		return http.StatusOK, nil
 	default:
 		// Unreachable: ParseEnvelope validated the Hook name.

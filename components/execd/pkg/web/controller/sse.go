@@ -119,13 +119,7 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 			}
 		},
 		OnExecuteComplete: func(executionTime time.Duration) {
-			event := model.ServerStreamEvent{
-				Type:          model.StreamEventTypeComplete,
-				ExecutionTime: executionTime.Milliseconds(),
-				Timestamp:     time.Now().UnixMilli(),
-			}
-			payload := event.ToJSON()
-			c.writeSingleEvent("OnExecuteComplete", payload, true, event.Summary())
+			c.writeExecutionComplete(executionTime, nil)
 		},
 		OnExecuteError: func(err *execute.ErrorOutput) {
 			if err == nil {
@@ -182,6 +176,16 @@ func (c *CodeInterpretingController) setServerEventsHandler(ctx context.Context)
 	}
 
 	return hooks, stopSSE
+}
+
+func (c *CodeInterpretingController) writeExecutionComplete(executionTime time.Duration, exitCode *int) {
+	event := model.ServerStreamEvent{
+		Type:          model.StreamEventTypeComplete,
+		ExecutionTime: executionTime.Milliseconds(),
+		ExitCode:      exitCode,
+		Timestamp:     time.Now().UnixMilli(),
+	}
+	c.writeSingleEvent("OnExecuteComplete", event.ToJSON(), true, event.Summary())
 }
 
 func (c *basicController) writeSingleEvent(handler string, data []byte, verbose bool, summary string) {
