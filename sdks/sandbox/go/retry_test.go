@@ -274,7 +274,7 @@ func TestRetry_RateLimit429(t *testing.T) {
 	}
 }
 
-func TestRetry_StreamingConnectionNotRetried(t *testing.T) {
+func TestRetry_StreamingWriteStatusOptInNotRetried(t *testing.T) {
 	var attempts atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

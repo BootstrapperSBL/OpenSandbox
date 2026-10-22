@@ -15,12 +15,14 @@
 package opensandbox
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -168,6 +170,35 @@ func TestRetry_NonIdempotentTLSHandshakeFailureRetried(t *testing.T) {
 	err = client.doRequest(context.Background(), http.MethodPost, "/", map[string]string{"a": "b"}, nil)
 	require.Error(t, err)
 	require.Equal(t, int32(2), accepts.Load(), "a failed TLS handshake is a pre-send failure")
+}
+
+func TestRetry_NonIdempotentProxyConnectFailureRetried(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer ln.Close()
+
+	var accepts atomic.Int32
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepts.Add(1)
+			_, _ = http.ReadRequest(bufio.NewReader(conn))
+			_, _ = conn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"))
+			_ = conn.Close()
+		}
+	}()
+
+	proxyURL := &url.URL{Scheme: "http", Host: ln.Addr().String()}
+	client := NewClient("https://sandbox.invalid", "token", "OPEN-SANDBOX-API-KEY",
+		WithHTTPClient(&http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}),
+		WithRetry(RetryConfig{MaxRetries: 1, InitialBackoff: time.Millisecond}),
+	)
+	err = client.doRequest(context.Background(), http.MethodPost, "/", map[string]string{"a": "b"}, nil)
+	require.Error(t, err)
+	require.Equal(t, int32(2), accepts.Load(), "a failed proxy CONNECT is a pre-send failure")
 }
 
 type retryRoundTripFunc func(*http.Request) (*http.Response, error)

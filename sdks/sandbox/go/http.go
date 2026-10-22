@@ -365,8 +365,19 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 	}
 
 	var sent atomic.Bool
+	var traceStarted atomic.Bool
+	var gotConn atomic.Bool
 	var tlsHandshakeFailed atomic.Bool
 	trace := &httptrace.ClientTrace{
+		GetConn: func(string) {
+			traceStarted.Store(true)
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			gotConn.Store(true)
+			if reused != nil {
+				*reused = info.Reused
+			}
+		},
 		WroteHeaders: func() {
 			sent.Store(true)
 		},
@@ -378,11 +389,6 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 				tlsHandshakeFailed.Store(true)
 			}
 		},
-	}
-	if reused != nil {
-		trace.GotConn = func(info httptrace.GotConnInfo) {
-			*reused = info.Reused
-		}
 	}
 	ctx = httptrace.WithClientTrace(ctx, trace)
 
@@ -407,7 +413,7 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 	if err != nil {
 		if sent.Load() {
 			err = &requestSentError{err: err}
-		} else if tlsHandshakeFailed.Load() {
+		} else if (traceStarted.Load() && !gotConn.Load()) || tlsHandshakeFailed.Load() {
 			err = &preSendError{err: err}
 		}
 		return fmt.Errorf("opensandbox: do request: %w", err)
