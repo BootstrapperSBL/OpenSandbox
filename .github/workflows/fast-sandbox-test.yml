@@ -17,10 +17,13 @@ permissions:
   pull-requests: read
   actions: write
 
-# One self-hosted KVM machine serves all runs: queue dispatch-triggered runs
-# instead of canceling them; only PR pushes supersede each other.
+# PR pushes supersede each other. Dispatch-triggered runs get a unique group
+# (github.run_id): GitHub concurrency keeps only one running + one pending run
+# per group and a newer run silently replaces the pending one, which would
+# drop queued fast-sandbox PR tests that all resolve to refs/heads/main. Each
+# dispatch run survives and the single self-hosted KVM runner serializes them.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
