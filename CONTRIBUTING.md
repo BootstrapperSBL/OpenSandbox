@@ -139,7 +139,7 @@ OpenSandbox/
 ├── examples/                 # Example integrations
 ├── docs/                     # Documentation
 ├── tests/                    # Cross-component tests
-│   └── e2e/                  # End-to-end tests
+│   └── python/               # Python end-to-end tests
 └── scripts/                  # Build and utility scripts
 ```
 
@@ -478,12 +478,12 @@ go test -v -cover ./pkg/...
 Integration tests require Docker:
 
 ```bash
-# Server integration tests
+# Server tests (from the repository root)
 cd server
-uv run pytest tests/integration/
+uv run pytest tests/
 
-# E2E tests
-cd tests/e2e/python
+# Python E2E tests
+cd ../tests/python
 uv run pytest
 ```
 
