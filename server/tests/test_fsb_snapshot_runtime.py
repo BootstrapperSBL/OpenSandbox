@@ -110,14 +110,30 @@ class WatchRecordingK8sClient:
         self.watch_calls: list[tuple[str, str, str, str]] = []
         self.watch_handlers: list = []
         self.stopped = 0
+        self.sandbox_crs: dict[tuple[str, str], dict] = {}
+        self.sandbox_cr_error: Exception | None = None
+        self.custom_object_reads: list[tuple[str, str, str, str, str]] = []
 
     def watch_custom_objects(self, group, version, namespace, plural, event_handler):
         self.watch_calls.append((group, version, namespace, plural))
         self.watch_handlers.append(event_handler)
         return object()
 
+    def get_custom_object(self, group, version, namespace, plural, name):
+        self.custom_object_reads.append((group, version, namespace, plural, name))
+        if self.sandbox_cr_error is not None:
+            raise self.sandbox_cr_error
+        cr = self.sandbox_crs.get((namespace, name))
+        if cr is None:
+            raise KeyError((namespace, name))
+        return cr
+
     def stop_informers(self) -> None:
         self.stopped += 1
+
+
+def _sandbox_cr(image: str) -> dict:
+    return {"spec": {"image": image}}
 
 
 def _runtime(
@@ -126,6 +142,10 @@ def _runtime(
 ) -> tuple[FastSandboxSnapshotRuntime, FakeFastPathClient, WatchRecordingK8sClient]:
     fastpath = fastpath or FakeFastPathClient()
     k8s = k8s or WatchRecordingK8sClient()
+    # Default the source sandbox to a native image so the create path keeps
+    # setting template_name; OCI-source tests override the image explicitly.
+    for namespace in ("default", "tenant-a"):
+        k8s.sandbox_crs.setdefault((namespace, SANDBOX_ID), _sandbox_cr("alpine:3.19"))
     runtime = FastSandboxSnapshotRuntime(
         cast(FastPathClient, fastpath),
         cast(object, k8s),
@@ -196,6 +216,48 @@ def test_create_snapshot_maps_failed_precondition_to_conflict() -> None:
     assert "already has snapshot" in (status.message or "")
 
 
+def test_create_snapshot_reads_source_sandbox_cr_for_encoding() -> None:
+    runtime, fastpath, k8s = _runtime()
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, namespace="tenant-a")
+
+    assert status.state == SnapshotState.CREATING
+    assert k8s.custom_object_reads == [
+        ("sandbox.fast.io", "v1alpha2", "tenant-a", "sandboxes", SANDBOX_ID)
+    ]
+    # Native source image: the template-name index key is required.
+    assert fastpath.create_requests[0].template_name == build_public_snapshot_name(SNAPSHOT_ID)
+
+
+def test_create_snapshot_oci_source_omits_template_name() -> None:
+    fastpath = FakeFastPathClient()
+    k8s = WatchRecordingK8sClient()
+    k8s.sandbox_crs[("tenant-a", SANDBOX_ID)] = _sandbox_cr(
+        "oci://registry.example.com/sandbox/templates@sha256:abc123"
+    )
+    runtime, fastpath, _ = _runtime(fastpath=fastpath, k8s=k8s)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, namespace="tenant-a")
+
+    assert status.state == SnapshotState.CREATING
+    request = fastpath.create_requests[0]
+    assert request.template_name == ""
+
+
+def test_create_snapshot_unreadable_sandbox_cr_fails_without_rpc() -> None:
+    fastpath = FakeFastPathClient()
+    k8s = WatchRecordingK8sClient()
+    k8s.sandbox_cr_error = KeyError("api unavailable")
+    runtime, fastpath, _ = _runtime(fastpath=fastpath, k8s=k8s)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID)
+
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_create_failed"
+    assert "image could not be read" in (status.message or "")
+    assert fastpath.create_requests == []
+
+
 def test_inspect_maps_succeeded_phase_to_ready_with_template_name_image() -> None:
     fastpath = FakeFastPathClient()
     snapshot_name = build_public_snapshot_name(SNAPSHOT_ID)
@@ -222,6 +284,37 @@ def test_inspect_fails_when_succeeded_without_template_name() -> None:
     fastpath = FakeFastPathClient()
     fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
         _Info(pb2.SNAPSHOT_PHASE_SUCCEEDED, manifest_ref="s3://bucket/manifests/abc.json")
+    )
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.FAILED
+    assert status.reason == "snapshot_runtime_missing_image"
+
+
+def test_inspect_succeeded_oci_manifest_restores_from_manifest_ref() -> None:
+    """OCI snapshots omit the template name; the immutable snapfiles
+    manifest reference is the runnable restore image."""
+    fastpath = FakeFastPathClient()
+    manifest_ref = "oci://registry.example.com/sandbox/snapshots@sha256:def456"
+    fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
+        _Info(pb2.SNAPSHOT_PHASE_SUCCEEDED, manifest_ref=manifest_ref, template_name="")
+    )
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.inspect_snapshot(SNAPSHOT_ID)
+
+    assert status.state == SnapshotState.READY
+    assert status.image == manifest_ref
+    assert status.backend == "fsb"
+    assert status.reason == "snapshot_runtime_ready"
+
+
+def test_inspect_succeeded_without_template_name_or_oci_manifest_fails() -> None:
+    fastpath = FakeFastPathClient()
+    fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(
+        _Info(pb2.SNAPSHOT_PHASE_SUCCEEDED, manifest_ref="", template_name="")
     )
     runtime, _, _ = _runtime(fastpath=fastpath)
 

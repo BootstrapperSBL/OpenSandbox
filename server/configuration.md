@@ -166,7 +166,8 @@ The kubernetes runtime also serves fsb (`fsb-`) sandboxes side by side; these fi
 | `fastpath_timeout_seconds` | number | `30.0` | Per-RPC gRPC deadline. |
 | `fastpath_wait_ready_seconds` | number | `30.0` | Bounded readiness wait for DataPlaneReady after Create. |
 | `fastpath_resource_pool` | string | `"default-pool"` | SandboxPool when `extensions.poolRef` is unset. |
-| `template_s3_publish_secret` | string | `"sandbox-oss-credentials"` | Object-store credentials secret for server-created SandboxTemplates. |
+| `template_s3_publish_secret` | string | `"sandbox-oss-credentials"` | Object-store credentials secret for server-created SandboxTemplates (`format: native`). |
+| `template_oci_publish_secret` | string \| omitted | `null` | Name of a `kubernetes.io/dockerconfigjson` Secret in each template's namespace, used as `output.publishSecretRef` for `format: overlaybd` SandboxTemplate builds (fast-sandbox OCI publication). Required when creating overlaybd templates; native templates keep using `template_s3_publish_secret`. |
 | `template_mitm_ca_secret` | string \| omitted | `null` | Secret holding the pinned cluster MITM CA certificate (OSEP-0022). When set, server-created SandboxTemplates bake `spec.egressMitmCertificate` from it (certificate entry only, never the private key); unset keeps templates CA-free. The Secret must exist in each template's namespace (ops-runbook distribution); a missed copy fails the build observably. |
 | `template_mitm_ca_secret_key` | string | `"ca.crt"` | Secret entry holding the CA certificate when `template_mitm_ca_secret` is set. |
 

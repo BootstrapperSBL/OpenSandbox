@@ -1697,7 +1697,14 @@ class CreateFsbTemplateRequest(BaseModel):
     publish: str = Field(
         ...,
         min_length=1,
-        description="S3-compatible publish target for the built artifacts, e.g. 's3://bucket/publish'",
+        description=(
+            "Artifact publish destination for the built snapshot set. "
+            "format=overlaybd (default) requires a repository-only OCI "
+            "target, e.g. 'oci://registry.example.com/sandbox/templates' "
+            "(tags and digests are rejected; the system generates an "
+            "immutable per-build tag pair). format=native requires an "
+            "S3-compatible target, e.g. 's3://bucket/publish'."
+        ),
     )
     format: Literal["native", "overlaybd"] = Field(
         "overlaybd",

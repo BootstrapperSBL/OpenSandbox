@@ -51,6 +51,12 @@ from opensandbox_server.services.snapshot_runtime import (
 GROUP = "sandbox.fast.io"
 VERSION = "v1alpha2"
 PLURAL = "sandboxsnapshots"
+SANDBOX_PLURAL = "sandboxes"
+
+# fast-sandbox OCI artifacts (templates, snapshots, checkpoints) carry this
+# prefix; restore/create image references that start with it take the OCI
+# publication path upstream.
+OCI_IMAGE_PREFIX = "oci://"
 
 # FastPath validates snapshot metadata keys as DNS-1123 labels and projects
 # them onto CR labels as "metadata.sandbox.fast.io/<key>" (same convention as
@@ -146,11 +152,31 @@ class FastSandboxSnapshotRuntime:
         ns = namespace if namespace is not None else self._namespace
         self._ensure_namespace_watch(ns)
 
+        source_image = self._source_sandbox_image(ns, sandbox_id)
+        if source_image is None:
+            # The artifact encoding decides template_name semantics: native
+            # requires it, OCI must omit it. Without the source image the
+            # wrong branch is a guaranteed upstream rejection, so fail here.
+            return SnapshotRuntimeStatus(
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_create_failed",
+                message=(
+                    f"Cannot snapshot sandbox {sandbox_id}: its Sandbox CR "
+                    "image could not be read to determine the artifact "
+                    "encoding (native vs OCI)."
+                ),
+            )
+
         request = pb2.CreateSandboxSnapshotRequest(
             request_id=snapshot_name,
             sandbox=namespaced_reference(ns, sandbox_id),
-            template_name=snapshot_name,
         )
+        if not source_image.startswith(OCI_IMAGE_PREFIX):
+            # native + S3 snapshots publish under a template-name index key.
+            # OCI snapshots must omit it: their rootfs/snapfiles tags are
+            # derived from the Fastlet-assigned random snapshot_id, and the
+            # restore image is the returned manifest_ref.
+            request.template_name = snapshot_name
         request.metadata[SNAPSHOT_ID_METADATA_KEY] = snapshot_id
         try:
             self._fastpath.create_sandbox_snapshot(request)
@@ -183,6 +209,26 @@ class FastSandboxSnapshotRuntime:
             ),
             backend=_BACKEND_FSB,
         )
+
+    def _source_sandbox_image(self, namespace: str, sandbox_id: str) -> Optional[str]:
+        """Read the source Sandbox CR's image to classify the artifact encoding.
+
+        Returns None when the CR is unreadable (missing or API errors) — the
+        caller must not guess template_name semantics in that case.
+        """
+        try:
+            cr = self._k8s_client.get_custom_object(
+                GROUP, VERSION, namespace, SANDBOX_PLURAL, sandbox_id
+            )
+        except Exception as exc:  # noqa: BLE001 - any read failure blocks the branch decision
+            logger.warning(
+                f"Failed to read Sandbox CR {namespace}/{sandbox_id} before "
+                f"snapshot: {exc}"
+            )
+            return None
+        spec = cr.get("spec") if isinstance(cr, dict) else None
+        image = spec.get("image") if isinstance(spec, dict) else None
+        return str(image) if image else None
 
     def get_snapshot_status(self, snapshot_id: str) -> SnapshotRuntimeStatus:
         return self.inspect_snapshot(snapshot_id)
@@ -308,23 +354,36 @@ class FastSandboxSnapshotRuntime:
         template_name = (getattr(info, "template_name", "") or "").strip() or None
 
         if phase_name in _TERMINAL_READY_PHASES:
-            # The restore image is the snapshot's template name: the artifact
-            # set is published under index/<sha256(templateName)>.json, the
-            # same content-addressed layout as template golden images. The
-            # manifest_ref points at the raw manifest object and is not
-            # resolvable as a CreateSandbox image.
-            if not template_name:
+            # The restore image depends on the publication mode. Native + S3
+            # snapshots publish under index/<sha256(templateName)>.json (same
+            # content-addressed layout as template golden images), keyed by
+            # the snapshot's template name. OCI snapshots omit the template
+            # name and restore from the returned immutable snapfiles
+            # manifest reference. A success carrying neither is unpublishable.
+            if template_name:
                 return SnapshotRuntimeStatus(
-                    state=SnapshotState.FAILED,
-                    reason="snapshot_runtime_missing_image",
-                    message="fsb snapshot succeeded without a template name.",
+                    state=SnapshotState.READY,
+                    image=template_name,
+                    reason="snapshot_runtime_ready",
+                    message="fsb snapshot artifacts published successfully.",
+                    backend=_BACKEND_FSB,
+                )
+            manifest_ref = (getattr(info, "manifest_ref", "") or "").strip()
+            if manifest_ref.startswith(OCI_IMAGE_PREFIX):
+                return SnapshotRuntimeStatus(
+                    state=SnapshotState.READY,
+                    image=manifest_ref,
+                    reason="snapshot_runtime_ready",
+                    message="fsb snapshot OCI artifacts published successfully.",
                     backend=_BACKEND_FSB,
                 )
             return SnapshotRuntimeStatus(
-                state=SnapshotState.READY,
-                image=template_name,
-                reason="snapshot_runtime_ready",
-                message="fsb snapshot artifacts published successfully.",
+                state=SnapshotState.FAILED,
+                reason="snapshot_runtime_missing_image",
+                message=(
+                    "fsb snapshot succeeded without a template name or an "
+                    "OCI manifest_ref; no runnable restore image."
+                ),
                 backend=_BACKEND_FSB,
             )
 
