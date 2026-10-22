@@ -17,11 +17,8 @@ permissions:
   pull-requests: read
   actions: write
 
-# PR pushes supersede each other. Dispatch-triggered runs get a unique group
-# (github.run_id): GitHub concurrency keeps only one running + one pending run
-# per group and a newer run silently replaces the pending one, which would
-# drop queued fast-sandbox PR tests that all resolve to refs/heads/main. Each
-# dispatch run survives and the single self-hosted KVM runner serializes them.
+# Unique group per dispatch run (GitHub concurrency would otherwise fold
+# queued runs away); PR pushes keep superseding each other.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -42,8 +39,7 @@ jobs:
       # Full-stack profile (single round while scenarios stabilize).
       IDLE_PAUSE: "1"
       IDLE_PAUSE_ROUNDS: "1"
-      # workflow_dispatch input or repository_dispatch client_payload;
-      # empty for pull_request events (test the pinned commit).
+      # workflow_dispatch input or repository_dispatch client_payload (empty on PRs).
       FSB_COMMIT_OVERRIDE: ${{ inputs.fsb_commit || github.event.client_payload.fsb_commit }}
     steps:
       # actions/checkout always executes as the runner user; the script
@@ -67,10 +63,8 @@ jobs:
         # The self-hosted runner's system python3 may still be Python 3.6.
         run: uv run --no-project --python 3.12 python -m unittest discover -s scripts/tests -p test_fast_sandbox_integration_env.py -v
 
-      # Cross-repo pre-merge trigger (repository_dispatch from fast-sandbox
-      # PRs): rewrite the pin in the working tree only — the checkout stays
-      # clean — then re-vendor the CRD bundle so the charts install the
-      # tested commit's CRDs, not the ones pinned for the old commit.
+      # Rewrites the pin in the working tree only, then re-vendors the CRD
+      # bundle so the charts install the tested commit's CRDs.
       - name: Override fast-sandbox pin
         if: env.FSB_COMMIT_OVERRIDE != ''
         run: |
