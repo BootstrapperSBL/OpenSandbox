@@ -28,7 +28,7 @@ Execd also fronts a small reverse proxy (`/proxy/{port}`), so one exposed host p
 
 ## API surface
 
-Everything execd exposes lives under one API. When the platform configures an access token, every endpoint below requires it in the `X-EXECD-ACCESS-TOKEN` header — only liveness and readiness are always open. The contract lives in [specs/execd-api.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml).
+Everything execd exposes lives under one API. When the platform configures an access token, every endpoint below requires it in the `X-EXECD-ACCESS-TOKEN` header — only liveness and readiness are always open. PTY WebSocket handshakes also accept the browser-compatible credential described below. The contract lives in [specs/execd-api.yaml](https://github.com/opensandbox-group/OpenSandbox/blob/main/specs/execd-api.yaml).
 
 ![execd request pipeline](../../public/images/execd-request-pipeline.svg)
 
@@ -77,6 +77,24 @@ Each terminal session is a real PTY served over WebSocket — not a wrapped comm
 ![execd PTY model](../../public/images/execd-pty.svg)
 
 The sharing model is deliberate: exactly one **holder** owns the keyboard, and any number of **viewers** can watch. Viewers first replay what has already been printed, then follow live output — useful for supervision, debugging assistants, or letting a second person watch an agent work without giving it input.
+
+### Browser WebSocket authentication
+
+Browsers cannot attach an arbitrary `X-EXECD-ACCESS-TOKEN` header to a WebSocket handshake. For `GET /pty/{sessionId}/ws` only, a browser can instead offer the `opensandbox-pty` application subprotocol and one credential subprotocol whose suffix is the existing execd token encoded as unpadded base64url:
+
+```javascript
+const bytes = new TextEncoder().encode(execdToken);
+const encoded = btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(""))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const socket = new WebSocket(websocketUrl, [
+  "opensandbox-pty",
+  `base64url.bearer.execd.opensandbox.${encoded}`,
+]);
+```
+
+Execd verifies the same token before upgrading the connection, removes the credential entry, and negotiates only `opensandbox-pty`. This works for both interactive attachments and `?mode=viewer`. An explicit `X-EXECD-ACCESS-TOKEN` header takes precedence, including when it is empty or invalid; it never falls back to a subprotocol token. Duplicate credentials, malformed encoding, and a credential without the application subprotocol are rejected with `401`. Existing header-authenticated clients do not need to offer a subprotocol. Other HTTP APIs, including PTY creation and deletion, still require the header when token protection is enabled.
+
+This is a sandbox-wide credential, not a restricted terminal ticket. Obtain it through an authorized endpoint-resolution flow; do not place it in the URL or persistent browser storage. Use WSS in production: base64url is not encryption. Configure proxies and observability systems to redact the credential-bearing `Sec-WebSocket-Protocol` request header. An ingress signed URL satisfies ingress authentication only and does not replace execd authentication. The existing Origin policy and PTY disconnect/reconnect behavior are unchanged; deployments must enforce their browser-origin policy at the trusted gateway.
 
 ## Files and directories
 

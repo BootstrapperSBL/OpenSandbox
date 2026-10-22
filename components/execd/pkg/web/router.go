@@ -199,8 +199,13 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 			return
 		}
 
+		presented, valid := requestAccessToken(ctx)
+		if !valid {
+			abortUnauthorized(ctx)
+			return
+		}
+
 		if b := binding.Current(); b != nil && b.HasAccessToken {
-			presented := ctx.GetHeader(model.ApiAccessTokenHeader)
 			if presented == "" || !b.VerifyAccessToken(presented) {
 				abortUnauthorized(ctx)
 				return
@@ -220,8 +225,7 @@ func accessTokenMiddleware(legacyToken string) gin.HandlerFunc {
 			return
 		}
 
-		requestedToken := ctx.GetHeader(model.ApiAccessTokenHeader)
-		if requestedToken == "" || requestedToken != legacyToken {
+		if presented == "" || presented != legacyToken {
 			abortUnauthorized(ctx)
 			return
 		}

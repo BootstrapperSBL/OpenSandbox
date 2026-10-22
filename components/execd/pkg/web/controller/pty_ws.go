@@ -35,6 +35,7 @@ import (
 var wsUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
+	Subprotocols:    []string{model.PTYWebSocketProtocol},
 	// Allow all origins — execd runs behind a trusted reverse proxy.
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
