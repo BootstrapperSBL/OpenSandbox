@@ -301,7 +301,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any, r
 // non-nil. It exists for callers that need server-reported response metadata
 // (e.g. the OPEN-SANDBOX-ORIGIN header) that is not part of the JSON body.
 func (c *Client) doRequestCapture(ctx context.Context, method, path string, body, result any, capture func(http.Header)) error {
-	return c.withRetry(ctx, func() error {
+	return c.withRetryMethod(ctx, method, func() error {
 		var reused bool
 		err := c.doRequestOnce(ctx, method, path, body, result, &reused, capture)
 		if err != nil && reused && c.shouldRetryOnFreshConn(ctx, method, err) {
@@ -415,13 +415,13 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 }
 
 // doStreamRequest builds an HTTP request, executes it, and streams SSE events
-// through handler. Connection setup is retried on transient errors; once
-// streaming begins, errors are not retried (partial data may have been
-// delivered to the handler).
+// through handler. Connection setup follows the method-aware retry policy; once
+// streaming begins, errors are not retried (partial data may have been delivered
+// to the handler).
 func (c *Client) doStreamRequest(ctx context.Context, method, path string, body any, handler EventHandler) error {
 	var resp *http.Response
 
-	connectErr := c.withRetryWake(ctx, false, func() error {
+	connectErr := c.withRetryWake(ctx, false, method, func() error {
 		var bodyReader io.Reader
 		if body != nil {
 			buf, err := json.Marshal(body)
