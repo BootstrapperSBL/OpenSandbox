@@ -41,6 +41,12 @@ import (
 
 const isolatedRunEndMarkerPrefix = "__ISOLATED_RUN_END__"
 
+// isolatedInterruptEscalationTimeout bounds how long a cancelled run waits
+// after SIGINT before escalating to SIGKILL. It gives a well-behaved command
+// time to wind down while guaranteeing a SIGINT-immune command cannot hold
+// the session's run mutex forever.
+var isolatedInterruptEscalationTimeout = 10 * time.Second
+
 // IsolatedRunner is the concrete isolated session runner.
 type IsolatedRunner struct {
 	ctrl            *Controller
@@ -645,24 +651,29 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	// Prepend env exports before user code.
 	runMarker := fmt.Sprintf("%s_%s", isolatedRunEndMarkerPrefix, uuid.New().String())
 
-	var script string
+	// trap : INT keeps the persistent shell alive when the session process
+	// group is signalled: the shell catches SIGINT (the trap runs after the
+	// foreground child exits) while the running command dies with the default
+	// disposition. When envs are supplied the code already runs in a subshell,
+	// so an interrupt ends the whole run; without envs the code must stay in
+	// the main shell to keep user exports visible to later runs, and an
+	// interrupt then stops the currently executing line only.
+	var script strings.Builder
+	script.WriteString("trap : INT\n")
 	if len(envs) > 0 {
-		script += "(\n"
+		script.WriteString("(\n")
 		for k, v := range envs {
-			script += fmt.Sprintf("export %s=%s\n", shellescape(k), shellescape(v))
-		}
-		script += code
-		if !strings.HasSuffix(script, "\n") {
-			script += "\n"
-		}
-		script += ")\n"
-	} else {
-		script += code
-		if !strings.HasSuffix(script, "\n") {
-			script += "\n"
+			script.WriteString(fmt.Sprintf("export %s=%s\n", shellescape(k), shellescape(v)))
 		}
 	}
-	script += fmt.Sprintf("echo %s $?\n", runMarker)
+	script.WriteString(code)
+	if !strings.HasSuffix(code, "\n") {
+		script.WriteString("\n")
+	}
+	if len(envs) > 0 {
+		script.WriteString(")\n")
+	}
+	script.WriteString(fmt.Sprintf("echo %s $?\n", runMarker))
 
 	// On timeout/cancel, send SIGINT to interrupt the running command
 	// without killing the persistent shell session. Closing stdin would
@@ -681,11 +692,24 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		select {
 		case <-ctx.Done():
 			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+			// If the command ignores SIGINT the marker never arrives and
+			// this run would hold the session's run mutex forever. Escalate
+			// to SIGKILL so the run (and with it the wedged session) ends
+			// deterministically instead of hanging.
+			select {
+			case <-done:
+			case <-time.After(isolatedInterruptEscalationTimeout):
+				log.Warn(
+					"isolated session: %s command ignored SIGINT; escalating to SIGKILL",
+					id,
+				)
+				_ = s.signalProcessGroupIfRunning(syscall.SIGKILL)
+			}
 		case <-done:
 		}
 	}()
 
-	if _, err := io.WriteString(stdin, script); err != nil {
+	if _, err := io.WriteString(stdin, script.String()); err != nil {
 		return fmt.Errorf("write stdin: %w", err)
 	}
 

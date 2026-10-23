@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -265,6 +266,18 @@ func (c *IsolatedSessionController) Run() {
 	}
 	defer cancel()
 
+	// Fail fast on an unknown session while the response is still JSON:
+	// once SSE headers are committed below, errors can only be delivered as
+	// stream events.
+	if _, err := isolatedRunner.GetIsolatedSession(sessionID); err != nil {
+		if errors.Is(err, runtime.ErrContextNotFound) {
+			c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
+			return
+		}
+		c.RespondError(http.StatusInternalServerError, model.ErrorCodeRuntimeError, err.Error())
+		return
+	}
+
 	// Background mode: submit detached, return a run handle, let the client
 	// poll status/logs. Deliberately independent of this request's context so
 	// a client disconnect cannot cancel detached work. 202 Accepted keeps the
@@ -284,6 +297,20 @@ func (c *IsolatedSessionController) Run() {
 		return
 	}
 
+	// Foreground mode: stream via SSE. Commit the response headers up front
+	// and keep the stream alive with periodic pings so gateway idle timeouts
+	// cannot reap the connection while a silent command (e.g. pip install)
+	// produces no stdout for long stretches.
+	c.setupSSEResponse()
+
+	pingCtx, pingCancel := context.WithCancel(ctx)
+	var pingWg sync.WaitGroup
+	pingWg.Add(1)
+	go func() {
+		defer pingWg.Done()
+		c.ping(pingCtx)
+	}()
+
 	onStdout := func(line string) {
 		if line == "" {
 			return
@@ -299,6 +326,12 @@ func (c *IsolatedSessionController) Run() {
 	startTime := time.Now()
 	err := isolatedRunner.RunInIsolatedSession(ctx, sessionID, req.Code, req.Envs, onStdout)
 	durationMs := float64(time.Since(startTime)) / float64(time.Millisecond)
+
+	// Stop the ping goroutine before the final event and before the handler
+	// returns, so nothing writes to the response writer after Go's net/http
+	// closes it.
+	pingCancel()
+	pingWg.Wait()
 
 	if err != nil {
 		if errors.Is(err, runtime.ErrContextNotFound) {
