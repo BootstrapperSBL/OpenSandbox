@@ -1294,12 +1294,24 @@ registry_ca_up() {
 	# The CA persists in $WORK and is reused across runs; the serving
 	# certificate is re-issued every run (cheap, and the Service DNS name
 	# is fixed while the key material rotates).
-	if [[ ! -s "$CA_DIR/ca.crt" || ! -s "$CA_DIR/ca.key" ]]; then
+	# The CA must carry a subjectKeyIdentifier: the leaf's
+	# authorityKeyIdentifier=keyid is derived from it at signing time. An
+	# openssl-1.1.1 `req -x509` does NOT add a SKI automatically (Al8 hosts),
+	# and a SKI-less CA silently produces SKI/AKI-less leaves that OpenSSL 3
+	# clients (ubuntu 22.04 images) reject at
+	# ossl_x509v3_cache_extensions:reason(158). Regenerate when missing.
+	if [[ ! -s "$CA_DIR/ca.crt" || ! -s "$CA_DIR/ca.key" ]] \
+		|| ! openssl x509 -in "$CA_DIR/ca.crt" -noout -text 2>/dev/null | grep -q "Subject Key Identifier"; then
+		if [[ -s "$CA_DIR/ca.crt" ]]; then
+			log "existing CA has no subjectKeyIdentifier (openssl 1.1.1 default); regenerating"
+		fi
 		openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
 			-keyout "$CA_DIR/ca.key" -out "$CA_DIR/ca.crt" \
 			-subj "/CN=fast-sandbox-env-registry-ca" \
 			-addext "basicConstraints=critical,CA:TRUE" \
-			-addext "keyUsage=critical,keyCertSign" >/dev/null 2>&1 \
+			-addext "keyUsage=critical,keyCertSign" \
+			-addext "subjectKeyIdentifier=hash" \
+			-addext "authorityKeyIdentifier=keyid:always" >/dev/null 2>&1 \
 			|| die "registry CA generation failed"
 	fi
 	openssl req -newkey rsa:4096 -sha256 -nodes \
