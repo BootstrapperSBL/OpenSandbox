@@ -1305,14 +1305,30 @@ registry_ca_up() {
 		if [[ -s "$CA_DIR/ca.crt" ]]; then
 			log "existing CA has no subjectKeyIdentifier (openssl 1.1.1 default); regenerating"
 		fi
-		openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
-			-keyout "$CA_DIR/ca.key" -out "$CA_DIR/ca.crt" \
-			-subj "/CN=fast-sandbox-env-registry-ca" \
-			-addext "basicConstraints=critical,CA:TRUE" \
-			-addext "keyUsage=critical,keyCertSign" \
-			-addext "subjectKeyIdentifier=hash" \
-			-addext "authorityKeyIdentifier=keyid:always" >/dev/null 2>&1 \
-			|| die "registry CA generation failed"
+	# Fully explicit config: the host openssl.cnf (Al8) defaults `req -x509`
+	# to its v3_ca section, and combining it with -addext duplicates
+	# extensions (Basic Constraints twice) — which OpenSSL 3 clients reject
+	# at ossl_x509v3_cache_extensions:reason(158), failing every TLS verify
+	# against the registry. A minimal local config keeps the CA deterministic
+	# across hosts.
+	cat > "$CA_DIR/ca.cnf" <<'CA_CNF'
+[req]
+distinguished_name = dn
+prompt = no
+
+[dn]
+CN = fast-sandbox-env-registry-ca
+
+[x509_ext]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+CA_CNF
+	openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+		-config "$CA_DIR/ca.cnf" -extensions x509_ext \
+		-keyout "$CA_DIR/ca.key" -out "$CA_DIR/ca.crt" >/dev/null 2>&1 \
+		|| die "registry CA generation failed"
 	fi
 	openssl req -newkey rsa:4096 -sha256 -nodes \
 		-keyout "$CA_DIR/server.key" -out "$CA_DIR/server.csr" \
