@@ -246,7 +246,15 @@ class FilesystemAdapter(Filesystem):
                     status_code=response.status_code,
                     request_id=extract_request_id(response.headers),
                 )
-            return response.aiter_bytes(chunk_size=chunk_size)
+
+            async def _iter() -> AsyncIterator[bytes]:
+                try:
+                    async for chunk in response.aiter_bytes(chunk_size=chunk_size):
+                        yield chunk
+                finally:
+                    await response.aclose()
+
+            return _iter()
         except Exception as e:
             logger.error(f"Failed to stream file {path}", exc_info=e)
             raise ExceptionConverter.to_sandbox_exception(e) from e
