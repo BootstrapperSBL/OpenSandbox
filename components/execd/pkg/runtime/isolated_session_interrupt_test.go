@@ -108,6 +108,45 @@ func TestRunInIsolatedSession_InterruptedRunDoesNotLeakIntoNext(t *testing.T) {
 	}
 }
 
+// TestRunInIsolatedSession_CancelledScriptTailDoesNotKillSession verifies
+// that a cancelled no-envs run whose remaining statements execute after the
+// interrupt cannot trip the SIGKILL escalation: repeated SIGINTs drain the
+// buffered tail statement by statement while the trapped shell survives, so
+// the session stays alive and accepts follow-up runs.
+func TestRunInIsolatedSession_CancelledScriptTailDoesNotKillSession(t *testing.T) {
+	runner, id := newInterruptTestSession(t)
+
+	originalEscalation := isolatedInterruptEscalationTimeout
+	isolatedInterruptEscalationTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { isolatedInterruptEscalationTimeout = originalEscalation })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	err := runner.RunInIsolatedSession(ctx, id, "sleep 30\nsleep 30", nil, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("interrupted run error = %v, want context.DeadlineExceeded", err)
+	}
+
+	// Stay past the escalation deadline (300ms cancel + 1500ms grace). With
+	// only a single SIGINT the second statement would still be running and
+	// the watcher would have SIGKILLed the whole session by now.
+	time.Sleep(2 * time.Second)
+
+	s := runner.lookup(id)
+	if s == nil {
+		t.Fatal("session was removed after cancelled-run tail drained")
+	}
+	if s.dead() {
+		t.Fatal("session was killed after cancelled-run tail drained")
+	}
+
+	runCtx, runCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer runCancel()
+	if err := runner.RunInIsolatedSession(runCtx, id, "echo next", nil, nil); err != nil {
+		t.Fatalf("follow-up run: %v", err)
+	}
+}
+
 // TestRunInIsolatedSession_EscalatesWhenInterruptIgnored verifies that a
 // command which ignores SIGINT cannot wedge the session's run mutex forever:
 // the watcher escalates to SIGKILL, the run fails, and the wedged session is

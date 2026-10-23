@@ -47,6 +47,11 @@ const isolatedRunEndMarkerPrefix = "__ISOLATED_RUN_END__"
 // the session's run mutex forever.
 var isolatedInterruptEscalationTimeout = 10 * time.Second
 
+// isolatedInterruptRepeatInterval is the SIGINT re-send period during the
+// escalation window. Repeated SIGINTs drain a no-envs script tail statement
+// by statement without harming the trapped shell.
+var isolatedInterruptRepeatInterval = 500 * time.Millisecond
+
 // IsolatedRunner is the concrete isolated session runner.
 type IsolatedRunner struct {
 	ctrl            *Controller
@@ -692,18 +697,32 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		select {
 		case <-ctx.Done():
 			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
-			// If the command ignores SIGINT the marker never arrives and
-			// this run would hold the session's run mutex forever. Escalate
-			// to SIGKILL so the run (and with it the wedged session) ends
-			// deterministically instead of hanging.
-			select {
-			case <-done:
-			case <-time.After(isolatedInterruptEscalationTimeout):
-				log.Warn(
-					"isolated session: %s command ignored SIGINT; escalating to SIGKILL",
-					id,
-				)
-				_ = s.signalProcessGroupIfRunning(syscall.SIGKILL)
+			// Without envs the script is not subshell-wrapped: after the
+			// first SIGINT the persistent shell advances to the remaining
+			// buffered statements of the cancelled run. Repeating SIGINT
+			// kills each newly started statement (the trap keeps the shell
+			// alive) so the tail drains to the end marker quickly instead
+			// of running to completion. Only if the marker still has not
+			// arrived after the escalation window is the command assumed
+			// to ignore SIGINT; SIGKILL then ends the wedged run (and the
+			// session) deterministically instead of hanging forever.
+			ticker := time.NewTicker(isolatedInterruptRepeatInterval)
+			defer ticker.Stop()
+			deadline := time.After(isolatedInterruptEscalationTimeout)
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+				case <-deadline:
+					log.Warn(
+						"isolated session: %s command ignored SIGINT; escalating to SIGKILL",
+						id,
+					)
+					_ = s.signalProcessGroupIfRunning(syscall.SIGKILL)
+					return
+				}
 			}
 		case <-done:
 		}

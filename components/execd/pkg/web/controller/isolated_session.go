@@ -30,6 +30,7 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
+	"github.com/alibaba/opensandbox/internal/safego"
 )
 
 var isolatedRunner *runtime.IsolatedRunner
@@ -306,10 +307,10 @@ func (c *IsolatedSessionController) Run() {
 	pingCtx, pingCancel := context.WithCancel(ctx)
 	var pingWg sync.WaitGroup
 	pingWg.Add(1)
-	go func() {
+	safego.Go(func() {
 		defer pingWg.Done()
 		c.ping(pingCtx)
-	}()
+	})
 
 	onStdout := func(line string) {
 		if line == "" {
@@ -335,7 +336,14 @@ func (c *IsolatedSessionController) Run() {
 
 	if err != nil {
 		if errors.Is(err, runtime.ErrContextNotFound) {
-			c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
+			// The session can vanish between the pre-flight probe and the
+			// run's internal lookup (concurrent DELETE, exited-session
+			// cleanup). SSE headers are already committed at this point, so
+			// the status code can no longer change — surface the failure as
+			// a terminal stream event instead of appending a JSON body
+			// mid-stream.
+			telemetry.RecordIsolatedRun(ctx, "error", durationMs)
+			c.writeIsolatedRunError("SessionNotFound", "session not found")
 			return
 		}
 		telemetry.RecordIsolatedRun(ctx, "error", durationMs)
@@ -345,16 +353,7 @@ func (c *IsolatedSessionController) Run() {
 			ename = "ExitError"
 			evalue = strings.TrimPrefix(evalue, "command exited with code ")
 		}
-		event := model.ServerStreamEvent{
-			Type:      model.StreamEventTypeError,
-			Text:      err.Error(),
-			Timestamp: time.Now().UnixMilli(),
-			Error: &execute.ErrorOutput{
-				EName:  ename,
-				EValue: evalue,
-			},
-		}
-		c.writeSingleEvent("IsolatedError", event.ToJSON(), true, event.Summary())
+		c.writeIsolatedRunError(ename, evalue)
 		return
 	}
 	telemetry.RecordIsolatedRun(ctx, "success", durationMs)
@@ -363,6 +362,19 @@ func (c *IsolatedSessionController) Run() {
 		Timestamp: time.Now().UnixMilli(),
 	}
 	c.writeSingleEvent("IsolatedComplete", event.ToJSON(), true, event.Summary())
+}
+
+func (c *IsolatedSessionController) writeIsolatedRunError(ename, evalue string) {
+	event := model.ServerStreamEvent{
+		Type:      model.StreamEventTypeError,
+		Text:      evalue,
+		Timestamp: time.Now().UnixMilli(),
+		Error: &execute.ErrorOutput{
+			EName:  ename,
+			EValue: evalue,
+		},
+	}
+	c.writeSingleEvent("IsolatedError", event.ToJSON(), true, event.Summary())
 }
 
 func (c *IsolatedSessionController) respondRunError(err error) {
