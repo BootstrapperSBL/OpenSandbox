@@ -1294,16 +1294,18 @@ registry_ca_up() {
 	# The CA persists in $WORK and is reused across runs; the serving
 	# certificate is re-issued every run (cheap, and the Service DNS name
 	# is fixed while the key material rotates).
-	# The CA must carry a subjectKeyIdentifier: the leaf's
-	# authorityKeyIdentifier=keyid is derived from it at signing time. An
-	# openssl-1.1.1 `req -x509` does NOT add a SKI automatically (Al8 hosts),
-	# and a SKI-less CA silently produces SKI/AKI-less leaves that OpenSSL 3
-	# clients (ubuntu 22.04 images) reject at
-	# ossl_x509v3_cache_extensions:reason(158). Regenerate when missing.
+	# The CA must carry a subjectKeyIdentifier AND no duplicate extensions:
+	# the leaf's authorityKeyIdentifier=keyid is derived from the CA's SKI at
+	# signing time (an openssl-1.1.1 `req -x509` adds no SKI), and a CA whose
+	# extensions were stacked twice (host v3_ca section + -addext) poisons
+	# the WHOLE chain — OpenSSL 3 clients cache every chain member and fail
+	# at ossl_x509v3_cache_extensions:reason(158) even though the leaf text
+	# looks sane. Regenerate on either defect.
 	if [[ ! -s "$CA_DIR/ca.crt" || ! -s "$CA_DIR/ca.key" ]] \
-		|| ! openssl x509 -in "$CA_DIR/ca.crt" -noout -text 2>/dev/null | grep -q "Subject Key Identifier"; then
+		|| ! openssl x509 -in "$CA_DIR/ca.crt" -noout -text 2>/dev/null | grep -q "Subject Key Identifier" \
+		|| [[ "$(openssl x509 -in "$CA_DIR/ca.crt" -noout -text 2>/dev/null | grep -c 'X509v3 Basic Constraints')" -gt 1 ]]; then
 		if [[ -s "$CA_DIR/ca.crt" ]]; then
-			log "existing CA has no subjectKeyIdentifier (openssl 1.1.1 default); regenerating"
+			log "existing CA is missing a subjectKeyIdentifier or carries duplicate extensions; regenerating"
 		fi
 	# Fully explicit config: the host openssl.cnf (Al8) defaults `req -x509`
 	# to its v3_ca section, and combining it with -addext duplicates
