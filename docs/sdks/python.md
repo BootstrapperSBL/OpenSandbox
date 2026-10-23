@@ -519,7 +519,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | Parameter         | Description                                | Default                      | Environment Variable   |
 | ----------------- | ------------------------------------------ | ---------------------------- | ---------------------- |
 | `api_key`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
-| `domain`          | The endpoint domain of the sandbox service | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
+| `domain`          | The endpoint domain of the sandbox service (`host[:port]` or a full URL); a trailing `/` or `/v1` is ignored | `localhost:8080` | `OPEN_SANDBOX_DOMAIN`  |
 | `protocol`        | HTTP protocol (http/https)                 | `http`                       | -                      |
 | `request_timeout` | Timeout for API requests                   | 30 seconds                   | -                      |
 | `debug`           | Enable debug logging for HTTP requests     | `False`                      | -                      |

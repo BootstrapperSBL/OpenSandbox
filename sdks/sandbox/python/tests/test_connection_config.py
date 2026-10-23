@@ -44,6 +44,36 @@ def test_get_base_url_domain_can_include_scheme() -> None:
     assert cfg.get_base_url() == "https://example.com:9999/v1"
 
 
+@pytest.mark.parametrize("config_cls", [ConnectionConfig, ConnectionConfigSync])
+@pytest.mark.parametrize(
+    ("domain", "expected"),
+    [
+        ("example.com:1234/", "https://example.com:1234/v1"),
+        ("example.com:1234/v1", "https://example.com:1234/v1"),
+        ("example.com:1234/v1/", "https://example.com:1234/v1"),
+        ("https://example.com:9999/", "https://example.com:9999/v1"),
+        ("https://example.com:9999/v1", "https://example.com:9999/v1"),
+        ("https://example.com/proxy/", "https://example.com/proxy/v1"),
+        ("https://example.com/proxy/v1/", "https://example.com/proxy/v1"),
+    ],
+)
+def test_get_base_url_normalizes_trailing_slash_and_version_suffix(
+    config_cls: type[ConnectionConfig] | type[ConnectionConfigSync],
+    domain: str,
+    expected: str,
+) -> None:
+    cfg = config_cls(domain=domain, protocol="https")
+    assert cfg.get_base_url() == expected
+
+
+def test_get_base_url_normalizes_domain_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPEN_SANDBOX_DOMAIN", "http://localhost:8080/")
+    assert ConnectionConfig().get_base_url() == "http://localhost:8080/v1"
+    assert ConnectionConfigSync().get_base_url() == "http://localhost:8080/v1"
+
+
 @pytest.mark.asyncio
 async def test_close_transport_if_owned_default_transport() -> None:
     cfg = ConnectionConfig().with_transport_if_missing()
