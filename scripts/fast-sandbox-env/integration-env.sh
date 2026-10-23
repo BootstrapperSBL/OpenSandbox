@@ -64,6 +64,13 @@
 #   IDLE_PAUSE_PARK_BUDGET  gateway wake park budget (default 5s; set e.g. 100ms to
 #                    force every wake through the marked-503 + client-retry path)
 #   REDIS_IMAGE      Redis image for the idle-pause profile (default redis:7-alpine)
+#   OCI_STACK        OverlayBD OCI profile, default 1: in-cluster TLS registry
+#                    (its CA is baked into the fsb images), the chart's
+#                    runtime.oci node stack (tools init + overlaybd-ublkd
+#                    sidecar), an overlaybd template beside the native one,
+#                    and an overlaybd sandbox + snapshot round trip. Native
+#                    keeps running beside it (nodes need ublk: kernel
+#                    CONFIG_BLK_DEV_UBLK, /dev/ublkc*). 0 = native-only.
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -146,6 +153,31 @@ IMG_BUILDER="${IMAGE_BUILDER:-opensandbox/fsb-sandboxtemplate-builder:dev}"
 IMG_OCI_TOOLS="${IMAGE_OCI_TOOLS:-opensandbox/oci-tools:dev}"
 IMG_RUNTIME="${IMAGE_RUNTIME:-opensandbox/fsb-firecracker-runtime:dev}"
 IMG_EGRESS="${EGRESS_IMAGE:-docker.io/opensandbox/egress:latest}"
+
+# OverlayBD OCI stack — single-cluster shape: the OCI on-demand loading
+# stack runs beside native, and both template paths are verified in one
+# environment. Requires node ublk support (CONFIG_BLK_DEV_UBLK;
+# `modprobe ublk_drv` when built as a module). When enabled the env:
+#   - generates a local CA + TLS serving cert and runs an in-cluster
+#     registry (fsb-vm and overlaybd require HTTPS; no plain-http escape
+#     hatch exists upstream), baking the CA into the fsb-fastlet,
+#     fsb-firecracker-runtime and sandboxtemplate-builder images;
+#   - installs the chart's runtime.oci node stack (tools init +
+#     overlaybd-ublkd sidecar + agent flag);
+#   - adds the registry credentials, the server's
+#     template_oci_publish_secret, and the pool fastlet OCI mounts;
+#   - builds an overlaybd template beside the native one and verifies a
+#     sandbox + snapshot round trip from it.
+# OCI_STACK=0 keeps the previous native-only environment.
+OCI_STACK="${OCI_STACK:-1}"
+OCI_REGISTRY_IMAGE="${OCI_REGISTRY_IMAGE:-registry:2}"
+OCI_HTPASSWD_IMAGE="${OCI_HTPASSWD_IMAGE:-httpd:2.4-alpine}"
+OCI_REGISTRY_USER="${OCI_REGISTRY_USER:-envregistry}"
+OCI_REGISTRY_PASSWORD="${OCI_REGISTRY_PASSWORD:-envregistry-secret}"
+OCI_REGISTRY_SECRET="registry-env"
+OCI_REGISTRY_REPO="sandbox/templates"
+OCI_REGISTRY_HOST="registry.${RESOURCE_NS}.svc.cluster.local"
+CA_DIR="$WORK/registry-ca"
 
 image_repo() { printf '%s' "${1%:*}"; }
 image_tag() { printf '%s' "${1##*:}"; }
@@ -320,7 +352,7 @@ failure_dump() {
 	mkdir -p "$LOGS_DIR"
 	{
 		echo "=== fast-sandbox-env failure: $task ($(date -u +%FT%TZ)) ==="
-		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=)' || true
+		env | grep -E '^(KIND_(CLUSTER|SINGLE|RETAIN|NODE_IMAGE)=|FSB_DIR=|SBX_IMAGE=|IMG_[A-Z_]+=|EGRESS_IMAGE=|EXECD=|WORK=|POOL_(NAME|MIN|MAX)=|INGRESS_IMAGE=|WARM_IMAGES=|XFS_(STATEROOT|SIZE)=|RUSTFS_(IMAGE|PORT|CONSOLE_PORT|BUCKET|CONTAINER|DATA|ENDPOINT)=|RC_IMAGE=|OCI_STACK=)' || true
 		echo "--- fast-sandbox checkout ---"
 		git -C "$FSB_DIR" rev-parse HEAD 2>&1 || true
 		echo "--- kind-create.log (tail) ---"
@@ -351,6 +383,11 @@ failure_dump() {
 		echo "--- builder pods + logs (tail) ---"
 		kubectl get pods -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --show-labels 2>&1 || true
 		kubectl logs -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --tail=80 2>&1 || true
+		if [[ "$OCI_STACK" == 1 ]]; then
+			echo "--- OCI registry (pod + logs tail) ---"
+			kubectl get pods -n "$RESOURCE_NS" -l app=fast-sandbox-env-registry -o wide 2>&1 || true
+			kubectl logs -n "$RESOURCE_NS" -l app=fast-sandbox-env-registry --tail=60 2>&1 || true
+		fi
 		echo "--- SandboxTemplates (status carries the build failure reason) ---"
 		kubectl get sandboxtemplates -n "$RESOURCE_NS" -o yaml 2>&1 || true
 		# Sandbox CR states: a pause/snapshot/resume failure shows up as a
@@ -582,6 +619,7 @@ build_images() {
 	# build paths cannot drift.
 	FSB_SRC_DIR="$FSB_DIR" "$OSB_ROOT/manifests/release/build-fast-sandbox.sh" \
 		|| die "fast-sandbox image build failed"
+	bake_registry_ca_into_images
 	log "building the OpenSandbox egress image ($IMG_EGRESS)"
 	# Context is the repo root (COPYs components/egress + components/internal).
 	# shellcheck disable=SC2086
@@ -926,12 +964,28 @@ credentials_up() {
 	kubectl -n "$RESOURCE_NS" create secret docker-registry registry-rustfs \
 		--docker-server="$host" --docker-username="$RUSTFS_AK" --docker-password="$RUSTFS_SK" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
-	kubectl -n "$RESOURCE_NS" create configmap fast-sandbox-registry \
-		--from-literal="registries.yaml=registries:
+	local registries_yaml="registries:
   - host: $host
     secretRef:
       name: registry-rustfs
-" \
+"
+	if [[ "$OCI_STACK" == 1 ]]; then
+		# OverlayBD entries: repositoryPrefix scopes the account to the
+		# sandbox/* subtree (templates + checkpoints share one repository
+		# account — the node ublkd has a service-wide credential context).
+		registries_yaml+="  - host: $OCI_REGISTRY_HOST
+    repositoryPrefix: ${OCI_REGISTRY_REPO%%/*}
+    secretRef:
+      name: $OCI_REGISTRY_SECRET
+"
+		kubectl -n "$RESOURCE_NS" create secret docker-registry "$OCI_REGISTRY_SECRET" \
+			--docker-server="$OCI_REGISTRY_HOST" \
+			--docker-username="$OCI_REGISTRY_USER" \
+			--docker-password="$OCI_REGISTRY_PASSWORD" \
+			--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	fi
+	kubectl -n "$RESOURCE_NS" create configmap fast-sandbox-registry \
+		--from-literal="registries.yaml=$registries_yaml" \
 		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
 	pass "credentials written (publish/pull)"
 }
@@ -969,7 +1023,8 @@ control_plane_up() {
 		--set runtime.image.repository="$(image_repo "$IMG_RUNTIME")" \
 		--set runtime.image.tag="$(image_tag "$IMG_RUNTIME")" \
 		--set artifactStore.store="s3://$RUSTFS_BUCKET/publish" \
-		--set artifactStore.endpoint="$RUSTFS_ENDPOINT"
+		--set artifactStore.endpoint="$RUSTFS_ENDPOINT" \
+		--set runtime.oci.enabled="$([[ "$OCI_STACK" == 1 ]] && echo true || echo false)"
 	kubectl apply -f "$GEN_DIR/fast-sandbox.yaml" >/dev/null
 	local image
 	for image in "$IMG_CONTROLLER" "$IMG_FASTLET" "$IMG_FASTLET_PROXY" \
@@ -1104,6 +1159,7 @@ template_up() {
 		--build-arg OCI_TOOLS_IMAGE="$IMG_OCI_TOOLS" -t "$IMG_BUILDER" \
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
+	bake_registry_ca "$IMG_BUILDER"
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
 	local created
 	local -a tmpl_args=(
@@ -1128,9 +1184,228 @@ template_up() {
 	[[ -n "$manifest_ref" ]] || fail "template manifestRef is empty"
 	log "template manifestRef: $manifest_ref"
 	pass "SandboxTemplate Succeeded + artifacts published (via opensandbox CLI)"
+	[[ "$OCI_STACK" == 1 ]] && template_up_overlaybd
+	return 0
 }
 
-# --- stage: SandboxPool (egress attached, P2P spread) --------------------------------------------
+# Same build inputs as the native template, published through the in-cluster
+# OCI registry (format=overlaybd): the server projects it onto a
+# SandboxTemplate CR whose builder runs fsb-vm build + push, and the
+# resulting status.manifestRef (oci://host/repo@sha256:...) is the runnable
+# artifact the server hands to FastPath on template-mode creates.
+OCI_TEMPLATE_ID=""
+
+_overlaybd_template_phase() {
+	osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.phase // empty'
+}
+
+_overlaybd_template_failed() {
+	local phase message
+	phase="$(_overlaybd_template_phase)"
+	[[ "$phase" == "Failed" ]] || return 1
+	message="$(osb_api template get "$OCI_TEMPLATE_ID" -o json 2>/dev/null | jq -r '.status.message // empty')"
+	log "overlaybd template Failed: ${message:-<no message>}"
+	return 0
+}
+
+template_up_overlaybd() {
+	log "verify: creating the overlaybd template via the opensandbox CLI (publish=oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO)"
+	local created
+	created="$(osb_api template create \
+		--image "$SBX_IMAGE" \
+		--publish "oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO" \
+		--format overlaybd \
+		--resource cpu=1 --resource memory=512Mi --resource disk=2Gi \
+		--warmup-seconds 15 \
+		--metadata origin=fast-sandbox-env-oci \
+		-o json 2>/dev/null)" \
+		|| fail "overlaybd template create failed against $SERVER_URL: $(osb_api template create --image x --publish y --format overlaybd 2>&1 >/dev/null | head -c 400)"
+	OCI_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
+	[[ -n "$OCI_TEMPLATE_ID" && "$OCI_TEMPLATE_ID" != "null" ]] || fail "overlaybd template create carried no templateId"
+	printf '%s' "$OCI_TEMPLATE_ID" > "$WORK/overlaybd-template-id"
+	local attempts=0
+	while ! _overlaybd_template_phase_is_succeeded; do
+		if _overlaybd_template_failed; then
+			failure_dump "overlaybd-template-failed"
+			fail "overlaybd template entered Failed"
+		fi
+		attempts=$((attempts + 1))
+		# OCI builds run the full convertor + Firecracker cold boot in the
+		# builder Pod; give them more room than native (which reuses the
+		# same bound but uploads less).
+		[[ "$attempts" -ge 450 ]] && { failure_dump "overlaybd-template-timeout"; fail "overlaybd template not Succeeded after 450 attempts"; }
+		sleep 2
+	done
+	local manifest_ref
+	manifest_ref="$(osb_api template get "$OCI_TEMPLATE_ID" -o json | jq -r '.status.manifest_ref // empty')"
+	[[ "$manifest_ref" == oci://* ]] || fail "overlaybd template manifestRef is not an oci:// reference: $manifest_ref"
+	log "overlaybd template manifestRef: $manifest_ref"
+	pass "overlaybd SandboxTemplate Succeeded (OCI publication)"
+}
+
+_overlaybd_template_phase_is_succeeded() {
+	[[ "$(_overlaybd_template_phase)" == "Succeeded" ]]
+}
+
+# --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry) ---
+
+# bake_registry_ca retags an already-built image with the registry CA
+# trusted (update-ca-certificates). The upstream Dockerfiles take no CA
+# input, so the env applies a one-layer overlay image; the fastlet (fsb-vm
+# manifest reads), the firecracker-runtime (ublkd block reads via libcurl)
+# and the sandboxtemplate-builder (fsb-vm push) all consume it.
+bake_registry_ca() { # <image>
+	local image="$1"
+	docker image inspect "$image" >/dev/null 2>&1 || die "image $image missing for the registry CA bake"
+	docker build ${DOCKER_BUILD_FLAGS:-} --quiet \
+		--build-arg BASE_IMAGE="$image" \
+		-t "$image" -f "$CA_DIR/Dockerfile.ca-bake" "$CA_DIR" >/dev/null \
+		|| die "registry CA bake failed for $image"
+}
+
+registry_ca_up() {
+	[[ "$OCI_STACK" == 1 ]] || {
+		log "OCI stack disabled (OCI_STACK=0); skipping the registry CA"
+		return 0
+	}
+	command -v openssl >/dev/null 2>&1 || die "openssl is required for the OCI registry certificates"
+	mkdir -p "$CA_DIR"
+	# The CA persists in $WORK and is reused across runs; the serving
+	# certificate is re-issued every run (cheap, and the Service DNS name
+	# is fixed while the key material rotates).
+	if [[ ! -s "$CA_DIR/ca.crt" || ! -s "$CA_DIR/ca.key" ]]; then
+		openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+			-keyout "$CA_DIR/ca.key" -out "$CA_DIR/ca.crt" \
+			-subj "/CN=fast-sandbox-env-registry-ca" \
+			-addext "basicConstraints=critical,CA:TRUE" \
+			-addext "keyUsage=critical,keyCertSign" >/dev/null 2>&1 \
+			|| die "registry CA generation failed"
+	fi
+	openssl req -newkey rsa:4096 -sha256 -nodes \
+		-keyout "$CA_DIR/server.key" -out "$CA_DIR/server.csr" \
+		-subj "/CN=$OCI_REGISTRY_HOST" >/dev/null 2>&1 \
+		|| die "registry server key generation failed"
+	cat > "$CA_DIR/server.ext" <<EXT
+subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST
+EXT
+	openssl x509 -req -sha256 -days 365 \
+		-in "$CA_DIR/server.csr" -CA "$CA_DIR/ca.crt" -CAkey "$CA_DIR/ca.key" \
+		-CAcreateserial -out "$CA_DIR/server.crt" \
+		-extfile "$CA_DIR/server.ext" >/dev/null 2>&1 \
+		|| die "registry server certificate signing failed"
+	cat > "$CA_DIR/Dockerfile.ca-bake" <<'EOF_DOCKERFILE'
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY ca.crt /usr/local/share/ca-certificates/fast-sandbox-env-registry.crt
+RUN update-ca-certificates
+EOF_DOCKERFILE
+	# The images are retagged in place; build_images/template_up bake right
+	# after producing them.
+	pass "registry CA ready ($OCI_REGISTRY_HOST)"
+}
+
+registry_up() {
+	[[ "$OCI_STACK" == 1 ]] || {
+		log "OCI stack disabled (OCI_STACK=0); skipping the OCI registry"
+		return 0
+	}
+	docker pull -q "$OCI_REGISTRY_IMAGE" >/dev/null || die "pull $OCI_REGISTRY_IMAGE failed"
+	docker pull -q "$OCI_HTPASSWD_IMAGE" >/dev/null || die "pull $OCI_HTPASSWD_IMAGE failed"
+	kind load docker-image "$OCI_REGISTRY_IMAGE" --name "$KIND_CLUSTER" >/dev/null
+	# Namespace is also ensured by credentials_up; keep this stage self-contained.
+	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	# Registry credentials (one account with push+pull, shared by the
+	# builder publication and the node range reads — the upstream ublkd has
+	# a service-wide credential context anyway).
+	docker run --rm --entrypoint htpasswd "$OCI_HTPASSWD_IMAGE" \
+		-Bbn "$OCI_REGISTRY_USER" "$OCI_REGISTRY_PASSWORD" > "$WORK/registry-htpasswd" \
+		|| die "htpasswd generation failed"
+	kubectl -n "$RESOURCE_NS" create secret generic registry-htpasswd \
+		--from-file=htpasswd="$WORK/registry-htpasswd" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	kubectl -n "$RESOURCE_NS" create secret tls registry-tls \
+		--cert="$CA_DIR/server.crt" --key="$CA_DIR/server.key" \
+		--dry-run=client -o yaml | kubectl apply -f - >/dev/null
+	cat > "$GEN_DIR/oci-registry.yaml" <<YAML
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: $RESOURCE_NS
+  labels: {app: fast-sandbox-env-registry}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: fast-sandbox-env-registry}
+  template:
+    metadata:
+      labels: {app: fast-sandbox-env-registry}
+    spec:
+      containers:
+      - name: registry
+        image: $OCI_REGISTRY_IMAGE
+        ports:
+        - containerPort: 5000
+        env:
+        - name: REGISTRY_HTTP_ADDR
+          value: :5000
+        - name: REGISTRY_HTTP_TLS_CERTIFICATE
+          value: /tls/tls.crt
+        - name: REGISTRY_HTTP_TLS_KEY
+          value: /tls/tls.key
+        - name: REGISTRY_AUTH
+          value: htpasswd
+        - name: REGISTRY_AUTH_HTPASSWD_REALM
+          value: fast-sandbox-env-registry
+        - name: REGISTRY_AUTH_HTPASSWD_PATH
+          value: /auth/htpasswd
+        readinessProbe:
+          # /v2/ answers 401 unauthenticated; TLS + auth reachable is the point.
+          exec:
+            command: [/bin/sh, -ec, 'nc -z 127.0.0.1 5000']
+          periodSeconds: 5
+        volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+        - name: auth
+          mountPath: /auth
+          readOnly: true
+      volumes:
+      - name: tls
+        secret: {secretName: registry-tls}
+      - name: auth
+        secret: {secretName: registry-htpasswd}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: $RESOURCE_NS
+  labels: {app: fast-sandbox-env-registry}
+spec:
+  ports:
+  - name: https
+    port: 443
+    targetPort: 5000
+  selector:
+    app: fast-sandbox-env-registry
+YAML
+	kubectl apply -f "$GEN_DIR/oci-registry.yaml" >/dev/null
+	kubectl -n "$RESOURCE_NS" rollout status deploy/registry --timeout=180s >/dev/null \
+		|| { failure_dump "registry-rollout"; fail "the in-cluster OCI registry did not become ready"; }
+	pass "in-cluster OCI registry up (https://$OCI_REGISTRY_HOST)"
+}
+
+# bake_registry_ca_into_images retags the fsb images with the registry CA
+# right after they are built (OCI_STACK=1 only).
+bake_registry_ca_into_images() {
+	[[ "$OCI_STACK" == 1 ]] || return 0
+	log "baking the registry CA into the fsb images"
+	bake_registry_ca "$IMG_FASTLET"
+	bake_registry_ca "$IMG_RUNTIME"
+}
+
 
 pool_pods() {
 	kubectl -n "$RESOURCE_NS" get pods \
@@ -1209,6 +1484,56 @@ render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
 			next }
 		{ print }
 	' "$src" > "$out"
+	# OverlayBD fragment: the OCI flag appends to the fastlet's env list and
+	# the shared node mounts (tools read-only, the ublkd control socket, the
+	# host /dev so ublk devices reach the VMs) append to its volumeMounts —
+	# two separate tokens so neither YAML list gains a duplicate key. The
+	# registry credentials ride the pool controller's compiled
+	# fast-sandbox-registry projection (env + volume injected by the
+	# controller), not this manifest.
+	if [[ "$OCI_STACK" == 1 ]]; then
+		local oci_env oci_mounts volumes
+		oci_env="$(cat <<'ENVS'
+        - name: FAST_SANDBOX_OCI_ENABLED
+          value: "true"
+ENVS
+)"
+		oci_mounts="$(cat <<'MOUNTS'
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+          readOnly: true
+        - name: oci-socket
+          mountPath: /run/fast-sandbox/overlaybd
+        - name: host-dev
+          mountPath: /dev
+MOUNTS
+)"
+		volumes="$(cat <<'VOLUMES'
+      - name: oci-tools
+        hostPath:
+          path: /opt/fast-sandbox/oci
+          type: DirectoryOrCreate
+      - name: oci-socket
+        hostPath:
+          path: /run/fast-sandbox/overlaybd
+          type: DirectoryOrCreate
+      - name: host-dev
+        hostPath:
+          path: /dev
+          type: Directory
+VOLUMES
+)"
+		# POSIX-safe token substitution: BSD awk rejects newline-bearing -v
+		# values, so the fragments travel through ENVIRON instead.
+		oci_env="$oci_env" oci_mounts="$oci_mounts" oci_volumes="$volumes" awk '
+			/^# @OCI_FASTLET_ENV@$/ { printf "%s\n", ENVIRON["oci_env"]; next }
+			/^# @OCI_FASTLET_MOUNTS@$/ { printf "%s\n", ENVIRON["oci_mounts"]; next }
+			/^# @OCI_FASTLET_VOLUMES@$/ { printf "%s\n", ENVIRON["oci_volumes"]; next }
+			{ print }
+		' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+	else
+		grep -v '^# @OCI_FASTLET_' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+	fi
 	# Leftover-token guard: match only value positions (key: ...@T@...),
 	# never the header comments that document the tokens themselves.
 	if grep -Eq '^[[:space:]]*[A-Za-z][A-Za-z0-9]*:.*@[A-Z_]+@' "$out"; then
@@ -1347,6 +1672,13 @@ fastpath_resource_pool = "@POOL_NAME@"
 fastpath_wait_ready_seconds = 30.0
 template_s3_publish_secret = "sandbox-oss-credentials"
 TOML
+	if [[ "$OCI_STACK" == 1 ]]; then
+		# OverlayBD templates publish through the in-cluster registry; the
+		# server bakes this Secret name as output.publishSecretRef.
+		cat >> "$GEN_DIR/osb-server-config.toml" <<TOML
+template_oci_publish_secret = "$OCI_REGISTRY_SECRET"
+TOML
+	fi
 	if [[ "$IDLE_PAUSE" == "1" ]]; then
 		# Dotted keys nest the redis sub-table.
 		cat >> "$GEN_DIR/osb-server-config.toml" <<TOML
@@ -2175,6 +2507,83 @@ snapshot_verify() {
 	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
 }
 
+# --- stage: overlaybd verify (OCI template -> sandbox -> snapshot -> restore) ----
+
+# Single-cluster overlaybd round trip beside the native verifies. The OCI
+# template is built by template_up (OCI_STACK=1); every step here exercises
+# the OverlayBD path: the template publishes rootfs/snapfiles to the
+# in-cluster registry, the server resolves status.manifestRef as the
+# template-mode create image, the fastlet attaches ublk devices for the
+# on-demand boot, and the snapshot publishes an immutable oci:// pair that
+# restores through the server's manifest_ref restore branch.
+overlaybd_verify() {
+	[[ "$OCI_STACK" == 1 ]] || {
+		log "OCI stack disabled (OCI_STACK=0); skipping the overlaybd verify"
+		return 0
+	}
+	[[ -n "$OCI_TEMPLATE_ID" ]] || OCI_TEMPLATE_ID="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
+	[[ -n "$OCI_TEMPLATE_ID" ]] || die "no overlaybd template id at $WORK/overlaybd-template-id (run up first)"
+
+	local created out source_id snapshot_id restore_id restored
+	local t0 t1 t2 t3
+	t0="$(now_ms)"
+	log "verify (overlaybd): creating a sandbox via the opensandbox CLI (templateId=$OCI_TEMPLATE_ID)"
+	created="$(osb_api sandbox create --template "$OCI_TEMPLATE_ID" --timeout 1h \
+		--metadata origin=fast-sandbox-env-overlaybd --skip-health-check -o json 2>/dev/null)" \
+		|| fail "overlaybd sandbox create failed against $SERVER_URL"
+	source_id="$(printf '%s' "$created" | jq -r '.id')"
+	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "overlaybd create response carried no id"
+	VERIFY_ID="$source_id"
+	wait_for "overlaybd sandbox Running (ublk on-demand boot)" 600 sandbox_running
+	t1="$(now_ms)"
+	wait_for "overlaybd execd /ping 200 through the gateway" 100 execd_ping_ok
+	log "verify (overlaybd): $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
+	pass "overlaybd: template-mode create -> on-demand boot -> execd /ping OK"
+
+	# Snapshot the OCI-source sandbox: the server omits template_name for
+	# oci:// sources and restores from the returned manifest_ref.
+	log "verify (overlaybd): osb snapshot create $source_id --name env-verify-oci"
+	t1="$(now_ms)"
+	out="$(osb_api snapshot create "$source_id" --name env-verify-oci -o json 2>/dev/null)" \
+		|| fail "overlaybd snapshot create failed for $source_id"
+	snapshot_id="$(printf '%s' "$out" | jq -r '.id')"
+	[[ -n "$snapshot_id" && "$snapshot_id" != "null" ]] || fail "overlaybd snapshot create carried no id"
+	wait_for "poll osb snapshot get $snapshot_id until Ready (OCI publication)" 300 snapshot_ready "$snapshot_id"
+	t2="$(now_ms)"
+	log "verify (overlaybd): $snapshot_id snapshot create->Ready $(( (t2 - t1) / 1000000 ))ms"
+	pass "overlaybd: snapshot published (OCI rootfs/snapfiles pair)"
+
+	# Restore boots the published oci:// artifact set via the server's
+	# manifest_ref restore branch.
+	log "verify (overlaybd): osb sandbox create --snapshot-id $snapshot_id"
+	t2="$(now_ms)"
+	restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
+		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
+		--skip-health-check -o json 2>/dev/null)" \
+		|| fail "overlaybd restore create (snapshotId=$snapshot_id) failed"
+	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
+	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "overlaybd restore create carried no id"
+	VERIFY_ID="$restore_id"
+	wait_for "overlaybd restored sandbox Running" 600 sandbox_running
+	t3="$(now_ms)"
+	wait_for "overlaybd restored execd /ping 200 through the gateway" 300 execd_ping_ok
+	log "verify (overlaybd): restored $restore_id create->Running $(( (t3 - t2) / 1000000 ))ms"
+	pass "overlaybd: restore boots the OCI artifact set -> execd /ping OK"
+
+	# Cleanup; deleting the OCI snapshot row also removes the published
+	# rootfs/snapfiles manifests from the registry (upstream semantics).
+	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $restore_id failed"
+	wait_for "overlaybd restored sandbox deleted" 120 verify_sandbox_gone
+	VERIFY_ID="$source_id"
+	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: kill $source_id failed"
+	wait_for "overlaybd source sandbox deleted" 120 verify_sandbox_gone
+	osb_api snapshot delete "$snapshot_id" >/dev/null 2>&1 \
+		|| log "verify cleanup: snapshot delete $snapshot_id failed"
+	pass "overlaybd: cleanup (restored + source sandboxes, snapshot row)"
+}
+
 # --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py) -----------------
 
 sdk_e2e() {
@@ -2283,6 +2692,21 @@ status() {
 	else
 		echo "  (not deployed)"
 	fi
+	if [[ "$OCI_STACK" == 1 ]]; then
+		log "status: OverlayBD OCI"
+		if kubectl -n "$RESOURCE_NS" get deploy registry >/dev/null 2>&1; then
+			printf '  registry:       %s (%s)\n' "$OCI_REGISTRY_HOST" \
+				"$(kubectl -n "$RESOURCE_NS" get deploy registry -o jsonpath='{.status.readyReplicas}/{.status.replicas}')"
+		else
+			echo "  registry:       (not deployed)"
+		fi
+		local tid ref
+		for tid in "$(cat "$WORK/template-id" 2>/dev/null || true)" "$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"; do
+			[[ -n "$tid" ]] || continue
+			ref="$(osb_api template get "$tid" -o json 2>/dev/null | jq -r '[.status.phase, .status.manifest_ref // "-"] | join(" ")')"
+			printf '  template %s: %s\n' "$tid" "${ref:-unreachable}"
+		done
+	fi
 }
 
 env_summary() {
@@ -2371,7 +2795,9 @@ when the host cannot reach module VCS hosts directly),
 IMAGE_<COMPONENT>, POOL_MIN/POOL_MAX, WARM_IMAGES=1, SBX_IMAGE, EXECD,
 XFS_STATEROOT=0, OSB_PACKAGE/OSB_BIN, SKIP_TOOL_INSTALL=1, SKIP_LEFTOVER_CLEAN=1,
 IDLE_PAUSE=1 (OSEP-0024 idle-pause/wake profile; REDIS_IMAGE overrides the
-Redis image). See the header of this script.
+Redis image), OCI_STACK=0 (disable the OverlayBD OCI registry + node stack;
+default on — native and overlaybd paths run side by side in one cluster).
+See the header of this script.
 EOF
 	exit 1
 }
@@ -2401,7 +2827,7 @@ case "$ACTION" in
 			go version
 			docker --version
 			echo "cluster=$KIND_CLUSTER single=$KIND_SINGLE rustfs=$RUSTFS_IMAGE port=$RUSTFS_PORT bucket=$RUSTFS_BUCKET"
-			echo "sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES"
+			echo "sbxImage=$SBX_IMAGE execd=$EXECD warmImages=$WARM_IMAGES ociStack=$OCI_STACK registry=$([[ "$OCI_STACK" == 1 ]] && echo "$OCI_REGISTRY_HOST" || echo off)"
 			echo "pool=$POOL_NAME poolMin=$POOL_MIN egress=$IMG_EGRESS"
 			echo "server=$IMG_SERVER ingress=$IMG_INGRESS fastpath=$FASTPATH_ENDPOINT"
 			echo "images: controller=$IMG_CONTROLLER runtime=$IMG_RUNTIME"
@@ -2420,12 +2846,14 @@ case "$ACTION" in
 		run_stage "opensandbox CLI (osb, latest from PyPI)" ensure_osb
 		run_stage "sysctl (fs.inotify)" sysctl_set
 		run_stage "fast-sandbox checkout @ pinned commit" ensure_fsb
+		run_stage "OCI registry CA + serving certificate" registry_ca_up
 		run_stage "build images (fast-sandbox + OpenSandbox)" build_images
 		run_stage "XFS StateRoot (reflink)" stateroot_xfs_up
 		run_stage "render kind config" render_kind_config
 		run_stage "kind cluster (KVM passthrough + labels)" kind_up
 		run_stage "RustFS + bucket" rustfs_up
 		run_stage "RustFS endpoint (kind network)" resolve_rustfs_endpoint
+		run_stage "OCI registry (in-cluster, TLS)" registry_up
 		run_stage "CRDs + control plane" control_plane_up
 		run_stage "credentials (publish/pull)" credentials_up
 		run_stage "firecracker runtime readiness + DART (P2P)" runtime_up
@@ -2433,11 +2861,11 @@ case "$ACTION" in
 		run_stage "OpenSandbox server + ingress gateway" opensandbox_up
 		run_stage "SandboxTemplate build (opensandbox CLI)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
-		run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
-		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
+		run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
 		run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 		run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
 		run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
+		run_stage "overlaybd verify (OCI template -> ublk boot -> snapshot -> restore)" overlaybd_verify
 		trap - ERR
 		stage_summary
 		env_summary
