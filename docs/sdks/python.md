@@ -463,7 +463,7 @@ Read current sandbox resource usage with `await sandbox.get_metrics()`. This is 
 | Create from a published template | `Sandbox.create_from_template(template_id, timeout=..., connection_config=config)` |
 | Patch metadata | `sandbox.patch_metadata` or `manager.patch_sandbox_metadata` |
 
-These APIs also exist on the synchronous SDK. Snapshot creation and template builds are asynchronous: inspect status before restoring or using a template. Templates must reach `Succeeded`; template-backed creation requires a TTL and inherits environment, resources, volumes, and lifecycle hooks from the template. Metadata patch values add/replace keys; `None` deletes a key. See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+These APIs also exist on the synchronous SDK. Snapshot creation and template builds are asynchronous: inspect status before restoring or using a template. Templates must reach `Succeeded`; template-backed creation requires a TTL and inherits environment, resources, volumes, and lifecycle hooks from the template. Metadata patch values add/replace keys; `None` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes, restores a new sandbox, and retains the snapshot for reuse:
 

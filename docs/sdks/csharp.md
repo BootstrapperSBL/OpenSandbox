@@ -433,7 +433,7 @@ Read current sandbox resource usage with `await sandbox.Metrics.GetMetricsAsync(
 | Create from a published template | `Sandbox.CreateFromTemplateAsync` with `SandboxCreateFromTemplateOptions` |
 | Patch metadata | `sandbox.PatchMetadataAsync` or `manager.PatchSandboxMetadataAsync` |
 
-Poll snapshot status before restoring. Template builds are asynchronous; wait for `Succeeded` before use. Template-backed creation requires `TimeoutSeconds` and inherits workload configuration from the published template. Metadata patch values add/replace keys; `null` deletes a key. See the [lifecycle contract](/api/#1-sandbox-lifecycle-yml) for backend constraints.
+Poll snapshot status before restoring. Template builds are asynchronous; wait for `Succeeded` before use. Template-backed creation requires `TimeoutSeconds` and inherits workload configuration from the published template. Metadata patch values add/replace keys; `null` deletes a key. See the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml) for backend constraints.
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. This example waits up to 15 minutes and retains the snapshot for reuse:
 
