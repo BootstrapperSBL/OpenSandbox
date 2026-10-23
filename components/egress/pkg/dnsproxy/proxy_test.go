@@ -474,10 +474,7 @@ func startLargeAnswerUpstream(t *testing.T, records int) string {
 		_ = w.WriteMsg(resp)
 	})
 
-	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	require.NoError(t, err)
-	listener, err := net.Listen("tcp", packetConn.LocalAddr().String())
-	require.NoError(t, err)
+	packetConn, listener := listenUDPAndTCPOnOnePort(t)
 	for _, server := range []*dns.Server{
 		{PacketConn: packetConn, Handler: handler},
 		{Listener: listener, Handler: handler},
@@ -489,6 +486,23 @@ func startLargeAnswerUpstream(t *testing.T, records int) string {
 		<-started
 	}
 	return packetConn.LocalAddr().String()
+}
+
+// listenUDPAndTCPOnOnePort binds UDP and TCP on the same free port, retrying
+// when the TCP side of the port the UDP socket got is already taken.
+func listenUDPAndTCPOnOnePort(t *testing.T) (net.PacketConn, net.Listener) {
+	t.Helper()
+	for range 10 {
+		packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+		require.NoError(t, err)
+		listener, err := net.Listen("tcp", packetConn.LocalAddr().String())
+		if err == nil {
+			return packetConn, listener
+		}
+		_ = packetConn.Close()
+	}
+	t.Fatal("no port free for both UDP and TCP")
+	return nil, nil
 }
 
 // A client retries over TCP after a truncated UDP answer; that retry must
