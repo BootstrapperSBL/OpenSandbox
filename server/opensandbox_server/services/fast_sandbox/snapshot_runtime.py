@@ -154,9 +154,8 @@ class FastSandboxSnapshotRuntime:
 
         source_image = self._source_sandbox_image(ns, sandbox_id)
         if source_image is None:
-            # The artifact encoding decides template_name semantics: native
-            # requires it, OCI must omit it. Without the source image the
-            # wrong branch is a guaranteed upstream rejection, so fail here.
+            # The encoding decides template_name semantics; guessing wrong is
+            # a guaranteed upstream rejection.
             return SnapshotRuntimeStatus(
                 state=SnapshotState.FAILED,
                 reason="snapshot_runtime_create_failed",
@@ -172,10 +171,8 @@ class FastSandboxSnapshotRuntime:
             sandbox=namespaced_reference(ns, sandbox_id),
         )
         if not source_image.startswith(OCI_IMAGE_PREFIX):
-            # native + S3 snapshots publish under a template-name index key.
-            # OCI snapshots must omit it: their rootfs/snapfiles tags are
-            # derived from the Fastlet-assigned random snapshot_id, and the
-            # restore image is the returned manifest_ref.
+            # native publishes under a template-name index key; OCI snapshots
+            # omit it and restore from the returned manifest_ref.
             request.template_name = snapshot_name
         request.metadata[SNAPSHOT_ID_METADATA_KEY] = snapshot_id
         try:
@@ -211,11 +208,7 @@ class FastSandboxSnapshotRuntime:
         )
 
     def _source_sandbox_image(self, namespace: str, sandbox_id: str) -> Optional[str]:
-        """Read the source Sandbox CR's image to classify the artifact encoding.
-
-        Returns None when the CR is unreadable (missing or API errors) — the
-        caller must not guess template_name semantics in that case.
-        """
+        """The source Sandbox CR's image, or None when unreadable."""
         try:
             cr = self._k8s_client.get_custom_object(
                 group=GROUP,
@@ -224,7 +217,7 @@ class FastSandboxSnapshotRuntime:
                 plural=SANDBOX_PLURAL,
                 name=sandbox_id,
             )
-        except Exception as exc:  # noqa: BLE001 - any read failure blocks the branch decision
+        except Exception as exc:  # noqa: BLE001 - unreadable means unclassifiable
             logger.warning(
                 f"Failed to read Sandbox CR {namespace}/{sandbox_id} before "
                 f"snapshot: {exc}"
@@ -358,12 +351,9 @@ class FastSandboxSnapshotRuntime:
         template_name = (getattr(info, "template_name", "") or "").strip() or None
 
         if phase_name in _TERMINAL_READY_PHASES:
-            # The restore image depends on the publication mode. Native + S3
-            # snapshots publish under index/<sha256(templateName)>.json (same
-            # content-addressed layout as template golden images), keyed by
-            # the snapshot's template name. OCI snapshots omit the template
-            # name and restore from the returned immutable snapfiles
-            # manifest reference. A success carrying neither is unpublishable.
+            # native restores via the template-name index key, OCI via the
+            # returned immutable manifest_ref; a success with neither is
+            # unpublishable.
             if template_name:
                 return SnapshotRuntimeStatus(
                     state=SnapshotState.READY,

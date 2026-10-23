@@ -538,8 +538,7 @@ def test_resolve_overlaybd_without_manifest_ref_404(overlaybd_service, crs):
 
 
 def test_resolve_overlaybd_legacy_s3_manifest_demands_rebuild(overlaybd_service, crs):
-    """Pre-OCI overlaybd+S3 rows can never become runnable: the resolve gate
-    says so instead of handing out a dead artifact reference."""
+    """Legacy overlaybd+S3 rows are unrunnable: resolve says so."""
     record = overlaybd_service.create_template(_overlaybd_request())
     crs.set_status(
         "ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/legacy/manifest"}

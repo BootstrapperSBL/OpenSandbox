@@ -15,19 +15,11 @@
 #   /var/lib/fast-sandbox  StateRoot; prepared by integration-env.sh up
 #                          (XFS loop image when XFS_STATEROOT=1 so
 #                          per-sandbox rootfs copies are CoW reflinks)
-#   # @UBLK_DEV_MOUNT@  when OCI_STACK=1, rendered FIRST: a full bind of the
-#                          host /dev. OverlayBD's ublk devices are created by
-#                          the host kernel at add time (the control misc node
-#                          /dev/ublk-control, the queue char nodes
-#                          /dev/ublkc<N> under the ublk-char major, and
-#                          per-dynamic-major block nodes /dev/ublkb<N> — this
-#                          kernel registers no block major). A kind node's
-#                          /dev is a private tmpfs, so no static mount or
-#                          mknod can track them; binding the host devtmpfs
-#                          lets the builder Pods, the node ublkd sidecar and
-#                          fastlets see every node as the kernel creates it.
-#                          It stays the FIRST extraMount so the private
-#                          /dev/shm bind below shadows the host shm again.
+#   # @UBLK_DEV_MOUNT@  when OCI_STACK=1, rendered FIRST: a full bind of
+#                          the host /dev, so ublk device nodes (created by
+#                          the kernel at add time, block majors dynamic)
+#                          are visible inside the node. FIRST so the
+#                          private /dev/shm bind below shadows it back.
 #
 # Node state roots are PRIVATE per node: each node container binds its
 # own host subdirectory (control-plane/ or worker/) at the same

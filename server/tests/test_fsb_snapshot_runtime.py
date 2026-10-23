@@ -142,8 +142,7 @@ def _runtime(
 ) -> tuple[FastSandboxSnapshotRuntime, FakeFastPathClient, WatchRecordingK8sClient]:
     fastpath = fastpath or FakeFastPathClient()
     k8s = k8s or WatchRecordingK8sClient()
-    # Default the source sandbox to a native image so the create path keeps
-    # setting template_name; OCI-source tests override the image explicitly.
+    # Default source image is native; OCI-source tests override it.
     for namespace in ("default", "tenant-a"):
         k8s.sandbox_crs.setdefault((namespace, SANDBOX_ID), _sandbox_cr("alpine:3.19"))
     runtime = FastSandboxSnapshotRuntime(
@@ -294,8 +293,7 @@ def test_inspect_fails_when_succeeded_without_template_name() -> None:
 
 
 def test_inspect_succeeded_oci_manifest_restores_from_manifest_ref() -> None:
-    """OCI snapshots omit the template name; the immutable snapfiles
-    manifest reference is the runnable restore image."""
+    """OCI snapshots restore from the immutable manifest reference."""
     fastpath = FakeFastPathClient()
     manifest_ref = "oci://registry.example.com/sandbox/snapshots@sha256:def456"
     fastpath.get_by_name[("default", build_public_snapshot_name(SNAPSHOT_ID))] = _Response(

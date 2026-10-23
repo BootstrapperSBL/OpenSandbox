@@ -1698,12 +1698,9 @@ class CreateFsbTemplateRequest(BaseModel):
         ...,
         min_length=1,
         description=(
-            "Artifact publish destination for the built snapshot set. "
-            "format=overlaybd (default) requires a repository-only OCI "
-            "target, e.g. 'oci://registry.example.com/sandbox/templates' "
-            "(tags and digests are rejected; the system generates an "
-            "immutable per-build tag pair). format=native requires an "
-            "S3-compatible target, e.g. 's3://bucket/publish'."
+            "Publish destination for the built snapshot set: "
+            "'oci://registry/repository' for format=overlaybd (default), "
+            "'s3://bucket/prefix' for format=native."
         ),
     )
     format: Literal["native", "overlaybd"] = Field(
@@ -1728,10 +1725,8 @@ class FsbTemplateStatus(BaseModel):
         None,
         alias="manifestRef",
         description=(
-            "Artifact reference of the published snapshot set — "
-            "s3://.../manifest.json for format=native, or the immutable "
-            "oci://registry/repo@sha256:... manifest for format=overlaybd "
-            "(the runnable reference for template-mode creates); present "
+            "Published artifact reference — oci://...@sha256 for "
+            "format=overlaybd, s3://.../manifest.json for native; present "
             "when Succeeded"
         ),
     )

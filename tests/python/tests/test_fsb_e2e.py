@@ -66,9 +66,7 @@ from opensandbox.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 FSB_TEMPLATE_ID = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ID", "")
-# The suite runs once per template in the integration env (native first,
-# then the overlaybd one); each carries a different origin metadata value,
-# so the catalog assertions key off what the env actually passed in.
+# Set per run by the env's sdk-e2e (native + overlaybd templates differ).
 FSB_TEMPLATE_ORIGIN = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ORIGIN", "fast-sandbox-env")
 # alpine ships busybox wget: a real HTTPS request, so egress probes
 # exercise both gates of the fsb dns+nft chain (DNS resolution and

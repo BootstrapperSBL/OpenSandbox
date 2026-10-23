@@ -64,13 +64,10 @@
 #   IDLE_PAUSE_PARK_BUDGET  gateway wake park budget (default 5s; set e.g. 100ms to
 #                    force every wake through the marked-503 + client-retry path)
 #   REDIS_IMAGE      Redis image for the idle-pause profile (default redis:7-alpine)
-#   OCI_STACK        OverlayBD OCI profile, default 1: in-cluster TLS registry
-#                    (its CA is baked into the fsb images), the chart's
-#                    runtime.oci node stack (tools init + overlaybd-ublkd
-#                    sidecar), an overlaybd template beside the native one,
-#                    and an overlaybd sandbox + snapshot round trip. Native
-#                    keeps running beside it (nodes need ublk: kernel
-#                    CONFIG_BLK_DEV_UBLK, /dev/ublkc*). 0 = native-only.
+#   OCI_STACK        OverlayBD OCI profile, default 1: in-cluster TLS
+#                    registry (CA baked into the fsb images), the chart's
+#                    runtime.oci node stack, and a full overlaybd verify
+#                    pass beside native. Nodes need ublk support. 0 = native-only.
 #
 # Every stage logs to $WORK/logs/; failures dump component logs to
 # logs/failure-<task>-<ts>.txt before exiting (never silently).
@@ -154,21 +151,11 @@ IMG_OCI_TOOLS="${IMAGE_OCI_TOOLS:-opensandbox/oci-tools:dev}"
 IMG_RUNTIME="${IMAGE_RUNTIME:-opensandbox/fsb-firecracker-runtime:dev}"
 IMG_EGRESS="${EGRESS_IMAGE:-docker.io/opensandbox/egress:latest}"
 
-# OverlayBD OCI stack — single-cluster shape: the OCI on-demand loading
-# stack runs beside native, and both template paths are verified in one
-# environment. Requires node ublk support (CONFIG_BLK_DEV_UBLK;
-# `modprobe ublk_drv` when built as a module). When enabled the env:
-#   - generates a local CA + TLS serving cert and runs an in-cluster
-#     registry (fsb-vm and overlaybd require HTTPS; no plain-http escape
-#     hatch exists upstream), baking the CA into the fsb-fastlet,
-#     fsb-firecracker-runtime and sandboxtemplate-builder images;
-#   - installs the chart's runtime.oci node stack (tools init +
-#     overlaybd-ublkd sidecar + agent flag);
-#   - adds the registry credentials, the server's
-#     template_oci_publish_secret, and the pool fastlet OCI mounts;
-#   - builds an overlaybd template beside the native one and verifies a
-#     sandbox + snapshot round trip from it.
-# OCI_STACK=0 keeps the previous native-only environment.
+# OverlayBD OCI stack, default on: one cluster serves both template paths.
+# Requires node ublk support (CONFIG_BLK_DEV_UBLK). Enables the in-cluster
+# TLS registry (CA baked into the fsb images), the chart's runtime.oci node
+# stack, the registry credentials/server setting, and the overlaybd verify
+# pass. OCI_STACK=0 is the native-only escape hatch.
 OCI_STACK="${OCI_STACK:-1}"
 OCI_REGISTRY_IMAGE="${OCI_REGISTRY_IMAGE:-registry:2}"
 OCI_HTPASSWD_IMAGE="${OCI_HTPASSWD_IMAGE:-httpd:2.4-alpine}"
@@ -1215,11 +1202,8 @@ template_up() {
 	return 0
 }
 
-# Same build inputs as the native template, published through the in-cluster
-# OCI registry (format=overlaybd): the server projects it onto a
-# SandboxTemplate CR whose builder runs fsb-vm build + push, and the
-# resulting status.manifestRef (oci://host/repo@sha256:...) is the runnable
-# artifact the server hands to FastPath on template-mode creates.
+# An overlaybd template beside the native one: same inputs, published to
+# the in-cluster registry. status.manifestRef is the runnable artifact.
 OCI_TEMPLATE_ID=""
 
 _overlaybd_template_phase() {
@@ -1259,9 +1243,7 @@ template_up_overlaybd() {
 			fail "overlaybd template entered Failed"
 		fi
 		attempts=$((attempts + 1))
-		# OCI builds run the full convertor + Firecracker cold boot in the
-		# builder Pod; give them more room than native (which reuses the
-		# same bound but uploads less).
+		# OCI builds run the convertor + a Firecracker cold boot.
 		[[ "$attempts" -ge 450 ]] && { failure_dump "overlaybd-template-timeout"; fail "overlaybd template not Succeeded after 450 attempts"; }
 		sleep 2
 	done
@@ -1278,11 +1260,9 @@ _overlaybd_template_phase_is_succeeded() {
 
 # --- stage: OverlayBD OCI registry (CA, image CA-bake, in-cluster registry) ---
 
-# bake_registry_ca retags an already-built image with the registry CA
-# trusted (update-ca-certificates). The upstream Dockerfiles take no CA
-# input, so the env applies a one-layer overlay image; the fastlet (fsb-vm
-# manifest reads), the firecracker-runtime (ublkd block reads via libcurl)
-# and the sandboxtemplate-builder (fsb-vm push) all consume it.
+# bake_registry_ca retags a built image with the registry CA trusted; the
+# upstream Dockerfiles take no CA input. Consumers: fastlet (fsb-vm), the
+# firecracker-runtime (ublkd), the sandboxtemplate-builder (push).
 bake_registry_ca() { # <image>
 	local image="$1"
 	docker image inspect "$image" >/dev/null 2>&1 || die "image $image missing for the registry CA bake"
@@ -1299,16 +1279,11 @@ registry_ca_up() {
 	}
 	command -v openssl >/dev/null 2>&1 || die "openssl is required for the OCI registry certificates"
 	mkdir -p "$CA_DIR"
-	# The CA persists in $WORK and is reused across runs; the serving
-	# certificate is re-issued every run (cheap, and the Service DNS name
-	# is fixed while the key material rotates).
-	# The CA must carry a subjectKeyIdentifier AND no duplicate extensions:
-	# the leaf's authorityKeyIdentifier=keyid is derived from the CA's SKI at
-	# signing time (an openssl-1.1.1 `req -x509` adds no SKI), and a CA whose
-	# extensions were stacked twice (host v3_ca section + -addext) poisons
-	# the WHOLE chain — OpenSSL 3 clients cache every chain member and fail
-	# at ossl_x509v3_cache_extensions:reason(158) even though the leaf text
-	# looks sane. Regenerate on either defect.
+	# The CA persists in $WORK; the serving cert is re-issued per run.
+	# The CA needs a subjectKeyIdentifier (1.1.1 `req -x509` adds none) and
+	# no duplicate extensions (host v3_ca section + -addext stacks them);
+	# either defect makes OpenSSL 3 clients fail chain validation
+	# (cache_extensions reason(158)). Regenerate on either.
 	if [[ ! -s "$CA_DIR/ca.crt" || ! -s "$CA_DIR/ca.key" ]] \
 		|| ! openssl x509 -in "$CA_DIR/ca.crt" -noout -text 2>/dev/null | grep -q "Subject Key Identifier" \
 		|| [[ "$(openssl x509 -in "$CA_DIR/ca.crt" -noout -text 2>/dev/null | grep -c 'X509v3 Basic Constraints')" -gt 1 ]]; then
@@ -1378,9 +1353,7 @@ registry_up() {
 	kind load docker-image "$OCI_REGISTRY_IMAGE" --name "$KIND_CLUSTER" >/dev/null
 	# Namespace is also ensured by credentials_up; keep this stage self-contained.
 	kubectl create namespace "$RESOURCE_NS" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-	# Registry credentials (one account with push+pull, shared by the
-	# builder publication and the node range reads — the upstream ublkd has
-	# a service-wide credential context anyway).
+	# One push+pull account: the node ublkd credential context is service-wide.
 	docker run --rm --entrypoint htpasswd "$OCI_HTPASSWD_IMAGE" \
 		-Bbn "$OCI_REGISTRY_USER" "$OCI_REGISTRY_PASSWORD" > "$WORK/registry-htpasswd" \
 		|| die "htpasswd generation failed"
@@ -1462,12 +1435,9 @@ YAML
 	pass "in-cluster OCI registry up (https://$OCI_REGISTRY_HOST)"
 }
 
-# probe_registry_tls observes the registry from INSIDE a pod using the exact
-# builder image: what certificate the wire actually carries (issuer +
-# fingerprint) and whether the system bundle (the same one Go's fsb-vm reads)
-# validates it. Trust material can be perfect in the Secret and the image and
-# still diverge from what the pod sees — this closes that gap with ground
-# truth instead of another generic TLS failure one build later.
+# probe_registry_tls observes the registry from inside a pod running the
+# builder image: the served certificate and whether the system bundle
+# validates it.
 probe_registry_tls() {
 	local out
 	out="$(kubectl run registry-tls-probe -n "$RESOURCE_NS" \
@@ -1484,11 +1454,8 @@ cert_fingerprint() { # <pem>
 	openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2
 }
 
-# verify_registry_trust proves the SERVING secret carries exactly the
-# certificate registry_ca_up signed for this run (leaf-to-leaf comparison —
-# the leaf's fingerprint differs from the CA's by design). A silent mismatch
-# here costs a full build cycle to discover as "x509: certificate signed by
-# unknown authority" at push time.
+# verify_registry_trust checks the serving Secret carries exactly the
+# certificate signed this run (leaf-to-leaf fingerprints).
 verify_registry_trust() {
 	local signed_fp served_fp
 	signed_fp="$(cert_fingerprint "$CA_DIR/server.crt")"
@@ -1501,8 +1468,8 @@ verify_registry_trust() {
 	pass "registry serving cert matches the env-signed certificate ($signed_fp)"
 }
 
-# verify_image_ca_bake proves the CA is present AND merged into the image's
-# system bundle (update-ca-certificates ran over it).
+# verify_image_ca_bake checks the CA landed in the image and was merged
+# into its system bundle.
 verify_image_ca_bake() { # <image>
 	local ca_fp body
 	ca_fp="$(cert_fingerprint "$CA_DIR/ca.crt")"
@@ -1522,8 +1489,6 @@ verify_image_ca_bake() { # <image>
 	pass "CA baked + merged in $1 ($ca_fp)"
 }
 
-# bake_registry_ca_into_images retags the fsb images with the registry CA
-# right after they are built (OCI_STACK=1 only).
 bake_registry_ca_into_images() {
 	[[ "$OCI_STACK" == 1 ]] || return 0
 	log "baking the registry CA into the fsb images"
@@ -1806,9 +1771,7 @@ render_server_config() { # > $GEN_DIR/osb-server-config.toml
 		-v fastpath="$FASTPATH_ENDPOINT" -v fsb_ns="$RESOURCE_NS" -v pool="$POOL_NAME" \
 		-v execd="$EXECD" -v oci_secret="$OCI_REGISTRY_SECRET" -v oci_stack="$OCI_STACK" '
 		{ if ($0 == "# @OCI_PUBLISH_SECRET@") {
-		    # OverlayBD templates publish through the in-cluster registry; the
-		    # server bakes this Secret name as output.publishSecretRef. Emitted
-		    # in-place so the key stays inside the [kubernetes] table.
+		    # emitted in-place so the key stays inside [kubernetes].
 		    if (oci_stack == "1")
 		      printf "template_oci_publish_secret = \"%s\"\n", oci_secret
 		    next }

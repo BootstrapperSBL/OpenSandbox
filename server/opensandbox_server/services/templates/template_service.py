@@ -90,16 +90,11 @@ _TEMPLATE_NOT_FOUND = {
 
 
 def _publish_validation_error(format: str, publish: str) -> Optional[str]:
-    """Return a rejection reason for a format/publish pair, or None.
+    """Reject format/publish pairs the builder would reject, as a 400 here.
 
-    Mirrors the SandboxTemplate builder's output validation so an invalid
-    destination fails as a 400 at creation instead of a failed build Pod.
-    overlaybd requires ``oci://host/repository``: the host may carry a port
-    but no userinfo (credentials must come from publishSecretRef, and the
-    publish value is echoed back by the template API), the repository path
-    must be non-empty, slash-terminated-free, and free of tag (``:``) or
-    digest (``@``) suffixes — the system generates the build tags itself.
-    native requires an ``s3://bucket`` target with a non-empty bucket.
+    overlaybd: ``oci://host/repository`` — port allowed, no userinfo
+    (credentials live in publishSecretRef), no tag/digest (the system
+    generates the build tags). native: ``s3://bucket/prefix``.
     """
     if format == "overlaybd":
         if not publish.startswith("oci://"):
@@ -439,23 +434,11 @@ class FastSandboxTemplateService:
     def resolve_template_artifact(self, template_id: str) -> tuple[str, list[str]]:
         """Resolve a Succeeded template to its runnable artifact + entrypoint.
 
-        The returned reference depends on the template's output format:
-
-        - ``native``: the TEMPLATE ID (tpl-<uuid>). The builder publishes
-          the content-addressed index under that key, so the runtime pulls
-          and caches this template's exact artifact set — two templates of
-          the same source image never alias each other. The legacy
-          sha256(image) index stays a last-writer-wins fallback for
-          warmImages and older clients.
-        - ``overlaybd``: the template's immutable OCI ``manifest_ref``
-          (oci://registry/repo@sha256:...) from the CRD status — the
-          fast-sandbox OCI publication is the only runnable reference;
-          ``output.publish`` is a build destination, not an image.
-
-        Template-mode Create uses this: unknown, non-Succeeded, or
-        manifest-less templates all yield 404, so no existence information
-        leaks. Reads the DB row only; the watch reactor converges build
-        phase.
+        native → the template id (the builder's content-addressed index key);
+        overlaybd → the CRD's immutable OCI manifest_ref. Unknown,
+        non-Succeeded, or manifest-less templates all yield 404, so no
+        existence information leaks. Reads the DB row only; the watch
+        reactor converges build phase.
         """
         namespace = self._resolve_namespace()
         record = self._repo().get(template_id, namespace)
@@ -471,11 +454,9 @@ class FastSandboxTemplateService:
             return record.template_id, entrypoint
         manifest_ref = record.manifest_ref or ""
         if not manifest_ref.startswith("oci://"):
-            # Succeeded without a resolvable OCI publication: either the CRD
-            # status has not landed yet (transient) or the row predates the
-            # fast-sandbox OCI contract (legacy overlaybd+S3 artifacts are
-            # rejected upstream and can never become runnable). Both are
-            # 404s; the legacy case gets an actionable message for the owner.
+            # Transient (status not landed) or a legacy overlaybd+S3 row
+            # (rejected upstream). Both 404; the legacy message is
+            # actionable for the owner.
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={

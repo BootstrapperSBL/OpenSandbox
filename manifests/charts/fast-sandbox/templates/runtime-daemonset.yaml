@@ -185,9 +185,8 @@ spec:
       # child needs the cluster DNS to resolve the headless Service peers,
       # and a regular Pod identity for the stable HRW node hostname file.
       {{- if .Values.runtime.oci.enabled }}
-      # OCI tools bundle (fsb-vm, OverlayBD tools, convertor) installed
-      # once under the shared node hostPath; the agent, the overlaybd-ublkd
-      # sidecar, the janitor and Fastlet Pods all consume it read-only.
+      # Installs the OCI tools bundle under the shared node hostPath;
+      # agent, overlaybd-ublkd, janitor and Fastlet Pods consume it read-only.
       initContainers:
       - name: install-oci-tools
         image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
@@ -203,9 +202,7 @@ spec:
         imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
         {{- if .Values.runtime.oci.enabled }}
         # The first host-readiness pass pings the node ublkd socket once;
-        # without this gate it races the sidecar's startup by a few hundred
-        # milliseconds, fails, and the node stays unlabeled until the next
-        # 5-minute recheck. Wait (bounded) for the socket, then start.
+        # gate on it so the check doesn't race the sidecar's startup.
         command: ["/bin/sh", "-ec"]
         args:
         - |-
@@ -223,8 +220,7 @@ spec:
             fieldRef:
               fieldPath: metadata.uid
         {{- if .Values.runtime.oci.enabled }}
-        # Relaxes the XFS/reflink node readiness requirement; native
-        # templates stay usable (rootfs copies just take longer).
+        # Relaxes the XFS/reflink node readiness requirement.
         - name: FAST_SANDBOX_OCI_ENABLED
           value: "true"
         {{- end }}
@@ -291,11 +287,8 @@ spec:
           mountPath: /run/fast-sandbox/overlaybd
         {{- end }}
       {{- if .Values.runtime.oci.enabled }}
-      # One shared overlaybd-ublkd per node: hosts every sandbox's ublk
-      # devices behind /run/fast-sandbox/overlaybd/ublkd.sock (fsb-vm
-      # connects directly; the agent does not proxy device ops). Shares the
-      # agent's StateRoot at the same absolute path and the host /dev so
-      # devices created here are visible to the VMs.
+      # One shared ublkd per node: fsb-vm connects directly over the socket;
+      # StateRoot and host /dev must match the agent's view.
       - name: overlaybd-ublkd
         image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
         imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
@@ -393,9 +386,7 @@ spec:
           mountPath: /etc/fast-sandbox/runtime-environments
           readOnly: true
         {{- if .Values.runtime.oci.enabled }}
-        # fsb-vm cleanup of retained ublk devices and checkpoint pack
-        # resources left by deleted Pods (revalidated against Sandbox
-        # absence first).
+        # fsb-vm cleanup of devices and checkpoint packs left by deleted Pods.
         - name: oci-tools
           mountPath: /opt/fast-sandbox/oci
           readOnly: true
@@ -464,21 +455,16 @@ spec:
           # disabled via --containerd-socket= anyway).
           optional: true
       {{- if .Values.runtime.oci.enabled }}
-      # Immutable OCI tools release installed by the init container and
-      # atomically switched under current/; shared read-only with the
-      # overlaybd-ublkd sidecar, the janitor, and Fastlet Pods.
       - name: oci-tools
         hostPath:
           path: /opt/fast-sandbox/oci
           type: DirectoryOrCreate
-      # Root-only ublkd control socket + credential directory shared with
-      # Fastlet Pods (fast-sandbox-registry ConfigMap supplies credentials).
+      # Root-only ublkd control socket shared with Fastlet Pods.
       - name: oci-socket
         hostPath:
           path: /run/fast-sandbox/overlaybd
           type: DirectoryOrCreate
-      # Host device tree: ublk devices created by the sidecar must be
-      # visible to the Firecracker VMs.
+      # Host device tree: ublk devices must be visible to the VMs.
       - name: host-dev
         hostPath:
           path: /dev

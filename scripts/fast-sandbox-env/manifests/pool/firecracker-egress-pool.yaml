@@ -32,10 +32,8 @@
 #   "@FASTLET_IMAGE@"  "@EGRESS_IMAGE@"  "@POOL_MIN@"  "@POOL_MAX@"
 #   # @WARM_IMAGES@  -> warmImages block when WARM_IMAGES=1
 #   # @OCI_FASTLET_ENV@ / # @OCI_FASTLET_MOUNTS@ / # @OCI_FASTLET_VOLUMES@
-#   -> the fastlet OCI env item, its oci-tools/oci-socket/host-dev mounts
-#   and their volumes when OCI_STACK=1 (OverlayBD on-demand loading; the
-#   registry config itself is compiled into Fastlets by the pool
-#   controller from the fast-sandbox-registry ConfigMap)
+#   -> the fastlet OCI env item + shared mounts/volumes when OCI_STACK=1
+#   (registry config is compiled into Fastlets by the pool controller)
 # (quoted in the template so the file stays valid YAML; the render step
 # substitutes the token including its quotes)
 #
