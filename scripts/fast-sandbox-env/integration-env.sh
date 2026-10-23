@@ -1468,6 +1468,56 @@ warm_images_ready() {
 	kubectl -n "$RESOURCE_NS" get sandboxpool "$POOL_NAME" -o jsonpath='{.status.warmImages[*].cachedFastlets}' 2>/dev/null | grep -qv '^0*$'
 }
 
+# --- stage: ublk on the host and inside the kind nodes (OCI_STACK=1) ------------
+
+# OverlayBD talks to the HOST kernel's ublk module through /dev/ublkc* (the
+# control char device) and surfaces devices as /dev/ublkb<N>. The kernel is
+# shared with the kind nodes, but the device NODES are not: a kind node's
+# /dev is a private tmpfs populated at node creation, while /dev/ublkc*
+# appears on the host only at modprobe time — usually after the cluster
+# exists. Every ublkd/fsb-vm consumer (the builder Pod, the node ublkd
+# sidecar, fastlets) mounts the kind node's /dev, so the nodes need the nodes.
+ublk_module_up() {
+	[[ "$OCI_STACK" == 1 ]] || {
+		log "OCI stack disabled (OCI_STACK=0); skipping ublk setup"
+		return 0
+	}
+	if [[ ! -e /dev/ublkc1 ]]; then
+		log "loading the host ublk module (modprobe ublk_drv)"
+		sudo_ modprobe ublk_drv 2>/dev/null || true
+	fi
+	[[ -e /dev/ublkc1 ]] || die "no /dev/ublkc1 on the host: the kernel needs CONFIG_BLK_DEV_UBLK (modprobe ublk_drv); overlaybd requires it when OCI_STACK=1"
+	UBLK_CTRL_MAJOR="$(ls -l /dev/ublkc1 | awk '{gsub(",", "", $5); print $5}')"
+	UBLK_CTRL_MINOR="$(ls -l /dev/ublkc1 | awk '{print $6}')"
+	UBLK_BLOCK_MAJOR="$(awk '/^Block devices:/{f=1; next} f && $2 == "ublk" {print $1}' /proc/devices)"
+	[[ -n "$UBLK_CTRL_MAJOR" && -n "$UBLK_CTRL_MINOR" && -n "$UBLK_BLOCK_MAJOR" ]] \
+		|| die "could not resolve the ublk device numbers (ctrl=$(ls -l /dev/ublkc1), block=$(grep -w ublk /proc/devices))"
+	# Pre-create the block-device range: the kernel allocates minor == device
+	# id under the ublk block major as sandboxes attach; nodes created here
+	# match those numbers by construction. Harmless if ublkd mknods its own.
+	log "ublk numbers: ctrl=($UBLK_CTRL_MAJOR,$UBLK_CTRL_MINOR) block-major=$UBLK_BLOCK_MAJOR"
+	pass "host ublk module ready (/dev/ublkc1)"
+}
+
+ublk_nodes_up() {
+	[[ "$OCI_STACK" == 1 ]] || return 0
+	local node
+	for node in $(docker ps --format '{{.Names}}' | grep "^${KIND_CLUSTER}" || true); do
+		docker exec "$node" sh -ec '
+			[ -e /dev/ublkc1 ] || mknod /dev/ublkc1 c "$1" "$2"
+			i=0
+			while [ "$i" -le 63 ]; do
+				[ -e "/dev/ublkb$i" ] || mknod "/dev/ublkb$i" b "$3" "$i" 2>/dev/null || true
+				i=$((i + 1))
+			done
+		' ublk-nodes "$UBLK_CTRL_MAJOR" "$UBLK_CTRL_MINOR" "$UBLK_BLOCK_MAJOR" \
+			|| die "mknod ublk devices inside $node failed"
+		docker exec "$node" sh -ec 'test -e /dev/ublkc1 && test -e /dev/ublkb0' >/dev/null \
+			|| die "ublk device nodes missing inside $node after mknod"
+	done
+	pass "ublk device nodes present inside the kind nodes"
+}
+
 render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
 	local src="$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml" out="$GEN_DIR/firecracker-egress-pool.yaml"
 	mkdir -p "$GEN_DIR"
@@ -2800,10 +2850,12 @@ case "$ACTION" in
 		run_stage "sysctl (fs.inotify)" sysctl_set
 		run_stage "fast-sandbox checkout @ pinned commit" ensure_fsb
 		run_stage "OCI registry CA + serving certificate" registry_ca_up
+		run_stage "ublk module (host) + device nodes" ublk_module_up
 		run_stage "build images (fast-sandbox + OpenSandbox)" build_images
 		run_stage "XFS StateRoot (reflink)" stateroot_xfs_up
 		run_stage "render kind config" render_kind_config
 		run_stage "kind cluster (KVM passthrough + labels)" kind_up
+		run_stage "ublk device nodes inside the kind nodes" ublk_nodes_up
 		run_stage "RustFS + bucket" rustfs_up
 		run_stage "RustFS endpoint (kind network)" resolve_rustfs_endpoint
 		run_stage "OCI registry (in-cluster, TLS)" registry_up
