@@ -209,6 +209,9 @@ runtime:
     agent: {}
     # -- Resources for the janitor sidecar container.
     janitor: {}
+    # -- Resources for the overlaybd-ublkd sidecar container
+    # (runtime.oci.enabled only).
+    ublkd: {}
   # -- Secret carrying the compiled agent registry configuration
   # (registry.json key with artifact-store pull credentials); must be
   # provisioned by the operator.

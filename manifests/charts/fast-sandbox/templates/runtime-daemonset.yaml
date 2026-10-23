@@ -48,6 +48,12 @@ rules:
   # The janitor sidecar's pod informer tracks this node's pods to detect
   # orphans the moment their pod disappears.
   verbs: ["get", "list", "watch"]
+- apiGroups: ["sandbox.fast.io"]
+  resources: ["sandboxes"]
+  # Janitor revalidates the Sandbox assignment before cleaning its
+  # retained per-Pod resources (OCI ublk devices and checkpoint packs,
+  # plus the native snapshot state).
+  verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -289,6 +295,10 @@ spec:
           value: {{ .Values.runtime.oci.cacheSizeGB | quote }}
         securityContext:
           privileged: true
+        {{- with .Values.runtime.resources.ublkd }}
+        resources:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
         readinessProbe:
           exec:
             command:

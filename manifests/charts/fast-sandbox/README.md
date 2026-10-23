@@ -89,9 +89,10 @@ The following table lists the configurable parameters of the chart and their def
 | runtime.oci.cacheSizeGB | int | `16` | Node cache capacity for the shared overlaybd block cache (OVERLAYBD_CACHE_SIZE_GB); independent of VM upper layers. |
 | runtime.oci.enabled | bool | `false` | Whether the node OCI stack (tools init + overlaybd-ublkd sidecar + agent flag + janitor oci-state-root) is installed |
 | runtime.registrySecret | string | `"fast-sandbox-agent-registry"` | Secret carrying the compiled agent registry configuration (registry.json key with artifact-store pull credentials); must be provisioned by the operator. |
-| runtime.resources | object | `{"agent":{},"janitor":{}}` | Container resources for the DaemonSet. Setting requests matters more than limits here: without them the pod is BestEffort and is evicted first under node pressure, taking down the management API for every fastlet on the node. Limits stay off by default so artifact pulls and the readiness loop are not throttled or OOM-killed at their spikes. |
+| runtime.resources | object | `{"agent":{},"janitor":{},"ublkd":{}}` | Container resources for the DaemonSet. Setting requests matters more than limits here: without them the pod is BestEffort and is evicted first under node pressure, taking down the management API for every fastlet on the node. Limits stay off by default so artifact pulls and the readiness loop are not throttled or OOM-killed at their spikes. |
 | runtime.resources.agent | object | `{}` | Resources for the firecracker-runtime agent container. |
 | runtime.resources.janitor | object | `{}` | Resources for the janitor sidecar container. |
+| runtime.resources.ublkd | object | `{}` | Resources for the overlaybd-ublkd sidecar container (runtime.oci.enabled only). |
 | runtime.socketDir | string | `"/run/fast-sandbox/firecracker"` | Node hostPath sharing the agent UDS socket with fastlet Pods |
 | runtime.stateRoot | string | `"/var/lib/fast-sandbox/firecracker"` | Node hostPath holding per-node Firecracker state (rootfs, snapshots). Each node needs its own directory; do not share across nodes. |
 | runtime.tolerations | list | `[]` | Additional tolerations for the firecracker-runtime DaemonSet pod, appended to the built-in control-plane toleration. Needed when target nodes carry infra taints (e.g. sigma.ali resource-pool taints). |
