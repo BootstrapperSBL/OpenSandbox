@@ -185,6 +185,7 @@ jobs:
         if: steps.already_released.outputs.released != 'true'
         env:
           COMPONENT: ${{ matrix.component }}
+          SETUPTOOLS_SCM_PRETEND_VERSION: ${{ needs.resolve.outputs.version }}
           # release tags once the publish gate opens, run-scoped staging
           # tags before that; dry runs push nothing (PUSH=false)
           IMAGE_TAG: "${{ (inputs.dry_run == false && vars.UMBRELLA_PUBLISH_ENABLED == 'true') && format('release-{0}', needs.resolve.outputs.version) || format('staging-{0}-{1}', github.sha, github.run_id) }}"
