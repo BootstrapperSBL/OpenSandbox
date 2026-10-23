@@ -438,7 +438,7 @@ Create-latency reporting is controlled separately by [SDK Telemetry](/sdks/obser
 
 Create a snapshot with `sandbox.createSnapshot` or `manager.createSnapshot`. `SandboxManager` exposes `getSnapshot`, `listSnapshots`, `deleteSnapshot`, and `waitForSnapshotReady` to wait for asynchronous snapshot completion. Restore with `Sandbox.builder().snapshotId(snapshotId).connectionConfig(config).build()`.
 
-Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace metadata keys; a `null` value removes a key. Runtime support is described by the [lifecycle contract](/api/#1-sandbox-lifecycle-yml).
+Use `sandbox.patchMetadata` or `manager.patchSandboxMetadata` to add/replace metadata keys; a `null` value removes a key. Runtime support is described by the [lifecycle contract](/api/#_1-sandbox-lifecycle-yml).
 
 Snapshot support depends on the runtime and server configuration. Renew the source sandbox first if its remaining TTL may expire during snapshot creation. The JVM helper waits for `Ready` and raises an exception on failure or timeout:
 

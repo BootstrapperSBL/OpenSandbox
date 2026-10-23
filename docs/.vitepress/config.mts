@@ -413,9 +413,10 @@ export default defineConfig({
     ],
 
     footer: {
+      // VitePress renders message first, followed by copyright.
       message: "Copyright © OpenSandbox a Series of LF Projects, LLC",
       copyright:
-        'For web site terms of use, trademark policy and other project policies please see <a href="https://lfprojects.org/">https://lfprojects.org/</a>.',
+        'For web site terms of use, trademark policy and other project policies please see <a href="https://lfprojects.org/" target="_blank" rel="noopener noreferrer">https://lfprojects.org/</a>.',
     },
 
     search: {
