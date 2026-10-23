@@ -1181,6 +1181,7 @@ template_up() {
 	bake_registry_ca "$IMG_BUILDER"
 	verify_image_ca_bake "$IMG_BUILDER"
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
+	probe_registry_tls
 	local created
 	local -a tmpl_args=(
 		template create
@@ -1415,7 +1416,6 @@ YAML
 	kubectl -n "$RESOURCE_NS" rollout status deploy/registry --timeout=180s >/dev/null \
 		|| { failure_dump "registry-rollout"; fail "the in-cluster OCI registry did not become ready"; }
 	verify_registry_trust
-	probe_registry_tls
 	pass "in-cluster OCI registry up (https://$OCI_REGISTRY_HOST)"
 }
 
