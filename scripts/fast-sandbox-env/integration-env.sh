@@ -1415,7 +1415,25 @@ YAML
 	kubectl -n "$RESOURCE_NS" rollout status deploy/registry --timeout=180s >/dev/null \
 		|| { failure_dump "registry-rollout"; fail "the in-cluster OCI registry did not become ready"; }
 	verify_registry_trust
+	probe_registry_tls
 	pass "in-cluster OCI registry up (https://$OCI_REGISTRY_HOST)"
+}
+
+# probe_registry_tls observes the registry from INSIDE a pod using the exact
+# builder image: what certificate the wire actually carries (issuer +
+# fingerprint) and whether the system bundle (the same one Go's fsb-vm reads)
+# validates it. Trust material can be perfect in the Secret and the image and
+# still diverge from what the pod sees — this closes that gap with ground
+# truth instead of another generic TLS failure one build later.
+probe_registry_tls() {
+	local out
+	out="$(kubectl run registry-tls-probe -n "$RESOURCE_NS" \
+		--image="$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")" \
+		--restart=Never --rm -i -q \
+		--overrides="{\"spec\":{\"containers\":[{\"name\":\"probe\",\"image\":\"$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")\",\"command\":[\"/bin/sh\",\"-ec\",\"openssl s_client -connect $OCI_REGISTRY_HOST:443 -servername $OCI_REGISTRY_HOST </dev/null 2>/dev/null | openssl x509 -noout -issuer -fingerprint -sha256; echo curl: \$(curl -sS -o /dev/null -w '%{http_code}' https://$OCI_REGISTRY_HOST/v2/ -u $OCI_REGISTRY_USER:$OCI_REGISTRY_PASSWORD 2>&1 | head -c 200); ls -l /usr/local/share/ca-certificates/ | tail -n +2; wc -c < /etc/ssl/certs/ca-certificates.crt\"],\"securityContext\":{\"privileged\":true}}],\"restartPolicy\":\"Never\"}}" 2>&1 | tail -8)" \
+		|| log "registry TLS probe pod failed: $out"
+	log "registry TLS probe (in-pod view):"
+	printf '%s\n' "$out" | sed 's/^/  | /'
 }
 
 # cert_fingerprint prints the sha256 fingerprint of a PEM file.
