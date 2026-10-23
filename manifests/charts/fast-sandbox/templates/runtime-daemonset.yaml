@@ -178,6 +178,19 @@ spec:
       # The runtime runs on the cluster network (NOT hostNetwork): its dart
       # child needs the cluster DNS to resolve the headless Service peers,
       # and a regular Pod identity for the stable HRW node hostname file.
+      {{- if .Values.runtime.oci.enabled }}
+      # OCI tools bundle (fsb-vm, OverlayBD tools, convertor) installed
+      # once under the shared node hostPath; the agent, the overlaybd-ublkd
+      # sidecar, the janitor and Fastlet Pods all consume it read-only.
+      initContainers:
+      - name: install-oci-tools
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
+        imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+        command: ["/usr/local/bin/install-oci-tools"]
+        volumeMounts:
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+      {{- end }}
       containers:
       - name: firecracker-agent
         image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
@@ -189,6 +202,12 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.uid
+        {{- if .Values.runtime.oci.enabled }}
+        # Relaxes the XFS/reflink node readiness requirement; native
+        # templates stay usable (rootfs copies just take longer).
+        - name: FAST_SANDBOX_OCI_ENABLED
+          value: "true"
+        {{- end }}
         - name: FAST_SANDBOX_AGENT_CONFIG
           value: /etc/fast-sandbox/agent-config/agent.yaml
         # Node readiness: spec.nodeName enables the host-check loop (the
@@ -244,17 +263,68 @@ spec:
           readOnly: true
         - name: fc-assets
           mountPath: /opt/fast-sandbox/firecracker
+        {{- if .Values.runtime.oci.enabled }}
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+          readOnly: true
+        - name: oci-socket
+          mountPath: /run/fast-sandbox/overlaybd
+        {{- end }}
+      {{- if .Values.runtime.oci.enabled }}
+      # One shared overlaybd-ublkd per node: hosts every sandbox's ublk
+      # devices behind /run/fast-sandbox/overlaybd/ublkd.sock (fsb-vm
+      # connects directly; the agent does not proxy device ops). Shares the
+      # agent's StateRoot at the same absolute path and the host /dev so
+      # devices created here are visible to the VMs.
+      - name: overlaybd-ublkd
+        image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
+        imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+        command: ["/usr/local/bin/overlaybd-node"]
+        env:
+        - name: FAST_SANDBOX_OCI_ENABLED
+          value: "true"
+        - name: FAST_SANDBOX_STATE_ROOT
+          value: {{ .Values.runtime.stateRoot }}
+        - name: OVERLAYBD_CACHE_SIZE_GB
+          value: {{ .Values.runtime.oci.cacheSizeGB | quote }}
+        securityContext:
+          privileged: true
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -ec
+            - curl -fsS --max-time 2 --unix-socket /run/fast-sandbox/overlaybd/ublkd.sock http://localhost/v1/ping
+          periodSeconds: 5
+        volumeMounts:
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+          readOnly: true
+        - name: oci-socket
+          mountPath: /run/fast-sandbox/overlaybd
+        - name: agent-state
+          mountPath: {{ .Values.runtime.stateRoot }}
+        - name: host-dev
+          mountPath: /dev
+      {{- end }}
       # Node janitor sidecar: sweeps orphaned fastlet network state (netns/
       # tap/veth), boxlite leftovers, and — the reason for hostPID — kills
       # leaked VMM processes fastlets delegate over the node-cleanup UDS
       # socket. The containerd backend is DISABLED here (--containerd-socket=):
       # this pod targets the firecracker runtime; the standalone janitor
       # DaemonSet keeps covering the containerd-based runtimes.
+      {{- $janitorArgs := list
+            (printf "--scan-interval=%s" .Values.janitor.scanInterval)
+            (printf "--orphan-timeout=%s" .Values.janitor.orphanTimeout)
+            "--containerd-socket=" }}
+      {{- if .Values.runtime.oci.enabled }}
+      {{- $janitorArgs = append $janitorArgs (printf "--oci-state-root=%s" .Values.runtime.stateRoot) }}
+      {{- end }}
       - name: janitor
         image: {{ include "fast-sandbox.image" (dict "repository" .Values.janitor.image.repository "tag" .Values.janitor.image.tag "appVersion" .Chart.AppVersion) }}
         imagePullPolicy: {{ .Values.janitor.image.pullPolicy }}
         command: ["/workspace/janitor"]
-        args: ["--scan-interval={{ .Values.janitor.scanInterval }}", "--orphan-timeout={{ .Values.janitor.orphanTimeout }}", "--containerd-socket="]
+        args: {{ $janitorArgs | toJson }}
         ports:
         - name: metrics
           containerPort: 9092
@@ -282,6 +352,20 @@ spec:
         - name: runtime-environments
           mountPath: /etc/fast-sandbox/runtime-environments
           readOnly: true
+        {{- if .Values.runtime.oci.enabled }}
+        # fsb-vm cleanup of retained ublk devices and checkpoint pack
+        # resources left by deleted Pods (revalidated against Sandbox
+        # absence first).
+        - name: oci-tools
+          mountPath: /opt/fast-sandbox/oci
+          readOnly: true
+        - name: oci-socket
+          mountPath: /run/fast-sandbox/overlaybd
+        - name: host-dev
+          mountPath: /dev
+        - name: agent-state
+          mountPath: {{ .Values.runtime.stateRoot }}
+        {{- end }}
       volumes:
       - name: agent-socket
         hostPath:
@@ -339,4 +423,25 @@ spec:
           # janitor falls back to its defaults (containerd backend is
           # disabled via --containerd-socket= anyway).
           optional: true
+      {{- if .Values.runtime.oci.enabled }}
+      # Immutable OCI tools release installed by the init container and
+      # atomically switched under current/; shared read-only with the
+      # overlaybd-ublkd sidecar, the janitor, and Fastlet Pods.
+      - name: oci-tools
+        hostPath:
+          path: /opt/fast-sandbox/oci
+          type: DirectoryOrCreate
+      # Root-only ublkd control socket + credential directory shared with
+      # Fastlet Pods (fast-sandbox-registry ConfigMap supplies credentials).
+      - name: oci-socket
+        hostPath:
+          path: /run/fast-sandbox/overlaybd
+          type: DirectoryOrCreate
+      # Host device tree: ublk devices created by the sidecar must be
+      # visible to the Firecracker VMs.
+      - name: host-dev
+        hostPath:
+          path: /dev
+          type: Directory
+      {{- end }}
 {{- end }}

@@ -231,3 +231,19 @@ runtime:
   # startup-only; the nodeReadiness section (fcVersion, interval,
   # minFree, minMemory) hot-reloads on every readiness pass.
   config: ""
+  # -- OverlayBD OCI on-demand loading (fast-sandbox PR #127 contract).
+  # Enabling installs the fsb-vm + OverlayBD tools bundle under
+  # /opt/fast-sandbox/oci (init container), sets FAST_SANDBOX_OCI_ENABLED
+  # on the agent (relaxing the XFS/reflink readiness requirement), and
+  # runs one overlaybd-ublkd sidecar per node serving the shared ublk
+  # daemon socket. Nodes need KVM plus kernel ublk support
+  # (CONFIG_BLK_DEV_UBLK, /dev/ublkc*). The SandboxPool's fastlet
+  # containers need FAST_SANDBOX_OCI_ENABLED=true separately — pools are
+  # not managed by this chart.
+  oci:
+    # -- Whether the node OCI stack (tools init + overlaybd-ublkd
+    # sidecar + agent flag + janitor oci-state-root) is installed
+    enabled: false
+    # -- Node cache capacity for the shared overlaybd block cache
+    # (OVERLAYBD_CACHE_SIZE_GB); independent of VM upper layers.
+    cacheSizeGB: 16
