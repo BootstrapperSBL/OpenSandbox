@@ -1449,7 +1449,11 @@ verify_image_ca_bake() { # <image>
 	[[ "$in_img" == "$ca_fp" ]] \
 		|| { failure_dump "ca-bake"; fail "CA bake mismatch for $1: CA=$ca_fp image=$in_img"; }
 	body="$(grep -v -- '---' "$CA_DIR/ca.crt" | tr -d '\n')"
-	docker run --rm --entrypoint sh "$1" -c "grep -c '$body' /etc/ssl/certs/ca-certificates.crt" >/dev/null \
+	# The merged bundle keeps the PEM folded at 64 columns, so compare
+	# against the flattened bundle, not the raw file.
+	docker run --rm --entrypoint sh "$1" -c "
+		tr -d '\n' < /etc/ssl/certs/ca-certificates.crt | grep -c '$body'
+	" >/dev/null \
 		|| { failure_dump "ca-bake"; fail "CA not merged into the system bundle of $1 (update-ca-certificates)"; }
 	pass "CA baked + merged in $1 ($ca_fp)"
 }
