@@ -266,6 +266,10 @@ Tagged release images are signed keylessly with Cosign and include provenance at
 - Discord: Join the [OpenSandbox Discord community](https://discord.gg/g7FuPs8YeD)
 - DingTalk: Join the [OpenSandbox technical discussion group](https://qr.dingtalk.com/action/joingroup?code=v1,k1,A4Bgl5q1I1eNU/r33D18YFNrMY108aFF38V+r19RJOM=&_dt_no_comment=1&origin=11)
 
+## Project Affiliation
+
+OpenSandbox is an [open source project under the Linux Foundation](https://aaif.io/projects/opensandbox), contributed by Alibaba.
+
 ## License
 
 This project is open source under the [Apache 2.0 License](LICENSE).
