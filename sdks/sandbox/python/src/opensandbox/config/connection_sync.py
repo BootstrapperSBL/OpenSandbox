@@ -223,7 +223,11 @@ class ConnectionConfigSync(BaseModel):
         return self.domain or os.getenv(self._ENV_DOMAIN, self._DEFAULT_DOMAIN)
 
     def get_base_url(self) -> str:
-        domain = self.get_domain()
+        # Same normalization as ConnectionConfig.get_base_url().
+        domain = self.get_domain().rstrip("/")
+        version_suffix = f"/{self._API_VERSION}"
+        if domain.endswith(version_suffix):
+            domain = domain[: -len(version_suffix)]
         if domain.startswith("http://") or domain.startswith("https://"):
             return f"{domain}/{self._API_VERSION}"
         return f"{self.protocol}://{domain}/{self._API_VERSION}"
