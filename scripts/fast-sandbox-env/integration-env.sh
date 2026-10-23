@@ -1179,6 +1179,7 @@ template_up() {
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
 	bake_registry_ca "$IMG_BUILDER"
+	verify_image_ca_bake "$IMG_BUILDER"
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
 	local created
 	local -a tmpl_args=(
@@ -1413,7 +1414,44 @@ YAML
 	kubectl apply -f "$GEN_DIR/oci-registry.yaml" >/dev/null
 	kubectl -n "$RESOURCE_NS" rollout status deploy/registry --timeout=180s >/dev/null \
 		|| { failure_dump "registry-rollout"; fail "the in-cluster OCI registry did not become ready"; }
+	verify_registry_trust
 	pass "in-cluster OCI registry up (https://$OCI_REGISTRY_HOST)"
+}
+
+# cert_fingerprint prints the sha256 fingerprint of a PEM file.
+cert_fingerprint() { # <pem>
+	openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2
+}
+
+# verify_registry_trust proves the SERVING secret carries exactly the CA the
+# images bake — a silent mismatch here costs a full build cycle to discover
+# as "x509: certificate signed by unknown authority" at push time.
+verify_registry_trust() {
+	local ca_fp served_fp
+	ca_fp="$(cert_fingerprint "$CA_DIR/ca.crt")"
+	served_fp="$(kubectl -n "$RESOURCE_NS" get secret registry-tls \
+		-o jsonpath='{.data.tls\.crt}' | base64 -d | cert_fingerprint /dev/stdin)"
+	[[ -n "$served_fp" ]] || { failure_dump "registry-trust"; fail "could not read the registry serving certificate"; }
+	[[ "$ca_fp" == "$served_fp" ]] \
+		|| { failure_dump "registry-trust"; fail "registry serving cert mismatch: CA=$ca_fp served=$served_fp"; }
+	pass "registry serving cert signed by the env CA ($ca_fp)"
+}
+
+# verify_image_ca_bake proves the CA is present AND merged into the image's
+# system bundle (update-ca-certificates ran over it).
+verify_image_ca_bake() { # <image>
+	local ca_fp body
+	ca_fp="$(cert_fingerprint "$CA_DIR/ca.crt")"
+	local in_img
+	in_img="$(docker run --rm --entrypoint sh "$1" -c '
+		openssl x509 -in /usr/local/share/ca-certificates/fast-sandbox-env-registry.crt -noout -fingerprint -sha256
+	' 2>/dev/null | cut -d= -f2)"
+	[[ "$in_img" == "$ca_fp" ]] \
+		|| { failure_dump "ca-bake"; fail "CA bake mismatch for $1: CA=$ca_fp image=$in_img"; }
+	body="$(grep -v -- '---' "$CA_DIR/ca.crt" | tr -d '\n')"
+	docker run --rm --entrypoint sh "$1" -c "grep -c '$body' /etc/ssl/certs/ca-certificates.crt" >/dev/null \
+		|| { failure_dump "ca-bake"; fail "CA not merged into the system bundle of $1 (update-ca-certificates)"; }
+	pass "CA baked + merged in $1 ($ca_fp)"
 }
 
 # bake_registry_ca_into_images retags the fsb images with the registry CA
@@ -1423,6 +1461,8 @@ bake_registry_ca_into_images() {
 	log "baking the registry CA into the fsb images"
 	bake_registry_ca "$IMG_FASTLET"
 	bake_registry_ca "$IMG_RUNTIME"
+	verify_image_ca_bake "$IMG_FASTLET"
+	verify_image_ca_bake "$IMG_RUNTIME"
 }
 
 
