@@ -1820,20 +1820,21 @@ verify_policy_updated() {
 # to each reading, which is exactly the measurement pollution #2323 called
 # out. CLI create coverage lives in the pause-resume/vault/snapshot verifies
 # and the lifecycle ops below.
-verify_one_sandbox() { # <label> <ping-budget-ms>
-	local label="$1" budget="$2" response t0 t1 t2 route code deadline payload
+verify_one_sandbox() { # <label> <ping-budget-ms> [template-id]
+	local label="$1" budget="$2" template_id="${3:-$TEMPLATE_ID}"
+	local response t0 t1 t2 route code deadline payload
 	local policy_file="$GEN_DIR/verify-policy.json"
 	t0="$(now_ms)"
 	# Egress policy rides on every create (binding -> nft rules), so the
 	# chain is exercised each time; /ping is inbound and unaffected.
 	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "example.com"}, {action: "allow", target: "*.opensandbox.ai"}]}' \
 		> "$policy_file"
-	log "verify ($label): creating a sandbox via the raw API (templateId=$TEMPLATE_ID; the timed window is curl-only)"
+	log "verify ($label): creating a sandbox via the raw API (templateId=$template_id; the timed window is curl-only)"
 	# The timed windows wrap HTTP round trips ONLY: an osb invocation here
 	# would bill ~0.5s of Python startup to every reading. The CLI surface
 	# stays covered by the lifecycle ops and the osb create smoke.
 	local payload
-	payload="$(jq -n --arg tpl "$TEMPLATE_ID" --slurpfile pol "$policy_file" \
+	payload="$(jq -n --arg tpl "$template_id" --slurpfile pol "$policy_file" \
 		'{templateId: $tpl, timeout: 3600, metadata: {origin: "fast-sandbox-env-verify"}, networkPolicy: $pol[0]}')"
 	response="$(server_api POST "/sandboxes" "$payload")" \
 		|| fail "POST /sandboxes failed against $SERVER_URL (payload: $(printf '%s' "$payload" | head -c 200))"
@@ -1995,16 +1996,21 @@ dump_latency_evidence() {
 }
 
 opensandbox_verify() {
-	# Cold create pulls the golden image through DART (slowest; generous
-	# budget). Warm creates: the second may still pull on the other node via
-	# its DART peer; after both nodes cache the set, creates are sub-second.
+	# Optional template override: the overlaybd second pass calls this with
+	# the OCI template id; the default stays the native template. Cold create
+	# pulls the golden image through DART (native) or the registry over ublk
+	# (overlaybd); warm creates: the second may still pull on the other node
+	# via its DART peer; after both nodes cache the set, creates are
+	# sub-second (native) / attach cached devices (overlaybd).
+	local template_id="${1:-$TEMPLATE_ID}"
+	log "verify (end-to-end): template=$template_id"
 	local ids=() id label index
-	verify_one_sandbox "cold #1" 600000
+	verify_one_sandbox "cold #1" 600000 "$template_id"
 	ids+=("$VERIFY_ID")
-	verify_one_sandbox "warm #2" 600000
+	verify_one_sandbox "warm #2" 600000 "$template_id"
 	ids+=("$VERIFY_ID")
 	for index in 3 4 5 6; do
-		verify_one_sandbox "warm #$index" 120000
+		verify_one_sandbox "warm #$index" 120000 "$template_id"
 		ids+=("$VERIFY_ID")
 	done
 	pass "end-to-end: opensandbox CLI -> server -> FastPath -> fastlet -> sandbox execd -> gateway route OK (6 sandboxes)"
@@ -2046,12 +2052,14 @@ sandbox_state_get() {
 }
 
 pause_resume_verify() {
+	# Optional template override (the overlaybd second pass); default native.
 	# Accepted + poll: Paused == checkpoint durable + capacity released;
 	# resume advances the route generation, so /ping needs a fresh route.
+	local template_id="${1:-$TEMPLATE_ID}"
 	local created t0 t1 t2 t3
-	log "verify (pause): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+	log "verify (pause): creating a sandbox via the opensandbox CLI (templateId=$template_id)"
 	t0="$(now_ms)"
-	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
 		--metadata origin=fast-sandbox-env-pause --skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create failed against $SERVER_URL"
 	VERIFY_ID="$(printf '%s' "$created" | jq -r '.id')"
@@ -2120,13 +2128,14 @@ vault_revision_is() { # <expected-revision>
 }
 
 vault_lifecycle_verify() {
+	local template_id="${1:-$TEMPLATE_ID}"
 	local created vault_body ack rev sandbox_uid
-	log "verify (vault): creating a sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
+	log "verify (vault): creating a sandbox via the opensandbox CLI (templateId=$template_id)"
 	# The policy rides the create: a policy-less create produces no egress
 	# binding at all, so the subject would never register.
 	jq -n '{defaultAction: "deny", egress: [{action: "allow", target: "ext.test"}]}' \
 		> "$GEN_DIR/vault-policy.json"
-	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
 		--metadata origin=fast-sandbox-env-vault \
 		--network-policy-file "$GEN_DIR/vault-policy.json" \
 		--skip-health-check -o json 2>/dev/null)" \
@@ -2253,7 +2262,10 @@ idle_ping_code() { # [sandbox_id] (default $VERIFY_ID)
 
 idle_pause_verify() {
 	# Raw curl create: the CLI has no lifecycle.idlePolicy parameter yet.
+	# Optional template override (the overlaybd second pass); default native.
 	[[ "$IDLE_PAUSE" == "1" ]] || { log "idle-pause profile off (IDLE_PAUSE=0); skipping verify"; return 0; }
+	local template_id="${1:-$TEMPLATE_ID}"
+	log "verify (idle-pause): template=$template_id"
 	local created t0 t1 code i
 	local x=30
 	local rounds="${IDLE_PAUSE_ROUNDS:-3}"
@@ -2261,7 +2273,7 @@ idle_pause_verify() {
 	log "verify (idle-pause): creating an opted-in sandbox (idleTimeoutSeconds=$x, rounds=$rounds) via the lifecycle API"
 	t0="$(now_ms)"
 	created="$(server_api POST /sandboxes "$(jq -n \
-		--arg template "$TEMPLATE_ID" \
+		--arg template "$template_id" \
 		--argjson timeout 3600 --argjson x "$x" \
 		'{templateId: $template, timeout: $timeout,
 		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: true}},
@@ -2298,7 +2310,7 @@ idle_pause_verify() {
 	local main_id="$VERIFY_ID" created2 id2 payload
 	log "verify (idle-pause): scenario wakeOnAccess=false"
 	created2="$(server_api POST /sandboxes "$(jq -n \
-		--arg template "$TEMPLATE_ID" --argjson timeout 3600 --argjson x "$x" \
+		--arg template "$template_id" --argjson timeout 3600 --argjson x "$x" \
 		'{templateId: $template, timeout: $timeout,
 		  lifecycle: {idlePolicy: {idleTimeoutSeconds: $x, onIdle: "pause", wakeOnAccess: false}},
 		  metadata: {origin: "fast-sandbox-env-idle-pause"}}')" 2>/dev/null)" \
@@ -2378,11 +2390,13 @@ snapshot_verify() {
 	# Full round trip on the live stack: snapshot a Running sandbox, watch it
 	# to Ready, restore a NEW sandbox from the snapshotId and boot it. Also
 	# covers re-entry fencing, source-sandbox survival, and a repeat snapshot.
+	# Optional template override (the overlaybd second pass); default native.
+	local template_id="${1:-$TEMPLATE_ID}"
 	local created out source_id snapshot_id snapshot_id2 restore_id reentry_out reentry_code
 	local t0 t1 t2 t3 t4
 	t0="$(now_ms)"
-	log "verify (snapshot): creating the source sandbox via the opensandbox CLI (templateId=$TEMPLATE_ID)"
-	created="$(osb_api sandbox create --template "$TEMPLATE_ID" --timeout 1h \
+	log "verify (snapshot): creating the source sandbox via the opensandbox CLI (templateId=$template_id)"
+	created="$(osb_api sandbox create --template "$template_id" --timeout 1h \
 		--metadata origin=fast-sandbox-env-snapshot --skip-health-check -o json 2>/dev/null)" \
 		|| fail "osb sandbox create failed against $SERVER_URL"
 	source_id="$(printf '%s' "$created" | jq -r '.id')"
@@ -2507,83 +2521,6 @@ snapshot_verify() {
 	pass "snapshot: cleanup (restored + source sandboxes, both snapshot rows)"
 }
 
-# --- stage: overlaybd verify (OCI template -> sandbox -> snapshot -> restore) ----
-
-# Single-cluster overlaybd round trip beside the native verifies. The OCI
-# template is built by template_up (OCI_STACK=1); every step here exercises
-# the OverlayBD path: the template publishes rootfs/snapfiles to the
-# in-cluster registry, the server resolves status.manifestRef as the
-# template-mode create image, the fastlet attaches ublk devices for the
-# on-demand boot, and the snapshot publishes an immutable oci:// pair that
-# restores through the server's manifest_ref restore branch.
-overlaybd_verify() {
-	[[ "$OCI_STACK" == 1 ]] || {
-		log "OCI stack disabled (OCI_STACK=0); skipping the overlaybd verify"
-		return 0
-	}
-	[[ -n "$OCI_TEMPLATE_ID" ]] || OCI_TEMPLATE_ID="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
-	[[ -n "$OCI_TEMPLATE_ID" ]] || die "no overlaybd template id at $WORK/overlaybd-template-id (run up first)"
-
-	local created out source_id snapshot_id restore_id restored
-	local t0 t1 t2 t3
-	t0="$(now_ms)"
-	log "verify (overlaybd): creating a sandbox via the opensandbox CLI (templateId=$OCI_TEMPLATE_ID)"
-	created="$(osb_api sandbox create --template "$OCI_TEMPLATE_ID" --timeout 1h \
-		--metadata origin=fast-sandbox-env-overlaybd --skip-health-check -o json 2>/dev/null)" \
-		|| fail "overlaybd sandbox create failed against $SERVER_URL"
-	source_id="$(printf '%s' "$created" | jq -r '.id')"
-	[[ -n "$source_id" && "$source_id" != "null" ]] || fail "overlaybd create response carried no id"
-	VERIFY_ID="$source_id"
-	wait_for "overlaybd sandbox Running (ublk on-demand boot)" 600 sandbox_running
-	t1="$(now_ms)"
-	wait_for "overlaybd execd /ping 200 through the gateway" 100 execd_ping_ok
-	log "verify (overlaybd): $source_id create->Running $(( (t1 - t0) / 1000000 ))ms"
-	pass "overlaybd: template-mode create -> on-demand boot -> execd /ping OK"
-
-	# Snapshot the OCI-source sandbox: the server omits template_name for
-	# oci:// sources and restores from the returned manifest_ref.
-	log "verify (overlaybd): osb snapshot create $source_id --name env-verify-oci"
-	t1="$(now_ms)"
-	out="$(osb_api snapshot create "$source_id" --name env-verify-oci -o json 2>/dev/null)" \
-		|| fail "overlaybd snapshot create failed for $source_id"
-	snapshot_id="$(printf '%s' "$out" | jq -r '.id')"
-	[[ -n "$snapshot_id" && "$snapshot_id" != "null" ]] || fail "overlaybd snapshot create carried no id"
-	wait_for "poll osb snapshot get $snapshot_id until Ready (OCI publication)" 300 snapshot_ready "$snapshot_id"
-	t2="$(now_ms)"
-	log "verify (overlaybd): $snapshot_id snapshot create->Ready $(( (t2 - t1) / 1000000 ))ms"
-	pass "overlaybd: snapshot published (OCI rootfs/snapfiles pair)"
-
-	# Restore boots the published oci:// artifact set via the server's
-	# manifest_ref restore branch.
-	log "verify (overlaybd): osb sandbox create --snapshot-id $snapshot_id"
-	t2="$(now_ms)"
-	restored="$(osb_api sandbox create --snapshot-id "$snapshot_id" --timeout 1h \
-		--resource cpu=1 --resource memory=512Mi --resource pids=128 \
-		--skip-health-check -o json 2>/dev/null)" \
-		|| fail "overlaybd restore create (snapshotId=$snapshot_id) failed"
-	restore_id="$(printf '%s' "$restored" | jq -r '.id')"
-	[[ -n "$restore_id" && "$restore_id" != "null" ]] || fail "overlaybd restore create carried no id"
-	VERIFY_ID="$restore_id"
-	wait_for "overlaybd restored sandbox Running" 600 sandbox_running
-	t3="$(now_ms)"
-	wait_for "overlaybd restored execd /ping 200 through the gateway" 300 execd_ping_ok
-	log "verify (overlaybd): restored $restore_id create->Running $(( (t3 - t2) / 1000000 ))ms"
-	pass "overlaybd: restore boots the OCI artifact set -> execd /ping OK"
-
-	# Cleanup; deleting the OCI snapshot row also removes the published
-	# rootfs/snapfiles manifests from the registry (upstream semantics).
-	osb_api sandbox kill "$restore_id" >/dev/null 2>&1 \
-		|| log "verify cleanup: kill $restore_id failed"
-	wait_for "overlaybd restored sandbox deleted" 120 verify_sandbox_gone
-	VERIFY_ID="$source_id"
-	osb_api sandbox kill "$source_id" >/dev/null 2>&1 \
-		|| log "verify cleanup: kill $source_id failed"
-	wait_for "overlaybd source sandbox deleted" 120 verify_sandbox_gone
-	osb_api snapshot delete "$snapshot_id" >/dev/null 2>&1 \
-		|| log "verify cleanup: snapshot delete $snapshot_id failed"
-	pass "overlaybd: cleanup (restored + source sandboxes, snapshot row)"
-}
-
 # --- stage: python sdk e2e (tests/python/tests/test_fsb_e2e.py) -----------------
 
 sdk_e2e() {
@@ -2593,18 +2530,31 @@ sdk_e2e() {
 		|| die "server $SERVER_URL is not reachable (run up first)"
 	command -v uv >/dev/null 2>&1 \
 		|| die "uv is required on PATH (https://docs.astral.sh/uv/ — curl -LsSf https://astral.sh/uv/install.sh | sh)"
+	local -a template_ids=()
 	local template_id
 	template_id="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$template_id" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
-	export OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$template_id"
+	template_ids+=("$template_id")
+	if [[ "$OCI_STACK" == 1 ]]; then
+		local oci_template_id
+		oci_template_id="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
+		# The suite runs once per template: the overlaybd pass exercises the
+		# SDK contract on the on-demand path (the server resolves the OCI
+		# template's status.manifestRef on template-mode creates).
+		[[ -n "$oci_template_id" ]] && template_ids+=("$oci_template_id")
+	fi
 	export OPENSANDBOX_TEST_DOMAIN="127.0.0.1:$SERVER_HOST_PORT"
 	export OPENSANDBOX_TEST_PROTOCOL="http"
 	export OPENSANDBOX_TEST_API_KEY="$SERVER_API_KEY"
-	log "sdk e2e: template=$template_id server=$SERVER_URL -> tests/python/tests/test_fsb_e2e.py"
 	cd "$OSB_ROOT/tests/python" || die "tests/python not found under $OSB_ROOT"
 	# No exec: the ERR trap (and the failure dump) must survive a pytest
-	# failure, and exec replaces the shell.
-	uv run pytest tests/test_fsb_e2e.py
+	# failure, and exec replaces the shell. One pytest run per template so a
+	# failure names its template.
+	for template_id in "${template_ids[@]}"; do
+		export OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$template_id"
+		log "sdk e2e: template=$template_id server=$SERVER_URL -> tests/python/tests/test_fsb_e2e.py"
+		uv run pytest tests/test_fsb_e2e.py
+	done
 }
 
 idle_e2e() {
@@ -2861,11 +2811,22 @@ case "$ACTION" in
 		run_stage "OpenSandbox server + ingress gateway" opensandbox_up
 		run_stage "SandboxTemplate build (opensandbox CLI)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
-		run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
+		run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
+		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
 		run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
 		run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
 		run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
-		run_stage "overlaybd verify (OCI template -> ublk boot -> snapshot -> restore)" overlaybd_verify
+		if [[ "$OCI_STACK" == 1 ]]; then
+			# Full matrix second pass: every verify stage re-runs against the
+			# overlaybd template — same assertions on the on-demand boot
+			# path (ublk attach, OCI snapshot publication, manifest_ref
+			# restore). Native keeps its own pass above.
+			run_stage "end-to-end verify (overlaybd template)" opensandbox_verify "$OCI_TEMPLATE_ID"
+			run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
+			run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
+			run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
+			run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
+		fi
 		trap - ERR
 		stage_summary
 		env_summary

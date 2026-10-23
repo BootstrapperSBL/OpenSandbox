@@ -34,7 +34,10 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: kvm
-    timeout-minutes: 180
+    # The verify matrix runs twice when OCI_STACK=1 (default): once native,
+    # once against the overlaybd template (on-demand boot path), plus two
+    # golden-image builds.
+    timeout-minutes: 240
     env:
       # Full-stack profile (single round while scenarios stabilize).
       IDLE_PAUSE: "1"
