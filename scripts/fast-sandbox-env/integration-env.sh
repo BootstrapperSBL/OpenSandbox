@@ -1482,21 +1482,25 @@ ublk_module_up() {
 		log "OCI stack disabled (OCI_STACK=0); skipping ublk setup"
 		return 0
 	}
-	if [[ ! -e /dev/ublkc1 ]]; then
+	# The control device is /dev/ublkc (minor 0, char name "ublkc" in
+	# /proc/devices); block devices are /dev/ublkb<N> under the "ublk" block
+	# major. On a containerized runner the node may not materialize in the
+	# runner's own /dev — /proc/devices still reflects the shared kernel, and
+	# the kind nodes are verified after mknod below.
+	if [[ ! -e /dev/ublkc ]]; then
 		log "loading the host ublk module (modprobe ublk_drv)"
 		sudo_ modprobe ublk_drv 2>/dev/null || true
 	fi
-	[[ -e /dev/ublkc1 ]] || die "no /dev/ublkc1 on the host: the kernel needs CONFIG_BLK_DEV_UBLK (modprobe ublk_drv); overlaybd requires it when OCI_STACK=1"
-	UBLK_CTRL_MAJOR="$(ls -l /dev/ublkc1 | awk '{gsub(",", "", $5); print $5}')"
-	UBLK_CTRL_MINOR="$(ls -l /dev/ublkc1 | awk '{print $6}')"
+	UBLK_CTRL_MAJOR="$(awk '$2 == "ublkc" {print $1}' /proc/devices)"
 	UBLK_BLOCK_MAJOR="$(awk '/^Block devices:/{f=1; next} f && $2 == "ublk" {print $1}' /proc/devices)"
-	[[ -n "$UBLK_CTRL_MAJOR" && -n "$UBLK_CTRL_MINOR" && -n "$UBLK_BLOCK_MAJOR" ]] \
-		|| die "could not resolve the ublk device numbers (ctrl=$(ls -l /dev/ublkc1), block=$(grep -w ublk /proc/devices))"
+	[[ -n "$UBLK_CTRL_MAJOR" && -n "$UBLK_BLOCK_MAJOR" ]] \
+		|| die "ublk is not registered in /proc/devices: the kernel needs CONFIG_BLK_DEV_UBLK (modprobe ublk_drv); overlaybd requires it when OCI_STACK=1"
+	UBLK_CTRL_MINOR=0
 	# Pre-create the block-device range: the kernel allocates minor == device
 	# id under the ublk block major as sandboxes attach; nodes created here
 	# match those numbers by construction. Harmless if ublkd mknods its own.
-	log "ublk numbers: ctrl=($UBLK_CTRL_MAJOR,$UBLK_CTRL_MINOR) block-major=$UBLK_BLOCK_MAJOR"
-	pass "host ublk module ready (/dev/ublkc1)"
+	log "ublk numbers: ctrl-major=$UBLK_CTRL_MAJOR (minor $UBLK_CTRL_MINOR) block-major=$UBLK_BLOCK_MAJOR host-node=$([[ -e /dev/ublkc ]] && echo /dev/ublkc || echo 'not visible (containerized runner)')"
+	pass "host ublk module registered (char ublc major $UBLK_CTRL_MAJOR, block ublk major $UBLK_BLOCK_MAJOR)"
 }
 
 ublk_nodes_up() {
@@ -1504,7 +1508,7 @@ ublk_nodes_up() {
 	local node
 	for node in $(docker ps --format '{{.Names}}' | grep "^${KIND_CLUSTER}" || true); do
 		docker exec "$node" sh -ec '
-			[ -e /dev/ublkc1 ] || mknod /dev/ublkc1 c "$1" "$2"
+			[ -e /dev/ublkc ] || mknod /dev/ublkc c "$1" "$2"
 			i=0
 			while [ "$i" -le 63 ]; do
 				[ -e "/dev/ublkb$i" ] || mknod "/dev/ublkb$i" b "$3" "$i" 2>/dev/null || true
@@ -1512,7 +1516,7 @@ ublk_nodes_up() {
 			done
 		' ublk-nodes "$UBLK_CTRL_MAJOR" "$UBLK_CTRL_MINOR" "$UBLK_BLOCK_MAJOR" \
 			|| die "mknod ublk devices inside $node failed"
-		docker exec "$node" sh -ec 'test -e /dev/ublkc1 && test -e /dev/ublkb0' >/dev/null \
+		docker exec "$node" sh -ec 'test -e /dev/ublkc && test -e /dev/ublkb0' >/dev/null \
 			|| die "ublk device nodes missing inside $node after mknod"
 	done
 	pass "ublk device nodes present inside the kind nodes"
