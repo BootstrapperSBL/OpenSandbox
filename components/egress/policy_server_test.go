@@ -120,6 +120,12 @@ func (s *stubNft) ApplyStaticDropEstablished(ctx context.Context, p *policy.Netw
 	return s.dropMatched, err
 }
 
+func (s *stubNft) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldPol, newPol *policy.NetworkPolicy) (int, error) {
+	prior := s.SnapshotResolvedDomains()
+	drops := nftables.ComputeEstablishedDrops(oldPol, newPol, prior)
+	return s.ApplyStaticDropEstablished(ctx, newPol, drops)
+}
+
 func (s *stubNft) SnapshotResolvedDomains() map[string][]netip.Addr {
 	if s.domains == nil {
 		return map[string][]netip.Addr{}

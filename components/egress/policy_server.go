@@ -62,6 +62,9 @@ type nftApplier interface {
 	// those destinations even for ct state established,related. matched is the
 	// best-effort count of matching TCP conntrack flows before the apply.
 	ApplyStaticDropEstablished(context.Context, *policy.NetworkPolicy, nftables.EstablishedDrops) (int, error)
+	// ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
+	// teardown set, and applies under one lock so AddResolvedDomain cannot race.
+	ApplyStaticComputingEstablishedDrops(context.Context, *policy.NetworkPolicy, *policy.NetworkPolicy) (int, error)
 	SnapshotResolvedDomains() map[string][]netip.Addr
 	Quiesce()
 	AddResolvedDomain(context.Context, string, []nftables.ResolvedIP) error
@@ -277,6 +280,17 @@ func dropEstablishedRequested(r *http.Request) bool {
 	default:
 		return false
 	}
+}
+
+// dropEstablishedUnsupportedReason returns a non-empty message when the
+// current process cannot honor dropEstablished (chained upstream proxy + MITM
+// tunnels hide the policy destination from nft OUTPUT matching).
+func (s *policyServer) dropEstablishedUnsupportedReason() string {
+	if strings.TrimSpace(os.Getenv(constants.EnvUpstreamProxy)) != "" &&
+		constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
+		return "dropEstablished is not supported when OPENSANDBOX_EGRESS_UPSTREAM_PROXY is set with transparent MITM"
+	}
+	return ""
 }
 
 func (s *policyServer) handlePolicy(w http.ResponseWriter, r *http.Request) {
@@ -894,6 +908,16 @@ func (s *policyServer) handleDelete(w http.ResponseWriter, r *http.Request) {
 // its process lease through disk → nft → exact receiver ACK → proxy/base.
 // The default-off legacy branch retains its existing disk/nft/proxy behavior.
 func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, pol *policy.NetworkPolicy, op string, dropEstablished bool) (ok bool, dropped *int) {
+	if dropEstablished {
+		if s.revisionRecovery != nil {
+			http.Error(w, "dropEstablished is not supported with the experimental revision runtime", http.StatusNotImplemented)
+			return false, nil
+		}
+		if reason := s.dropEstablishedUnsupportedReason(); reason != "" {
+			http.Error(w, reason, http.StatusNotImplemented)
+			return false, nil
+		}
+	}
 	if s.revisionRecovery != nil {
 		m := s.revisionMitmLocked()
 		if m == nil {
@@ -916,12 +940,6 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 		s.proxy.UpdatePolicy(policy.MergeAlwaysOverlay(base.inputs.user, nil, nil))
 		s.revisionRecovery.current = base
 		s.invalidateRevisionBootstrapLocked()
-		// Experimental revision path rebuilds nft through applyRevisionPolicyLocked;
-		// established-drop is not wired there yet (dns+nft sidecar only for now).
-		if dropEstablished {
-			zero := 0
-			dropped = &zero
-		}
 		return true, dropped
 	}
 	alwaysDeny, alwaysAllow := s.currentAlwaysRules()
@@ -942,10 +960,8 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 		if dropEstablished {
 			oldUser := s.proxy.CurrentPolicy()
 			oldEffective := policy.MergeAlwaysOverlay(oldUser, alwaysDeny, alwaysAllow).WithExtraAllowIPs(s.nameserverIPs)
-			prior := s.nft.SnapshotResolvedDomains()
-			drops := nftables.ComputeEstablishedDrops(oldEffective, effective, prior)
 			var matched int
-			matched, err = s.nft.ApplyStaticDropEstablished(nftCtx, effective, drops)
+			matched, err = s.nft.ApplyStaticComputingEstablishedDrops(nftCtx, oldEffective, effective)
 			dropped = &matched
 		} else {
 			err = s.nft.ApplyStatic(nftCtx, effective)

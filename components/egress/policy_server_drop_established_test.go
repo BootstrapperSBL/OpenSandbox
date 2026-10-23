@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -85,4 +86,45 @@ func TestDropEstablishedRequested(t *testing.T) {
 	require.True(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=1", nil)))
 	require.False(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy", nil)))
 	require.False(t, dropEstablishedRequested(httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=false", nil)))
+}
+
+func TestCommitPolicy_DropEstablishedUnsupportedWithUpstreamProxy(t *testing.T) {
+	t.Setenv("OPENSANDBOX_EGRESS_UPSTREAM_PROXY", "http://proxy.example:8080")
+	t.Setenv("OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT", "true")
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"deb.debian.org"}]}`)
+	require.NoError(t, err)
+	nft := &stubNft{}
+	srv := &policyServer{
+		proxy:           &stubProxy{updated: initial},
+		nft:             nft,
+		enforcementMode: "dns+nft",
+	}
+	newPol, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[]}`)
+	require.NoError(t, err)
+
+	w := httptest.NewRecorder()
+	ok, dropped := srv.commitPolicy(context.Background(), w, newPol, "post", true)
+	require.False(t, ok)
+	require.Nil(t, dropped)
+	require.Equal(t, http.StatusNotImplemented, w.Code)
+	require.Contains(t, w.Body.String(), "UPSTREAM_PROXY")
+	require.Equal(t, 0, nft.calls)
+}
+
+func TestCommitPolicy_DropEstablishedUnsupportedWithRevisionRuntime(t *testing.T) {
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[]}`)
+	require.NoError(t, err)
+	nft := &stubNft{}
+	srv := &policyServer{
+		proxy:            &stubProxy{updated: initial},
+		nft:              nft,
+		enforcementMode:  "dns+nft",
+		revisionRecovery: &revisionRecoveryState{current: &effectivePolicyBase{inputs: effectivePolicyInputs{user: initial}}},
+	}
+	w := httptest.NewRecorder()
+	ok, _ := srv.commitPolicy(context.Background(), w, initial, "post", true)
+	require.False(t, ok)
+	require.Equal(t, http.StatusNotImplemented, w.Code)
+	require.Contains(t, w.Body.String(), "revision runtime")
+	require.Equal(t, 0, nft.calls)
 }

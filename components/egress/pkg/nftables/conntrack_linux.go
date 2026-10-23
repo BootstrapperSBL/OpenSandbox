@@ -19,6 +19,7 @@ package nftables
 import (
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -47,15 +48,21 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 			continue
 		}
 		var dst netip.Addr
+		dport := 0
 		for _, tok := range f[6:] {
-			if v, ok := strings.CutPrefix(tok, "dst="); ok {
+			if v, ok := strings.CutPrefix(tok, "dst="); ok && !dst.IsValid() {
 				if a, err := netip.ParseAddr(v); err == nil {
 					dst = a.Unmap()
 				}
-				break // first dst= is the ORIGINAL direction
+				continue
+			}
+			if v, ok := strings.CutPrefix(tok, "dport="); ok && dport == 0 {
+				if p, err := strconv.Atoi(v); err == nil {
+					dport = p
+				}
 			}
 		}
-		if dst.IsValid() && drops.Matches(dst) {
+		if dst.IsValid() && drops.MatchesFlow(dst, dport) {
 			matched++
 		}
 	}
