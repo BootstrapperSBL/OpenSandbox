@@ -125,6 +125,13 @@ def register_tools(
 
         return decorator
 
+    async def _connect_and_register(sandbox_id: str) -> Sandbox:
+        sandbox = await Sandbox.connect(
+            sandbox_id, connection_config=_borrowed_config(state)
+        )
+        await state.add(sandbox)
+        return sandbox
+
     async def _get_or_connect_sandbox(
         sandbox_id: str,
         *,
@@ -144,18 +151,14 @@ def register_tools(
                         "Sandbox not found in local registry. Call sandbox_connect or "
                         "set connect_if_missing=True with connection parameters."
                     )
-                task = asyncio.ensure_future(
-                    Sandbox.connect(
-                        sandbox_id, connection_config=_borrowed_config(state)
-                    )
-                )
+                task = asyncio.ensure_future(_connect_and_register(sandbox_id))
                 state.connecting[sandbox_id] = task
                 task.add_done_callback(
                     lambda t: _discard_connecting(state, sandbox_id, t)
                 )
-        sandbox = await task
-        await state.add(sandbox)
-        return sandbox
+        # Other tool calls may be waiting on the same task, so cancelling this
+        # call (e.g. the client cancelled the request) must not cancel it.
+        return await asyncio.shield(task)
 
     @tool()
     async def sandbox_create(
