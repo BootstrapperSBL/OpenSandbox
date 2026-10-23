@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alibaba/opensandbox/internal/safego"
 	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/isolation"
@@ -30,7 +31,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/telemetry"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
-	"github.com/alibaba/opensandbox/internal/safego"
 )
 
 var isolatedRunner *runtime.IsolatedRunner
