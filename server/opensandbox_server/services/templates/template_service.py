@@ -94,10 +94,12 @@ def _publish_validation_error(format: str, publish: str) -> Optional[str]:
 
     Mirrors the SandboxTemplate builder's output validation so an invalid
     destination fails as a 400 at creation instead of a failed build Pod.
-    overlaybd requires ``oci://host/repository``: the host may carry a port,
-    the repository path must be non-empty and free of tag (``:``) or digest
-    (``@``) suffixes — the system generates the build tags itself. native
-    requires an ``s3://`` object-store target.
+    overlaybd requires ``oci://host/repository``: the host may carry a port
+    but no userinfo (credentials must come from publishSecretRef, and the
+    publish value is echoed back by the template API), the repository path
+    must be non-empty, slash-terminated-free, and free of tag (``:``) or
+    digest (``@``) suffixes — the system generates the build tags itself.
+    native requires an ``s3://bucket`` target with a non-empty bucket.
     """
     if format == "overlaybd":
         if not publish.startswith("oci://"):
@@ -113,11 +115,22 @@ def _publish_validation_error(format: str, publish: str) -> Optional[str]:
                 "publish must be 'oci://registry/repository' with a "
                 "non-empty registry host and repository path."
             )
+        if "@" in host:
+            return (
+                "publish must not embed credentials in the registry host "
+                "(userinfo like user:pass@host is rejected; publish "
+                "credentials come from publishSecretRef)."
+            )
         if "@" in repository or ":" in repository:
             return (
                 "publish must be repository-only: tags and digests are "
                 "rejected because the system generates an immutable "
                 "per-build tag pair."
+            )
+        if repository.endswith("/"):
+            return (
+                "publish must be 'oci://registry/repository' without a "
+                "trailing slash."
             )
         return None
     if format == "native":
@@ -125,6 +138,11 @@ def _publish_validation_error(format: str, publish: str) -> Optional[str]:
             return (
                 "native templates publish to an S3-compatible store: "
                 "publish must be 's3://bucket/prefix'."
+            )
+        if not publish[len("s3://"):].partition("/")[0]:
+            return (
+                "publish must be 's3://bucket/prefix' with a non-empty "
+                "bucket name."
             )
         return None
     return (

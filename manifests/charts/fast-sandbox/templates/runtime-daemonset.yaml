@@ -213,7 +213,7 @@ spec:
             [ -S /run/fast-sandbox/overlaybd/ublkd.sock ] && break
             sleep 0.2
           done
-          exec ./firecracker-runtime
+          exec /workspace/firecracker-runtime
         {{- end }}
         # Only Downward API identities live in env; all tunables come from
         # the mounted agent config (nodeReadiness hot-reloads per pass).
@@ -319,7 +319,23 @@ spec:
             - /bin/sh
             - -ec
             - curl -fsS --max-time 2 --unix-socket /run/fast-sandbox/overlaybd/ublkd.sock http://localhost/v1/ping
+          # curl's own --max-time is 2s; the probe timeout must exceed it.
           periodSeconds: 5
+          timeoutSeconds: 3
+        # The daemon sits on every sandbox's block-data path: a hung process
+        # (socket file alive, pings failing) must be restarted instead of
+        # stalling all node IO until manual intervention. Conservative
+        # thresholds: ~60s of consecutive failures before a restart.
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -ec
+            - curl -fsS --max-time 4 --unix-socket /run/fast-sandbox/overlaybd/ublkd.sock http://localhost/v1/ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
         volumeMounts:
         - name: oci-tools
           mountPath: /opt/fast-sandbox/oci

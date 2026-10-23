@@ -83,7 +83,10 @@ jobs:
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
       - name: Run base SDK e2e
-        timeout-minutes: 30
+        # The suite runs once per template (native + overlaybd when
+        # OCI_STACK=1), so the step needs roughly double the single-pass
+        # budget.
+        timeout-minutes: 60
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       - name: Run idle-pause SDK e2e

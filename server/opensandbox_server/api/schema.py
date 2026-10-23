@@ -1727,7 +1727,13 @@ class FsbTemplateStatus(BaseModel):
     manifest_ref: Optional[str] = Field(
         None,
         alias="manifestRef",
-        description="S3 manifest reference of the published artifacts; present when Succeeded",
+        description=(
+            "Artifact reference of the published snapshot set — "
+            "s3://.../manifest.json for format=native, or the immutable "
+            "oci://registry/repo@sha256:... manifest for format=overlaybd "
+            "(the runnable reference for template-mode creates); present "
+            "when Succeeded"
+        ),
     )
     message: Optional[str] = Field(
         None,
@@ -1752,7 +1758,13 @@ class FsbTemplate(BaseModel):
     )
     metadata: Optional[Dict[str, str]] = Field(None, description="Custom metadata from the creation request")
     readiness: Optional[FsbTemplateReadiness] = Field(None, description="Build-side readiness gate")
-    publish: str = Field(..., description="S3-compatible publish target")
+    publish: str = Field(
+        ...,
+        description=(
+            "Artifact publish destination — oci://registry/repository for "
+            "format=overlaybd (default), s3://bucket/prefix for format=native"
+        ),
+    )
     format: Literal["native", "overlaybd"] = Field(..., description="Snapshot storage encoding")
     status: FsbTemplateStatus = Field(..., description="Build status")
     created_at: datetime = Field(..., alias="createdAt", description="Creation timestamp")

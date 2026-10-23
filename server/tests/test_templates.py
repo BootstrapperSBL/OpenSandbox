@@ -575,6 +575,8 @@ def test_create_overlaybd_requires_oci_publish_secret(repo, crs, monkeypatch):
         "oci:///templates",
         "oci://registry.example.com/sandbox/templates:v1",
         "oci://registry.example.com/sandbox/templates@sha256:abc",
+        "oci://registry.example.com/sandbox/templates/",
+        "oci://user:pass@registry.example.com/sandbox/templates",
     ],
 )
 def test_create_overlaybd_rejects_invalid_publish(service, publish):
@@ -599,6 +601,13 @@ def test_create_native_rejects_oci_publish(service):
         )
     assert excinfo.value.status_code == 400
     assert "s3://" in str(excinfo.value.detail)
+
+
+def test_create_native_rejects_bucketless_publish(service):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(publish="s3://"))
+    assert excinfo.value.status_code == 400
+    assert "bucket" in str(excinfo.value.detail)
 
 
 @pytest.fixture

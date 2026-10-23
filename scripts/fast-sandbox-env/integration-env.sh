@@ -619,7 +619,9 @@ build_images() {
 	# build paths cannot drift.
 	FSB_SRC_DIR="$FSB_DIR" "$OSB_ROOT/manifests/release/build-fast-sandbox.sh" \
 		|| die "fast-sandbox image build failed"
-	bake_registry_ca_into_images
+	if [[ "$OCI_STACK" == 1 ]]; then
+		bake_registry_ca_into_images
+	fi
 	log "building the OpenSandbox egress image ($IMG_EGRESS)"
 	# Context is the repo root (COPYs components/egress + components/internal).
 	# shellcheck disable=SC2086
@@ -1178,10 +1180,12 @@ template_up() {
 		--build-arg OCI_TOOLS_IMAGE="$IMG_OCI_TOOLS" -t "$IMG_BUILDER" \
 		-f "$FSB_DIR/build/Dockerfile.sandboxtemplate-builder" "$FSB_DIR" >/dev/null \
 		|| die "sandboxtemplate-builder image build failed"
-	bake_registry_ca "$IMG_BUILDER"
-	verify_image_ca_bake "$IMG_BUILDER"
+	if [[ "$OCI_STACK" == 1 ]]; then
+		bake_registry_ca "$IMG_BUILDER"
+		verify_image_ca_bake "$IMG_BUILDER"
+		probe_registry_tls
+	fi
 	kind load docker-image "$IMG_BUILDER" --name "$KIND_CLUSTER" >/dev/null
-	probe_registry_tls
 	local created
 	local -a tmpl_args=(
 		template create
@@ -1205,7 +1209,9 @@ template_up() {
 	[[ -n "$manifest_ref" ]] || fail "template manifestRef is empty"
 	log "template manifestRef: $manifest_ref"
 	pass "SandboxTemplate Succeeded + artifacts published (via opensandbox CLI)"
-	[[ "$OCI_STACK" == 1 ]] && template_up_overlaybd
+	if [[ "$OCI_STACK" == 1 ]]; then
+		template_up_overlaybd
+	fi
 	return 0
 }
 
@@ -1231,16 +1237,18 @@ _overlaybd_template_failed() {
 
 template_up_overlaybd() {
 	log "verify: creating the overlaybd template via the opensandbox CLI (publish=oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO)"
-	local created
-	created="$(osb_api template create \
-		--image "$SBX_IMAGE" \
-		--publish "oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO" \
-		--format overlaybd \
-		--resource cpu=1 --resource memory=512Mi --resource disk=2Gi \
-		--warmup-seconds 15 \
-		--metadata origin=fast-sandbox-env-oci \
-		-o json 2>/dev/null)" \
-		|| fail "overlaybd template create failed against $SERVER_URL: $(osb_api template create --image x --publish y --format overlaybd 2>&1 >/dev/null | head -c 400)"
+	local created create_err="$WORK/overlaybd-create.err"
+	local -a ovl_args=(
+		template create
+		--image "$SBX_IMAGE"
+		--publish "oci://$OCI_REGISTRY_HOST/$OCI_REGISTRY_REPO"
+		--format overlaybd
+		--resource cpu=1 --resource memory=512Mi --resource disk=2Gi
+		--warmup-seconds 15
+		--metadata origin=fast-sandbox-env-oci
+	)
+	created="$(osb_api "${ovl_args[@]}" -o json 2>"$create_err")" \
+		|| fail "overlaybd template create failed against $SERVER_URL: $(head -c 400 "$create_err")"
 	OCI_TEMPLATE_ID="$(printf '%s' "$created" | jq -r '.template_id')"
 	[[ -n "$OCI_TEMPLATE_ID" && "$OCI_TEMPLATE_ID" != "null" ]] || fail "overlaybd template create carried no templateId"
 	printf '%s' "$OCI_TEMPLATE_ID" > "$WORK/overlaybd-template-id"
@@ -1604,31 +1612,21 @@ warm_images_ready() {
 # shared kernel.
 ublk_module_up() {
 	[[ "$OCI_STACK" == 1 ]] || {
-		log "OCI stack disabled (OCI_STACK=0); skipping the ublk check"
+		log "OCI_STACK=0: skipping the ublk check (overlaybd disabled)"
 		return 0
 	}
+	# The overlaybd stack is unusable without the kernel module: the node
+	# ublkd sidecar crash-loops without /dev/ublk-control and every build
+	# fails at its probe device, so fail here instead of ~16 minutes later.
 	if ! grep -qiE 'ublk-char|ublkc' /proc/devices; then
-		log "ublk not registered yet; attempting modprobe ublk_drv"
+		log "ublk not registered; attempting modprobe ublk_drv"
 		sudo_ modprobe ublk_drv 2>/dev/null || true
 	fi
-	# Control node numbers: prefer the host node (misc major 10, dynamic
-	# minor); fall back to kernel conventions when the runner's /dev hides it.
-	UBLK_CTRL_NODE="/dev/ublk-control"
-	[[ -e "$UBLK_CTRL_NODE" ]] || UBLK_CTRL_NODE="/dev/ublkc"
-	if [[ -e "$UBLK_CTRL_NODE" ]]; then
-		UBLK_CTRL_MAJOR="$(ls -l "$UBLK_CTRL_NODE" | awk '{gsub(",", "", $5); print $5}')"
-		UBLK_CTRL_MINOR="$(ls -l "$UBLK_CTRL_NODE" | awk '{print $6}')"
-	else
-		# misc major is statically 10; the minor cannot be derived — the kind
-		# node check below will fail with this context in the message.
-		UBLK_CTRL_MAJOR=10
-		UBLK_CTRL_MINOR=""
-	fi
-	UBLK_CHAR_MAJOR="$(awk '$2 == "ublk-char" || $2 == "ublkc" {print $1; exit}' /proc/devices)"
-	log "ublk numbers: ctrl=$UBLK_CTRL_NODE ($UBLK_CTRL_MAJOR,$UBLK_CTRL_MINOR) char-major=$UBLK_CHAR_MAJOR"
-	pass "ublk registered in /proc/devices"
+	grep -qiE 'ublk-char|ublkc' /proc/devices \
+		|| die "ublk is not registered in /proc/devices after modprobe: the kernel needs CONFIG_BLK_DEV_UBLK (and the runner must be able to load modules); overlaybd requires it when OCI_STACK=1"
+	log "ublk registered: $(grep -i ublk /proc/devices | tr '\n' ' ')"
+	pass "ublk module registered"
 }
-
 
 render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
 	local src="$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml" out="$GEN_DIR/firecracker-egress-pool.yaml"
@@ -1806,8 +1804,15 @@ render_server_config() { # > $GEN_DIR/osb-server-config.toml
 	mkdir -p "$GEN_DIR"
 	awk -v api_key="$SERVER_API_KEY" \
 		-v fastpath="$FASTPATH_ENDPOINT" -v fsb_ns="$RESOURCE_NS" -v pool="$POOL_NAME" \
-		-v execd="$EXECD" '
-		{ gsub(/@SERVER_API_KEY@/, api_key)
+		-v execd="$EXECD" -v oci_secret="$OCI_REGISTRY_SECRET" -v oci_stack="$OCI_STACK" '
+		{ if ($0 == "# @OCI_PUBLISH_SECRET@") {
+		    # OverlayBD templates publish through the in-cluster registry; the
+		    # server bakes this Secret name as output.publishSecretRef. Emitted
+		    # in-place so the key stays inside the [kubernetes] table.
+		    if (oci_stack == "1")
+		      printf "template_oci_publish_secret = \"%s\"\n", oci_secret
+		    next }
+		  gsub(/@SERVER_API_KEY@/, api_key)
 		  gsub(/@SIGNING_KEY@/, signing_key)
 		  gsub(/@FASTPATH_ENDPOINT@/, fastpath)
 		  gsub(/@FSB_NAMESPACE@/, fsb_ns)
@@ -1836,14 +1841,8 @@ fastpath_endpoint = "@FASTPATH_ENDPOINT@"
 fastpath_resource_pool = "@POOL_NAME@"
 fastpath_wait_ready_seconds = 30.0
 template_s3_publish_secret = "sandbox-oss-credentials"
+# @OCI_PUBLISH_SECRET@
 TOML
-	if [[ "$OCI_STACK" == 1 ]]; then
-		# OverlayBD templates publish through the in-cluster registry; the
-		# server bakes this Secret name as output.publishSecretRef.
-		cat >> "$GEN_DIR/osb-server-config.toml" <<TOML
-template_oci_publish_secret = "$OCI_REGISTRY_SECRET"
-TOML
-	fi
 	if [[ "$IDLE_PAUSE" == "1" ]]; then
 		# Dotted keys nest the redis sub-table.
 		cat >> "$GEN_DIR/osb-server-config.toml" <<TOML
