@@ -380,9 +380,9 @@ failure_dump() {
 				printf '%s\n' "$prev"
 			done
 		done
-		echo "--- builder pods + logs (tail) ---"
+		echo "--- builder pods + logs (deep tail: fsb-vm phase + the ublkd daemon errors it reports) ---"
 		kubectl get pods -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --show-labels 2>&1 || true
-		kubectl logs -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --tail=80 2>&1 || true
+		kubectl logs -n "$RESOURCE_NS" -l sandbox.fast.io/sandboxtemplate --tail=2000 2>&1 || true
 		if [[ "$OCI_STACK" == 1 ]]; then
 			echo "--- OCI registry (pod + logs tail) ---"
 			kubectl get pods -n "$RESOURCE_NS" -l app=fast-sandbox-env-registry -o wide 2>&1 || true
@@ -1477,49 +1477,32 @@ warm_images_ready() {
 # appears on the host only at modprobe time — usually after the cluster
 # exists. Every ublkd/fsb-vm consumer (the builder Pod, the node ublkd
 # sidecar, fastlets) mounts the kind node's /dev, so the nodes need the nodes.
+# --- stage: ublk registration check (OCI_STACK=1) -------------------------------
+
+# Informational registration check only. Naming varies by kernel: the char
+# device is "ublk-char" (Al8 6.6 backport) or "ublkc" (mainline), the control
+# node may be /dev/ublk-control (misc) or /dev/ublkc, and some kernels
+# register NO block major — ublkb nodes use per-disk dynamic majors that
+# ublkd mknods itself. The builder's own probe device surfaces any real
+# incapability; the runner's /dev may not show the nodes at all when the
+# runner is itself a container (the kind nodes share the same kernel
+# regardless).
 ublk_module_up() {
 	[[ "$OCI_STACK" == 1 ]] || {
-		log "OCI stack disabled (OCI_STACK=0); skipping ublk setup"
+		log "OCI stack disabled (OCI_STACK=0); skipping the ublk check"
 		return 0
 	}
-	# The control device is /dev/ublkc (minor 0, char name "ublkc" in
-	# /proc/devices); block devices are /dev/ublkb<N> under the "ublk" block
-	# major. On a containerized runner the node may not materialize in the
-	# runner's own /dev — /proc/devices still reflects the shared kernel, and
-	# the kind nodes are verified after mknod below.
-	if [[ ! -e /dev/ublkc ]]; then
-		log "loading the host ublk module (modprobe ublk_drv)"
+	if ! grep -qiE 'ublkc|ublk-char' /proc/devices; then
+		log "ublk not registered yet; attempting modprobe ublk_drv"
 		sudo_ modprobe ublk_drv 2>/dev/null || true
 	fi
-	UBLK_CTRL_MAJOR="$(awk '$2 == "ublkc" {print $1}' /proc/devices)"
-	UBLK_BLOCK_MAJOR="$(awk '/^Block devices:/{f=1; next} f && $2 == "ublk" {print $1}' /proc/devices)"
-	[[ -n "$UBLK_CTRL_MAJOR" && -n "$UBLK_BLOCK_MAJOR" ]] \
-		|| die "ublk is not registered in /proc/devices: the kernel needs CONFIG_BLK_DEV_UBLK (modprobe ublk_drv); overlaybd requires it when OCI_STACK=1"
-	UBLK_CTRL_MINOR=0
-	# Pre-create the block-device range: the kernel allocates minor == device
-	# id under the ublk block major as sandboxes attach; nodes created here
-	# match those numbers by construction. Harmless if ublkd mknods its own.
-	log "ublk numbers: ctrl-major=$UBLK_CTRL_MAJOR (minor $UBLK_CTRL_MINOR) block-major=$UBLK_BLOCK_MAJOR host-node=$([[ -e /dev/ublkc ]] && echo /dev/ublkc || echo 'not visible (containerized runner)')"
-	pass "host ublk module registered (char ublc major $UBLK_CTRL_MAJOR, block ublk major $UBLK_BLOCK_MAJOR)"
-}
-
-ublk_nodes_up() {
-	[[ "$OCI_STACK" == 1 ]] || return 0
-	local node
-	for node in $(docker ps --format '{{.Names}}' | grep "^${KIND_CLUSTER}" || true); do
-		docker exec "$node" sh -ec '
-			[ -e /dev/ublkc ] || mknod /dev/ublkc c "$1" "$2"
-			i=0
-			while [ "$i" -le 63 ]; do
-				[ -e "/dev/ublkb$i" ] || mknod "/dev/ublkb$i" b "$3" "$i" 2>/dev/null || true
-				i=$((i + 1))
-			done
-		' ublk-nodes "$UBLK_CTRL_MAJOR" "$UBLK_CTRL_MINOR" "$UBLK_BLOCK_MAJOR" \
-			|| die "mknod ublk devices inside $node failed"
-		docker exec "$node" sh -ec 'test -e /dev/ublkc && test -e /dev/ublkb0' >/dev/null \
-			|| die "ublk device nodes missing inside $node after mknod"
-	done
-	pass "ublk device nodes present inside the kind nodes"
+	if grep -qiE 'ublkc|ublk-char' /proc/devices; then
+		grep -i 'ublk' /proc/devices | sed 's/^/  ublk: /'
+		ls -l /dev/ublk* 2>/dev/null | sed 's/^/  node: /' || true
+		pass "ublk registered in /proc/devices (naming per kernel)"
+	else
+		log "WARNING: ublk is not registered in /proc/devices; the overlaybd build probe will fail until the kernel supports it (CONFIG_BLK_DEV_UBLK + modprobe ublk_drv)"
+	fi
 }
 
 render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
@@ -2854,12 +2837,11 @@ case "$ACTION" in
 		run_stage "sysctl (fs.inotify)" sysctl_set
 		run_stage "fast-sandbox checkout @ pinned commit" ensure_fsb
 		run_stage "OCI registry CA + serving certificate" registry_ca_up
-		run_stage "ublk module (host) + device nodes" ublk_module_up
+		run_stage "ublk registration check" ublk_module_up
 		run_stage "build images (fast-sandbox + OpenSandbox)" build_images
 		run_stage "XFS StateRoot (reflink)" stateroot_xfs_up
 		run_stage "render kind config" render_kind_config
 		run_stage "kind cluster (KVM passthrough + labels)" kind_up
-		run_stage "ublk device nodes inside the kind nodes" ublk_nodes_up
 		run_stage "RustFS + bucket" rustfs_up
 		run_stage "RustFS endpoint (kind network)" resolve_rustfs_endpoint
 		run_stage "OCI registry (in-cluster, TLS)" registry_up
