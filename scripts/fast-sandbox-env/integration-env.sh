@@ -1423,18 +1423,20 @@ cert_fingerprint() { # <pem>
 	openssl x509 -in "$1" -noout -fingerprint -sha256 | cut -d= -f2
 }
 
-# verify_registry_trust proves the SERVING secret carries exactly the CA the
-# images bake — a silent mismatch here costs a full build cycle to discover
-# as "x509: certificate signed by unknown authority" at push time.
+# verify_registry_trust proves the SERVING secret carries exactly the
+# certificate registry_ca_up signed for this run (leaf-to-leaf comparison —
+# the leaf's fingerprint differs from the CA's by design). A silent mismatch
+# here costs a full build cycle to discover as "x509: certificate signed by
+# unknown authority" at push time.
 verify_registry_trust() {
-	local ca_fp served_fp
-	ca_fp="$(cert_fingerprint "$CA_DIR/ca.crt")"
+	local signed_fp served_fp
+	signed_fp="$(cert_fingerprint "$CA_DIR/server.crt")"
 	served_fp="$(kubectl -n "$RESOURCE_NS" get secret registry-tls \
 		-o jsonpath='{.data.tls\.crt}' | base64 -d | cert_fingerprint /dev/stdin)"
 	[[ -n "$served_fp" ]] || { failure_dump "registry-trust"; fail "could not read the registry serving certificate"; }
-	[[ "$ca_fp" == "$served_fp" ]] \
-		|| { failure_dump "registry-trust"; fail "registry serving cert mismatch: CA=$ca_fp served=$served_fp"; }
-	pass "registry serving cert signed by the env CA ($ca_fp)"
+	[[ "$signed_fp" == "$served_fp" ]] \
+		|| { failure_dump "registry-trust"; fail "registry serving cert mismatch: signed=$signed_fp served=$served_fp"; }
+	pass "registry serving cert matches the env-signed certificate ($signed_fp)"
 }
 
 # verify_image_ca_bake proves the CA is present AND merged into the image's
