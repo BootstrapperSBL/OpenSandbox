@@ -201,6 +201,20 @@ spec:
       - name: firecracker-agent
         image: {{ include "fast-sandbox.image" (dict "repository" .Values.runtime.image.repository "tag" .Values.runtime.image.tag "appVersion" .Chart.AppVersion) }}
         imagePullPolicy: {{ .Values.runtime.image.pullPolicy }}
+        {{- if .Values.runtime.oci.enabled }}
+        # The first host-readiness pass pings the node ublkd socket once;
+        # without this gate it races the sidecar's startup by a few hundred
+        # milliseconds, fails, and the node stays unlabeled until the next
+        # 5-minute recheck. Wait (bounded) for the socket, then start.
+        command: ["/bin/sh", "-ec"]
+        args:
+        - |-
+          for i in $(seq 1 300); do
+            [ -S /run/fast-sandbox/overlaybd/ublkd.sock ] && break
+            sleep 0.2
+          done
+          exec ./firecracker-runtime
+        {{- end }}
         # Only Downward API identities live in env; all tunables come from
         # the mounted agent config (nodeReadiness hot-reloads per pass).
         env:

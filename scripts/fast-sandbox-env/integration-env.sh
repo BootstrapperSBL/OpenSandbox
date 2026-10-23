@@ -1098,7 +1098,10 @@ runtime_up() {
 	done
 	# The readiness loop applies labels + FirecrackerReady itself.
 	for node in $(kubectl get nodes -o jsonpath='{.items[*].metadata.name}'); do
-		wait_for "node $node labeled + FirecrackerReady" 120 \
+		# The agent's host-readiness recheck cadence is 5 minutes; when a
+		# first pass fails (e.g. a slow tool install), the labels land on
+		# the NEXT pass, so the wait must span one full recheck cycle.
+		wait_for "node $node labeled + FirecrackerReady" 480 \
 			runtime_node_labeled "$node"
 	done
 	pass "firecracker-runtime healthy + DART roster=$expected_members + nodes FirecrackerReady"
