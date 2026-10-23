@@ -1307,6 +1307,11 @@ registry_ca_up() {
 		-subj "/CN=$OCI_REGISTRY_HOST" >/dev/null 2>&1 \
 		|| die "registry server key generation failed"
 	cat > "$CA_DIR/server.ext" <<EXT
+basicConstraints=CA:FALSE
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid,issuer
 subjectAltName=DNS:registry,DNS:registry.$RESOURCE_NS,DNS:registry.$RESOURCE_NS.svc,DNS:$OCI_REGISTRY_HOST
 EXT
 	openssl x509 -req -sha256 -days 365 \
