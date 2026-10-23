@@ -2695,18 +2695,19 @@ sdk_e2e() {
 		|| die "server $SERVER_URL is not reachable (run up first)"
 	command -v uv >/dev/null 2>&1 \
 		|| die "uv is required on PATH (https://docs.astral.sh/uv/ — curl -LsSf https://astral.sh/uv/install.sh | sh)"
-	local -a template_ids=()
+	local -a template_ids=() template_origins=()
 	local template_id
 	template_id="$(cat "$WORK/template-id" 2>/dev/null || true)"
 	[[ -n "$template_id" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
 	template_ids+=("$template_id")
+	template_origins+=("fast-sandbox-env")
 	if [[ "$OCI_STACK" == 1 ]]; then
 		local oci_template_id
 		oci_template_id="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
 		# The suite runs once per template: the overlaybd pass exercises the
 		# SDK contract on the on-demand path (the server resolves the OCI
 		# template's status.manifestRef on template-mode creates).
-		[[ -n "$oci_template_id" ]] && template_ids+=("$oci_template_id")
+		[[ -n "$oci_template_id" ]] && template_ids+=("$oci_template_id") template_origins+=("fast-sandbox-env-oci")
 	fi
 	export OPENSANDBOX_TEST_DOMAIN="127.0.0.1:$SERVER_HOST_PORT"
 	export OPENSANDBOX_TEST_PROTOCOL="http"
@@ -2715,9 +2716,11 @@ sdk_e2e() {
 	# No exec: the ERR trap (and the failure dump) must survive a pytest
 	# failure, and exec replaces the shell. One pytest run per template so a
 	# failure names its template.
-	for template_id in "${template_ids[@]}"; do
-		export OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$template_id"
-		log "sdk e2e: template=$template_id server=$SERVER_URL -> tests/python/tests/test_fsb_e2e.py"
+	local index
+	for index in "${!template_ids[@]}"; do
+		export OPENSANDBOX_TEST_FSB_TEMPLATE_ID="${template_ids[$index]}"
+		export OPENSANDBOX_TEST_FSB_TEMPLATE_ORIGIN="${template_origins[$index]}"
+		log "sdk e2e: template=${template_ids[$index]} (origin=${template_origins[$index]}) server=$SERVER_URL -> tests/python/tests/test_fsb_e2e.py"
 		uv run pytest tests/test_fsb_e2e.py
 	done
 }
