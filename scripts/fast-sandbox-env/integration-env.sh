@@ -1480,29 +1480,66 @@ warm_images_ready() {
 # --- stage: ublk registration check (OCI_STACK=1) -------------------------------
 
 # Informational registration check only. Naming varies by kernel: the char
-# device is "ublk-char" (Al8 6.6 backport) or "ublkc" (mainline), the control
-# node may be /dev/ublk-control (misc) or /dev/ublkc, and some kernels
-# register NO block major — ublkb nodes use per-disk dynamic majors that
-# ublkd mknods itself. The builder's own probe device surfaces any real
-# incapability; the runner's /dev may not show the nodes at all when the
-# runner is itself a container (the kind nodes share the same kernel
-# regardless).
+# (queue) device class is "ublk-char" (Al8 6.6 backport, /dev/ublkc<N>) or
+# "ublkc" (mainline), the control node is /dev/ublk-control (misc) or
+# /dev/ublkc, and some kernels register NO block major — ublkb nodes use
+# per-disk dynamic majors that ublkd mknods itself. The runner may be a
+# container whose /dev hides these nodes; /proc/devices always reflects the
+# shared kernel.
 ublk_module_up() {
 	[[ "$OCI_STACK" == 1 ]] || {
 		log "OCI stack disabled (OCI_STACK=0); skipping the ublk check"
 		return 0
 	}
-	if ! grep -qiE 'ublkc|ublk-char' /proc/devices; then
+	if ! grep -qiE 'ublk-char|ublkc' /proc/devices; then
 		log "ublk not registered yet; attempting modprobe ublk_drv"
 		sudo_ modprobe ublk_drv 2>/dev/null || true
 	fi
-	if grep -qiE 'ublkc|ublk-char' /proc/devices; then
-		grep -i 'ublk' /proc/devices | sed 's/^/  ublk: /'
-		ls -l /dev/ublk* 2>/dev/null | sed 's/^/  node: /' || true
-		pass "ublk registered in /proc/devices (naming per kernel)"
+	# Control node numbers: prefer the host node (misc major 10, dynamic
+	# minor); fall back to kernel conventions when the runner's /dev hides it.
+	UBLK_CTRL_NODE="/dev/ublk-control"
+	[[ -e "$UBLK_CTRL_NODE" ]] || UBLK_CTRL_NODE="/dev/ublkc"
+	if [[ -e "$UBLK_CTRL_NODE" ]]; then
+		UBLK_CTRL_MAJOR="$(ls -l "$UBLK_CTRL_NODE" | awk '{gsub(",", "", $5); print $5}')"
+		UBLK_CTRL_MINOR="$(ls -l "$UBLK_CTRL_NODE" | awk '{print $6}')"
 	else
-		log "WARNING: ublk is not registered in /proc/devices; the overlaybd build probe will fail until the kernel supports it (CONFIG_BLK_DEV_UBLK + modprobe ublk_drv)"
+		# misc major is statically 10; the minor cannot be derived — the kind
+		# node check below will fail with this context in the message.
+		UBLK_CTRL_MAJOR=10
+		UBLK_CTRL_MINOR=""
 	fi
+	UBLK_CHAR_MAJOR="$(awk '$2 == "ublk-char" || $2 == "ublkc" {print $1; exit}' /proc/devices)"
+	log "ublk numbers: ctrl=$UBLK_CTRL_NODE ($UBLK_CTRL_MAJOR,$UBLK_CTRL_MINOR) char-major=$UBLK_CHAR_MAJOR"
+	pass "ublk registered in /proc/devices"
+}
+
+# The kind nodes mount their own /dev into every ublk consumer (the builder
+# Pod via the controller's host-dev volume, the node ublkd sidecar and
+# fastlets via the chart/pool mounts). A kind node's /dev is a private tmpfs
+# populated at node creation — the kernel-wide ublk nodes (/dev/ublk-control,
+# the per-device queue char nodes /dev/ublkc<N> under the ublk-char major)
+# never appear there, and the first ublkd "add" fails with ENOENT. Pre-create
+# the control node with the host's exact numbers and a bounded queue-node
+# range; ublkb block nodes use per-disk dynamic majors and stay the daemon's
+# job.
+ublk_nodes_up() {
+	[[ "$OCI_STACK" == 1 ]] || return 0
+	if [[ -z "$UBLK_CTRL_MINOR" ]]; then
+		die "cannot resolve /dev/ublk-control numbers from this runner; load the module (modprobe ublk_drv) so the node exists, or run the env on the kernel host"
+	fi
+	local node
+	for node in $(docker ps --format '{{.Names}}' | grep "^${KIND_CLUSTER}" || true); do
+		docker exec "$node" sh -ec '
+			[ -e /dev/ublk-control ] || mknod /dev/ublk-control c "$1" "$2"
+			i=0
+			while [ "$i" -le 63 ]; do
+				[ -e "/dev/ublkc$i" ] || mknod "/dev/ublkc$i" c "$3" "$i" 2>/dev/null || true
+				i=$((i + 1))
+			done
+		' ublk-nodes "$UBLK_CTRL_MAJOR" "$UBLK_CTRL_MINOR" "$UBLK_CHAR_MAJOR" 			|| die "mknod ublk devices inside $node failed"
+		docker exec "$node" sh -ec 'test -e /dev/ublk-control && test -e /dev/ublkc0' >/dev/null 			|| die "ublk device nodes missing inside $node after mknod"
+	done
+	pass "ublk device nodes present inside the kind nodes (/dev/ublk-control + /dev/ublkc0..63)"
 }
 
 render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
@@ -2842,6 +2879,7 @@ case "$ACTION" in
 		run_stage "XFS StateRoot (reflink)" stateroot_xfs_up
 		run_stage "render kind config" render_kind_config
 		run_stage "kind cluster (KVM passthrough + labels)" kind_up
+		run_stage "ublk device nodes inside the kind nodes" ublk_nodes_up
 		run_stage "RustFS + bucket" rustfs_up
 		run_stage "RustFS endpoint (kind network)" resolve_rustfs_endpoint
 		run_stage "OCI registry (in-cluster, TLS)" registry_up
