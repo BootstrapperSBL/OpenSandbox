@@ -101,23 +101,39 @@ func newManager(r runner, opts Options) *Manager {
 }
 
 func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) error {
+	_, err := m.ApplyStaticDropEstablished(ctx, p, EstablishedDrops{})
+	return err
+}
+
+// ApplyStaticDropEstablished applies p like ApplyStatic, and when drops is
+// non-empty installs destination drops ahead of the established/related accept
+// so keep-alive flows to removed allows stop on the next packet. The returned
+// count is the number of matching TCP conntrack flows observed just before the
+// apply (best-effort; 0 when /proc/net/nf_conntrack is unavailable).
+func (m *Manager) ApplyStaticDropEstablished(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops) (int, error) {
+	matched, countErr := countMatchingConntrackFlows(drops)
+	if countErr != nil {
+		log.Warnf("nftables: counting conntrack flows for established drops failed: %v", countErr)
+		matched = 0
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.quiesced.Load() {
-		return &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
 	}
 	if err := ctx.Err(); err != nil {
-		return &ApplyError{Effect: ApplyUnchanged, Err: err}
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
 	}
 	if p == nil {
 		p = policy.DefaultDenyPolicy()
 	}
 	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
-	log.Infof("nftables: applying static policy: default=%s, allow_v4=%d, allow_v6=%d, deny_v4=%d, deny_v6=%d",
-		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6))
-	script, err := buildRuleset(p, m.opts)
+	log.Infof("nftables: applying static policy: default=%s, allow_v4=%d, allow_v6=%d, deny_v4=%d, deny_v6=%d, established_drops=%d",
+		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6), len(drops.Addrs)+len(drops.Prefixes))
+	script, err := buildRuleset(p, m.opts, drops)
 	if err != nil {
-		return &ApplyError{Effect: ApplyUnchanged, Err: err}
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
 	}
 	if _, err := m.run(ctx, script); err != nil {
 		if isMissingTableError(err) {
@@ -129,7 +145,7 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 					m.domains = make(map[string]*resolvedDomain)
 					telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 					telemetry.RecordNftablesUpdate()
-					return nil
+					return matched, nil
 				} else {
 					effect := ApplyUnknown
 					if ApplyEffectOf(err) == ApplyUnchanged && ApplyEffectOf(retryErr) == ApplyUnchanged {
@@ -145,15 +161,15 @@ func (m *Manager) ApplyStatic(ctx context.Context, p *policy.NetworkPolicy) erro
 			m.quiesced.Store(true)
 		}
 		telemetry.RecordNftablesUpdateFailed(telemetry.NftOpStaticApply)
-		return err
+		return 0, err
 	}
 	m.tracker.clear()
 	m.domainPolicy = p
 	m.domains = make(map[string]*resolvedDomain)
 	telemetry.SetNftablesRuleCount(telemetry.NftRuleCountFromPolicy(p))
 	telemetry.RecordNftablesUpdate()
-	log.Infof("nftables: static policy applied successfully")
-	return nil
+	log.Infof("nftables: static policy applied successfully (established_drop_flows=%d)", matched)
+	return matched, nil
 }
 
 func (m *Manager) AddResolvedIPs(ctx context.Context, ips []ResolvedIP) error {
@@ -224,7 +240,7 @@ func (m *Manager) RemoveEnforcement(ctx context.Context) error {
 	return nil
 }
 
-func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
+func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops) (string, error) {
 	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
 	var err error
 	if allowV4, err = normalizeNFTIntervalSet(allowV4); err != nil {
@@ -282,6 +298,7 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 		chainPolicy = "accept"
 	}
 	fmt.Fprintf(&b, "add chain inet %s %s { type filter hook output priority 0; policy %s; }\n", tableName, chainName, chainPolicy)
+	writeEstablishedDropRules(&b, drops)
 	fmt.Fprintf(&b, "add rule inet %s %s ct state established,related accept\n", tableName, chainName)
 	fmt.Fprintf(&b, "add rule inet %s %s meta mark %s accept\n", tableName, chainName, constants.MarkHex)
 	fmt.Fprintf(&b, "add rule inet %s %s oifname \"lo\" accept\n", tableName, chainName)
@@ -330,6 +347,31 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	}
 
 	return b.String(), nil
+}
+
+func writeEstablishedDropRules(b *strings.Builder, drops EstablishedDrops) {
+	for _, addr := range drops.Addrs {
+		if !addr.IsValid() {
+			continue
+		}
+		addr = addr.Unmap()
+		if addr.Is4() {
+			fmt.Fprintf(b, "add rule inet %s %s ip daddr %s ct state established,related drop\n", tableName, chainName, addr)
+		} else if addr.Is6() {
+			fmt.Fprintf(b, "add rule inet %s %s ip6 daddr %s ct state established,related drop\n", tableName, chainName, addr)
+		}
+	}
+	for _, pfx := range drops.Prefixes {
+		if !pfx.IsValid() {
+			continue
+		}
+		pfx = pfx.Masked()
+		if pfx.Addr().Is4() {
+			fmt.Fprintf(b, "add rule inet %s %s ip daddr %s ct state established,related drop\n", tableName, chainName, pfx)
+		} else if pfx.Addr().Is6() {
+			fmt.Fprintf(b, "add rule inet %s %s ip6 daddr %s ct state established,related drop\n", tableName, chainName, pfx)
+		}
+	}
 }
 
 func writeElements(b *strings.Builder, setName string, elems []string) {
