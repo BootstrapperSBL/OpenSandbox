@@ -1430,7 +1430,7 @@ probe_registry_tls() {
 	out="$(kubectl run registry-tls-probe -n "$RESOURCE_NS" \
 		--image="$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")" \
 		--restart=Never --rm -i -q \
-		--overrides="{\"spec\":{\"containers\":[{\"name\":\"probe\",\"image\":\"$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")\",\"command\":[\"/bin/sh\",\"-ec\",\"openssl s_client -connect $OCI_REGISTRY_HOST:443 -servername $OCI_REGISTRY_HOST </dev/null 2>/dev/null | openssl x509 -noout -issuer -fingerprint -sha256; echo curl: \$(curl -sS -o /dev/null -w '%{http_code}' https://$OCI_REGISTRY_HOST/v2/ -u $OCI_REGISTRY_USER:$OCI_REGISTRY_PASSWORD 2>&1 | head -c 200); ls -l /usr/local/share/ca-certificates/ | tail -n +2; wc -c < /etc/ssl/certs/ca-certificates.crt\"],\"securityContext\":{\"privileged\":true}}],\"restartPolicy\":\"Never\"}}" 2>&1 | tail -8)" \
+		--overrides="{\"spec\":{\"containers\":[{\"name\":\"probe\",\"image\":\"$(docker image inspect --format '{{.ID}}' "$IMG_BUILDER")\",\"command\":[\"/bin/sh\",\"-ec\",\"openssl s_client -connect $OCI_REGISTRY_HOST:443 -servername $OCI_REGISTRY_HOST </dev/null 2>/dev/null > /tmp/served.pem; openssl x509 -in /tmp/served.pem -noout -issuer -subject -dates -fingerprint -sha256; echo verify: \$(openssl verify -CAfile /usr/local/share/ca-certificates/fast-sandbox-env-registry.crt /tmp/served.pem 2>&1); echo curl: \$(curl -sS -o /dev/null -w '%{http_code}' https://$OCI_REGISTRY_HOST/v2/ -u $OCI_REGISTRY_USER:$OCI_REGISTRY_PASSWORD 2>&1 | tail -c 300); wc -c < /etc/ssl/certs/ca-certificates.crt\"],\"securityContext\":{\"privileged\":true}}],\"restartPolicy\":\"Never\"}}" 2>&1 | tail -10)" \
 		|| log "registry TLS probe pod failed: $out"
 	log "registry TLS probe (in-pod view):"
 	printf '%s\n' "$out" | sed 's/^/  | /'
@@ -1454,6 +1454,7 @@ verify_registry_trust() {
 	[[ -n "$served_fp" ]] || { failure_dump "registry-trust"; fail "could not read the registry serving certificate"; }
 	[[ "$signed_fp" == "$served_fp" ]] \
 		|| { failure_dump "registry-trust"; fail "registry serving cert mismatch: signed=$signed_fp served=$served_fp"; }
+	log "signed server cert: $(openssl x509 -in "$CA_DIR/server.crt" -noout -fingerprint -sha256 -dates | tr '\n' ' ')"
 	pass "registry serving cert matches the env-signed certificate ($signed_fp)"
 }
 
