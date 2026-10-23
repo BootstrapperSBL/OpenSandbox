@@ -127,6 +127,14 @@ internal sealed class ProtectedRedirectHandler : DelegatingHandler
             target = new Uri(source, target);
         }
 
+        // Native auto-redirect only follows HTTP(S); other schemes (e.g.
+        // ftp://) are left to the caller as the original redirect response.
+        if (!string.Equals(target.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(target.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
         // Modern .NET never follows a secure-to-insecure redirect.
         if (source.Scheme == Uri.UriSchemeHttps && target.Scheme != Uri.UriSchemeHttps)
         {

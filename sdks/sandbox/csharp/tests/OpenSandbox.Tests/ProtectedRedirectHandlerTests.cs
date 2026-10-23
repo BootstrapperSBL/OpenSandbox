@@ -77,6 +77,21 @@ public class ProtectedRedirectHandlerTests
         Assert.False(content.Disposed);
     }
 
+    [Theory]
+    [InlineData("ftp://other.test/file")]
+    [InlineData("file:///etc/hostname")]
+    public async Task DeclinesRedirectsToUnsupportedUriSchemes(string location)
+    {
+        var calls = 0;
+        using var content = new TrackingContent();
+        using var client = Client((_, _) => { calls++; return Task.FromResult(Redirect(302, location, content)); });
+        using var response = await client.GetAsync("http://example.test");
+        Assert.Equal(1, calls);
+        Assert.False(content.Disposed);
+        Assert.Equal(HttpStatusCode.Found, response.StatusCode);
+        Assert.Equal(new Uri(location), response.Headers.Location);
+    }
+
     [Fact]
     public async Task RedirectLimitReturnsLastResponseAndDisposesIntermediateResponses()
     {
