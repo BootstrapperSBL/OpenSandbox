@@ -218,7 +218,11 @@ class FastSandboxSnapshotRuntime:
         """
         try:
             cr = self._k8s_client.get_custom_object(
-                GROUP, VERSION, namespace, SANDBOX_PLURAL, sandbox_id
+                group=GROUP,
+                version=VERSION,
+                namespace=namespace,
+                plural=SANDBOX_PLURAL,
+                name=sandbox_id,
             )
         except Exception as exc:  # noqa: BLE001 - any read failure blocks the branch decision
             logger.warning(
