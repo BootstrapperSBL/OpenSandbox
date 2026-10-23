@@ -21,7 +21,7 @@ Uses auto-generated isolated_execution API modules with explicit session_id.
 
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from io import IOBase, TextIOBase
 from uuid import UUID
 
@@ -151,7 +151,7 @@ class IsolatedFilesystemAdapter(Filesystem):
         range_header: str | None = None,
         offset: int | None = None,
         limit: int | None = None,
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         try:
             url = self._get_url(self.DOWNLOAD_PATH)
             params: dict[str, str] = {"path": path}
@@ -179,7 +179,7 @@ class IsolatedFilesystemAdapter(Filesystem):
                     request_id=extract_request_id(response.headers),
                 )
 
-            async def _iter() -> AsyncIterator[bytes]:
+            async def _iter() -> AsyncGenerator[bytes, None]:
                 try:
                     async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                         yield chunk

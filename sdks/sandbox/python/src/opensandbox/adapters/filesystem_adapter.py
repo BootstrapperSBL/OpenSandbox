@@ -24,7 +24,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from io import IOBase, TextIOBase
 from typing import TypedDict
 
@@ -215,7 +215,7 @@ class FilesystemAdapter(Filesystem):
             range_header: str | None = None,
             offset: int | None = None,
             limit: int | None = None,
-    ) -> AsyncIterator[bytes]:
+    ) -> AsyncGenerator[bytes, None]:
         """Stream file content as bytes chunks via HTTP (true streaming)."""
         logger.debug(f"Streaming file as bytes: {path} (chunk_size={chunk_size})")
         try:
@@ -247,7 +247,7 @@ class FilesystemAdapter(Filesystem):
                     request_id=extract_request_id(response.headers),
                 )
 
-            async def _iter() -> AsyncIterator[bytes]:
+            async def _iter() -> AsyncGenerator[bytes, None]:
                 try:
                     async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                         yield chunk
