@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 	"sync"
@@ -124,6 +125,35 @@ func (m *Manager) ApplyStaticDropEstablished(ctx context.Context, p *policy.Netw
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.applyStaticDropEstablishedLocked(ctx, p, drops, matched)
+}
+
+// ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
+// teardown set, and applies newPol under one manager lock so AddResolvedDomain
+// cannot admit an old-policy address between snapshot and apply.
+func (m *Manager) ApplyStaticComputingEstablishedDrops(ctx context.Context, oldPol, newPol *policy.NetworkPolicy) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.quiesced.Load() {
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
+	}
+	if err := ctx.Err(); err != nil {
+		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
+	}
+	if newPol == nil {
+		newPol = policy.DefaultDenyPolicy()
+	}
+	prior := m.snapshotResolvedDomainsLocked()
+	drops := ComputeEstablishedDrops(oldPol, newPol, prior)
+	matched, countErr := countMatchingConntrackFlows(drops)
+	if countErr != nil {
+		log.Warnf("nftables: counting conntrack flows for established drops failed: %v", countErr)
+		matched = 0
+	}
+	return m.applyStaticDropEstablishedLocked(ctx, newPol, drops, matched)
+}
+
+func (m *Manager) applyStaticDropEstablishedLocked(ctx context.Context, p *policy.NetworkPolicy, drops EstablishedDrops, matched int) (int, error) {
 	if m.quiesced.Load() {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: ErrQuiesced}
 	}
@@ -134,8 +164,8 @@ func (m *Manager) ApplyStaticDropEstablished(ctx context.Context, p *policy.Netw
 		p = policy.DefaultDenyPolicy()
 	}
 	allowV4, allowV6, denyV4, denyV6 := p.StaticIPSets()
-	log.Infof("nftables: applying static policy: default=%s, allow_v4=%d, allow_v6=%d, deny_v4=%d, deny_v6=%d, established_drops=%d",
-		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6), len(drops.Addrs)+len(drops.Prefixes))
+	log.Infof("nftables: applying static policy: default=%s, allow_v4=%d, allow_v6=%d, deny_v4=%d, deny_v6=%d, established_drops=%d catch_all=%v",
+		p.DefaultAction, len(allowV4), len(allowV6), len(denyV4), len(denyV6), len(drops.Addrs)+len(drops.Prefixes)+len(drops.PortDrops), drops.CatchAll)
 	script, err := buildRuleset(p, m.opts, drops)
 	if err != nil {
 		return 0, &ApplyError{Effect: ApplyUnchanged, Err: err}
@@ -303,8 +333,19 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 		chainPolicy = "accept"
 	}
 	fmt.Fprintf(&b, "add chain inet %s %s { type filter hook output priority 0; policy %s; }\n", tableName, chainName, chainPolicy)
+	// DNS-learned and static allows bypass established teardown so a later
+	// resolve (shared CDN IP) is not pinned by a stale drop from a prior apply.
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV4Set)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, dynAllowV6Set)
+	fmt.Fprintf(&b, "add rule inet %s %s ip daddr @%s ct state established,related accept\n", tableName, chainName, allowV4Set)
+	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr @%s ct state established,related accept\n", tableName, chainName, allowV6Set)
+	writeEstablishedKeepRules(&b, drops)
 	writeEstablishedDropRules(&b, drops)
-	fmt.Fprintf(&b, "add rule inet %s %s ct state established,related accept\n", tableName, chainName)
+	if drops.CatchAll {
+		fmt.Fprintf(&b, "add rule inet %s %s ct state established,related drop\n", tableName, chainName)
+	} else {
+		fmt.Fprintf(&b, "add rule inet %s %s ct state established,related accept\n", tableName, chainName)
+	}
 	fmt.Fprintf(&b, "add rule inet %s %s meta mark %s accept\n", tableName, chainName, constants.MarkHex)
 	fmt.Fprintf(&b, "add rule inet %s %s oifname \"lo\" accept\n", tableName, chainName)
 	// IPv6 neighbor discovery is locally generated ICMPv6 that never matches an allow set: without
@@ -362,28 +403,83 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options, drops EstablishedDrops)
 	return b.String(), nil
 }
 
+func writeEstablishedKeepRules(b *strings.Builder, drops EstablishedDrops) {
+	for _, addr := range drops.KeepAddrs {
+		writeEstablishedAddrRule(b, addr, "accept")
+	}
+	for _, pfx := range drops.KeepPrefixes {
+		writeEstablishedPrefixRule(b, pfx, "accept")
+	}
+	for _, pd := range drops.KeepPorts {
+		writeEstablishedPortRule(b, pd, "accept")
+	}
+}
+
 func writeEstablishedDropRules(b *strings.Builder, drops EstablishedDrops) {
 	for _, addr := range drops.Addrs {
-		if !addr.IsValid() {
-			continue
-		}
-		addr = addr.Unmap()
-		if addr.Is4() {
-			fmt.Fprintf(b, "add rule inet %s %s ip daddr %s ct state established,related drop\n", tableName, chainName, addr)
-		} else if addr.Is6() {
-			fmt.Fprintf(b, "add rule inet %s %s ip6 daddr %s ct state established,related drop\n", tableName, chainName, addr)
-		}
+		writeEstablishedAddrRule(b, addr, "drop")
 	}
 	for _, pfx := range drops.Prefixes {
-		if !pfx.IsValid() {
-			continue
+		writeEstablishedPrefixRule(b, pfx, "drop")
+	}
+	for _, pd := range drops.PortDrops {
+		writeEstablishedPortRule(b, pd, "drop")
+	}
+}
+
+func writeEstablishedAddrRule(b *strings.Builder, addr netip.Addr, verb string) {
+	if !addr.IsValid() {
+		return
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		fmt.Fprintf(b, "add rule inet %s %s ip daddr %s ct state established,related %s\n", tableName, chainName, addr, verb)
+	} else if addr.Is6() {
+		fmt.Fprintf(b, "add rule inet %s %s ip6 daddr %s ct state established,related %s\n", tableName, chainName, addr, verb)
+	}
+}
+
+func writeEstablishedPrefixRule(b *strings.Builder, pfx netip.Prefix, verb string) {
+	if !pfx.IsValid() {
+		return
+	}
+	pfx = pfx.Masked()
+	if pfx.Addr().Is4() {
+		fmt.Fprintf(b, "add rule inet %s %s ip daddr %s ct state established,related %s\n", tableName, chainName, pfx, verb)
+	} else if pfx.Addr().Is6() {
+		fmt.Fprintf(b, "add rule inet %s %s ip6 daddr %s ct state established,related %s\n", tableName, chainName, pfx, verb)
+	}
+}
+
+func writeEstablishedPortRule(b *strings.Builder, pd EstablishedPortDrop, verb string) {
+	members := make([]string, 0, len(pd.Ports)+len(pd.Ranges))
+	for _, port := range pd.Ports {
+		members = append(members, fmt.Sprintf("%d", port))
+	}
+	for _, rg := range pd.Ranges {
+		members = append(members, fmt.Sprintf("%d-%d", rg.Lo, rg.Hi))
+	}
+	if len(members) == 0 {
+		return
+	}
+	portsClause := strings.Join(members, ", ")
+	switch {
+	case pd.Addr.IsValid():
+		addr := pd.Addr.Unmap()
+		daddr := "ip daddr"
+		if addr.Is6() {
+			daddr = "ip6 daddr"
 		}
-		pfx = pfx.Masked()
-		if pfx.Addr().Is4() {
-			fmt.Fprintf(b, "add rule inet %s %s ip daddr %s ct state established,related drop\n", tableName, chainName, pfx)
-		} else if pfx.Addr().Is6() {
-			fmt.Fprintf(b, "add rule inet %s %s ip6 daddr %s ct state established,related drop\n", tableName, chainName, pfx)
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } ct state established,related %s\n",
+			tableName, chainName, daddr, addr, portsClause, verb)
+	case pd.Prefix.IsValid():
+		pfx := pd.Prefix.Masked()
+		daddr := "ip daddr"
+		if pfx.Addr().Is6() {
+			daddr = "ip6 daddr"
 		}
+		fmt.Fprintf(b, "add rule inet %s %s %s %s tcp dport { %s } ct state established,related %s\n",
+			tableName, chainName, daddr, pfx, portsClause, verb)
 	}
 }
 
