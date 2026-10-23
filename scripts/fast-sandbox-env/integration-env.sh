@@ -736,6 +736,22 @@ render_kind_config() { # > $GEN_DIR/kind-cluster.yaml
 	local src="$MANIFESTS_DIR/cluster/kind-cluster.yaml" out="$GEN_DIR/kind-cluster.yaml"
 	mkdir -p "$GEN_DIR"
 	cp "$src" "$out"
+	# OCI_STACK=1 binds the host /dev into every node (FIRST extraMount, so
+	# the private /dev/shm mount below it shadows the host shm again): the
+	# kernel creates ublk device nodes on the host devtmpfs at add time and
+	# this kernel registers no block major, so a static node list cannot
+	# track them.
+	if [[ "$OCI_STACK" == 1 ]]; then
+		awk '
+			/^  # @UBLK_DEV_MOUNT@$/ {
+				print "  - hostPath: /dev"
+				print "    containerPath: /dev"
+				next }
+			{ print }
+		' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+	else
+		grep -v '^  # @UBLK_DEV_MOUNT@$' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+	fi
 	if [[ "$KIND_SINGLE" == "1" ]]; then
 		# Strip the worker node: cache-only topology, no peer traffic.
 		awk '/^- role: worker/ {exit} {print}' "$out" > "$out.tmp" && mv "$out.tmp" "$out"
@@ -1513,34 +1529,6 @@ ublk_module_up() {
 	pass "ublk registered in /proc/devices"
 }
 
-# The kind nodes mount their own /dev into every ublk consumer (the builder
-# Pod via the controller's host-dev volume, the node ublkd sidecar and
-# fastlets via the chart/pool mounts). A kind node's /dev is a private tmpfs
-# populated at node creation — the kernel-wide ublk nodes (/dev/ublk-control,
-# the per-device queue char nodes /dev/ublkc<N> under the ublk-char major)
-# never appear there, and the first ublkd "add" fails with ENOENT. Pre-create
-# the control node with the host's exact numbers and a bounded queue-node
-# range; ublkb block nodes use per-disk dynamic majors and stay the daemon's
-# job.
-ublk_nodes_up() {
-	[[ "$OCI_STACK" == 1 ]] || return 0
-	if [[ -z "$UBLK_CTRL_MINOR" ]]; then
-		die "cannot resolve /dev/ublk-control numbers from this runner; load the module (modprobe ublk_drv) so the node exists, or run the env on the kernel host"
-	fi
-	local node
-	for node in $(docker ps --format '{{.Names}}' | grep "^${KIND_CLUSTER}" || true); do
-		docker exec "$node" sh -ec '
-			[ -e /dev/ublk-control ] || mknod /dev/ublk-control c "$1" "$2"
-			i=0
-			while [ "$i" -le 63 ]; do
-				[ -e "/dev/ublkc$i" ] || mknod "/dev/ublkc$i" c "$3" "$i" 2>/dev/null || true
-				i=$((i + 1))
-			done
-		' ublk-nodes "$UBLK_CTRL_MAJOR" "$UBLK_CTRL_MINOR" "$UBLK_CHAR_MAJOR" 			|| die "mknod ublk devices inside $node failed"
-		docker exec "$node" sh -ec 'test -e /dev/ublk-control && test -e /dev/ublkc0' >/dev/null 			|| die "ublk device nodes missing inside $node after mknod"
-	done
-	pass "ublk device nodes present inside the kind nodes (/dev/ublk-control + /dev/ublkc0..63)"
-}
 
 render_pool() { # > $GEN_DIR/firecracker-egress-pool.yaml
 	local src="$MANIFESTS_DIR/pool/firecracker-egress-pool.yaml" out="$GEN_DIR/firecracker-egress-pool.yaml"
@@ -2879,7 +2867,6 @@ case "$ACTION" in
 		run_stage "XFS StateRoot (reflink)" stateroot_xfs_up
 		run_stage "render kind config" render_kind_config
 		run_stage "kind cluster (KVM passthrough + labels)" kind_up
-		run_stage "ublk device nodes inside the kind nodes" ublk_nodes_up
 		run_stage "RustFS + bucket" rustfs_up
 		run_stage "RustFS endpoint (kind network)" resolve_rustfs_endpoint
 		run_stage "OCI registry (in-cluster, TLS)" registry_up
