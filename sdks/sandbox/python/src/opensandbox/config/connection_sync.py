@@ -20,6 +20,7 @@ This mirrors ConnectionConfig (async) but uses httpx sync transports.
 """
 
 import os
+import ssl
 from datetime import timedelta
 
 import httpx
@@ -43,6 +44,7 @@ class ConnectionConfigSync(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _owns_transport: bool = PrivateAttr(default=True)
+    _ssl_context: ssl.SSLContext | None = PrivateAttr(default=None)
 
     api_key: str | None = Field(
         default=None, description="API key for authentication with sandbox service"
@@ -158,7 +160,9 @@ class ConnectionConfigSync(BaseModel):
         shared `transport` on this config is never touched. Callers that
         close what they build (e.g. adapter clients) can do so safely.
         """
-        ssl_context = httpx.create_ssl_context()
+        if self._ssl_context is None:
+            self._ssl_context = httpx.create_ssl_context()
+        ssl_context = self._ssl_context
         inner = httpx.HTTPTransport(
             verify=ssl_context,
             limits=httpx.Limits(

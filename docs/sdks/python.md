@@ -516,6 +516,8 @@ await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
 
 The `ConnectionConfig` class manages API server connection settings.
 
+Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sandboxes. SDK-owned transports share that configuration's lazily loaded SSL context, avoiding repeated CA certificate loading, while each Sandbox/Manager keeps its own connection pool and closes it independently. TLS verification remains enabled. Create a new configuration to reload the system or environment-configured trust store. For connection pooling across sandboxes, supply a shared `transport` and close it after all users finish.
+
 | Parameter         | Description                                | Default                      | Environment Variable   |
 | ----------------- | ------------------------------------------ | ---------------------------- | ---------------------- |
 | `api_key`         | API Key for authentication                 | Optional; needed when server auth is enabled | `OPEN_SANDBOX_API_KEY` |
