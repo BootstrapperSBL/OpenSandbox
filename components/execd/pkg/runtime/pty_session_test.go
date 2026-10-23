@@ -475,3 +475,19 @@ func TestPTYSession_EndsWhileClientStopsReading(t *testing.T) {
 		t.Fatal("session did not end after the shell exited")
 	}
 }
+
+// The shell is reaped before its output is drained, so its PID may be reused
+// meanwhile: the session must stop signalling it right away.
+func TestPTYSession_StopsSignallingOnceShellIsReaped(t *testing.T) {
+	requireBash(t)
+
+	s := newPTYSession(uuidString(), "", "echo started")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+	_, _, detach := s.AttachOutput()
+	defer detach()
+
+	require.Eventually(t, func() bool { return !s.IsRunning() },
+		ptyDrainTimeout/2, 10*time.Millisecond,
+		"session still signalable while its output drains")
+}

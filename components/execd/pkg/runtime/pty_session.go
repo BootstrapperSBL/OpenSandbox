@@ -467,6 +467,15 @@ const ptyDrainTimeout = 2 * time.Second
 func (s *ptySession) waitAndExit(mp *managedProcess, ptmx *os.File, outputDone <-chan struct{}) {
 	_ = mp.Wait()
 
+	// The shell is reaped and its PID may be reused, so stop signalling it
+	// before waiting for its output below.
+	s.mu.Lock()
+	exitCode := mp.ExitCode()
+	s.lastExitCode = exitCode
+	s.pid = 0
+	doneCh := s.doneCh
+	s.mu.Unlock()
+
 	// Output the shell wrote before exiting can still be buffered in the
 	// master, and closing it discards that output. The broadcast goroutine
 	// stops once it has read everything (the master then returns EIO), so
@@ -477,13 +486,6 @@ func (s *ptySession) waitAndExit(mp *managedProcess, ptmx *os.File, outputDone <
 	case <-time.After(ptyDrainTimeout):
 	}
 	_ = ptmx.Close()
-
-	s.mu.Lock()
-	exitCode := mp.ExitCode()
-	s.lastExitCode = exitCode
-	s.pid = 0
-	doneCh := s.doneCh
-	s.mu.Unlock()
 
 	close(doneCh)
 }
