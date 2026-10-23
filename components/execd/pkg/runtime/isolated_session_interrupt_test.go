@@ -37,10 +37,9 @@ func newInterruptTestSession(t *testing.T) (*IsolatedRunner, string) {
 	return runner, id
 }
 
-// TestRunInIsolatedSession_InterruptKeepsSessionAlive verifies the public
-// contract that a cancelled run (client disconnect or timeout_seconds expiry)
-// interrupts the running command without killing or deregistering the
-// persistent session, so the next run on the same session succeeds.
+// TestRunInIsolatedSession_InterruptKeepsSessionAlive verifies that a
+// cancelled run interrupts the command but leaves the session alive and
+// usable for the next run.
 func TestRunInIsolatedSession_InterruptKeepsSessionAlive(t *testing.T) {
 	runner, id := newInterruptTestSession(t)
 
@@ -75,9 +74,8 @@ func TestRunInIsolatedSession_InterruptKeepsSessionAlive(t *testing.T) {
 }
 
 // TestRunInIsolatedSession_InterruptedRunDoesNotLeakIntoNext verifies that an
-// interrupt ends the whole run when the code is wrapped in a subshell (envs
-// supplied): later lines of the interrupted code must never execute and must
-// not pollute the next run's output.
+// interrupt aborts a subshell-wrapped (envs) script before its later lines
+// run, without polluting the next run's output.
 func TestRunInIsolatedSession_InterruptedRunDoesNotLeakIntoNext(t *testing.T) {
 	runner, id := newInterruptTestSession(t)
 
@@ -109,10 +107,8 @@ func TestRunInIsolatedSession_InterruptedRunDoesNotLeakIntoNext(t *testing.T) {
 }
 
 // TestRunInIsolatedSession_CancelledScriptTailDoesNotKillSession verifies
-// that a cancelled no-envs run whose remaining statements execute after the
-// interrupt cannot trip the SIGKILL escalation: repeated SIGINTs drain the
-// buffered tail statement by statement while the trapped shell survives, so
-// the session stays alive and accepts follow-up runs.
+// that repeated SIGINTs drain a cancelled no-envs script tail without
+// tripping the SIGKILL escalation, so the session survives follow-up runs.
 func TestRunInIsolatedSession_CancelledScriptTailDoesNotKillSession(t *testing.T) {
 	runner, id := newInterruptTestSession(t)
 
@@ -127,9 +123,8 @@ func TestRunInIsolatedSession_CancelledScriptTailDoesNotKillSession(t *testing.T
 		t.Fatalf("interrupted run error = %v, want context.DeadlineExceeded", err)
 	}
 
-	// Stay past the escalation deadline (300ms cancel + 1500ms grace). With
-	// only a single SIGINT the second statement would still be running and
-	// the watcher would have SIGKILLed the whole session by now.
+	// Past the escalation deadline: a single-SIGINT watcher would have
+	// SIGKILLed the session by now.
 	time.Sleep(2 * time.Second)
 
 	s := runner.lookup(id)
@@ -148,9 +143,8 @@ func TestRunInIsolatedSession_CancelledScriptTailDoesNotKillSession(t *testing.T
 }
 
 // TestRunInIsolatedSession_EscalatesWhenInterruptIgnored verifies that a
-// command which ignores SIGINT cannot wedge the session's run mutex forever:
-// the watcher escalates to SIGKILL, the run fails, and the wedged session is
-// torn down so the failure is observable instead of a silent hang.
+// SIGINT-immune command cannot wedge the session forever: the watcher
+// escalates to SIGKILL and the session reports dead.
 func TestRunInIsolatedSession_EscalatesWhenInterruptIgnored(t *testing.T) {
 	runner, id := newInterruptTestSession(t)
 
@@ -169,9 +163,8 @@ func TestRunInIsolatedSession_EscalatesWhenInterruptIgnored(t *testing.T) {
 		t.Fatalf("escalated run took %v; SIGINT-immune command was not killed", elapsed)
 	}
 
-	// The SIGKILL reaps the session process, so the session must turn dead
-	// and reject further work. (The test isolator's lifecycle only drains on
-	// explicit delete, so registry removal is not asserted here.)
+	// SIGKILL reaps the session process; the registry entry only goes away
+	// on explicit delete, so assert dead() instead.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		s := runner.lookup(id)

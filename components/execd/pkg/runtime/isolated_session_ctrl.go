@@ -42,14 +42,11 @@ import (
 const isolatedRunEndMarkerPrefix = "__ISOLATED_RUN_END__"
 
 // isolatedInterruptEscalationTimeout bounds how long a cancelled run waits
-// after SIGINT before escalating to SIGKILL. It gives a well-behaved command
-// time to wind down while guaranteeing a SIGINT-immune command cannot hold
-// the session's run mutex forever.
+// for its end marker before the session process group is SIGKILLed.
 var isolatedInterruptEscalationTimeout = 10 * time.Second
 
-// isolatedInterruptRepeatInterval is the SIGINT re-send period during the
-// escalation window. Repeated SIGINTs drain a no-envs script tail statement
-// by statement without harming the trapped shell.
+// isolatedInterruptRepeatInterval is the SIGINT re-send period used while
+// draining a cancelled no-envs script tail.
 var isolatedInterruptRepeatInterval = 500 * time.Millisecond
 
 // IsolatedRunner is the concrete isolated session runner.
@@ -653,16 +650,14 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		return fmt.Errorf("session not started")
 	}
 
-	// Prepend env exports before user code.
+	// The per-run UUID makes it impossible for user output to forge this
+	// run's end marker.
 	runMarker := fmt.Sprintf("%s_%s", isolatedRunEndMarkerPrefix, uuid.New().String())
 
-	// trap : INT keeps the persistent shell alive when the session process
-	// group is signalled: the shell catches SIGINT (the trap runs after the
-	// foreground child exits) while the running command dies with the default
-	// disposition. When envs are supplied the code already runs in a subshell,
-	// so an interrupt ends the whole run; without envs the code must stay in
-	// the main shell to keep user exports visible to later runs, and an
-	// interrupt then stops the currently executing line only.
+	// trap : INT makes the cancellation SIGINT kill the running command, not
+	// the persistent shell. Envs runs are subshell-wrapped so an interrupt
+	// aborts the whole script; no-envs runs stay in the main shell to keep
+	// cross-run exports working.
 	var script strings.Builder
 	script.WriteString("trap : INT\n")
 	if len(envs) > 0 {
@@ -680,16 +675,12 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	}
 	script.WriteString(fmt.Sprintf("echo %s $?\n", runMarker))
 
-	// On timeout/cancel, send SIGINT to interrupt the running command
-	// without killing the persistent shell session. Closing stdin would
-	// terminate the shell entirely.
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
 	defer func() {
 		close(done)
-		// Keep runMu held until the watcher has either observed done or
-		// completed its SIGINT. Otherwise a delayed cancellation from this Run
-		// can interrupt the next serialized Run.
+		// Hold runMu until the watcher's final signal completes, so a late
+		// cancellation cannot interrupt the next serialized run.
 		<-watcherDone
 	}()
 	go func() {
@@ -697,15 +688,10 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		select {
 		case <-ctx.Done():
 			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
-			// Without envs the script is not subshell-wrapped: after the
-			// first SIGINT the persistent shell advances to the remaining
-			// buffered statements of the cancelled run. Repeating SIGINT
-			// kills each newly started statement (the trap keeps the shell
-			// alive) so the tail drains to the end marker quickly instead
-			// of running to completion. Only if the marker still has not
-			// arrived after the escalation window is the command assumed
-			// to ignore SIGINT; SIGKILL then ends the wedged run (and the
-			// session) deterministically instead of hanging forever.
+			// No-envs scripts queue their remaining statements in the shell
+			// after the interrupt; repeated SIGINT kills each as it starts
+			// (the trap keeps the shell alive). A marker still missing after
+			// the deadline means SIGINT is being ignored: escalate.
 			ticker := time.NewTicker(isolatedInterruptRepeatInterval)
 			defer ticker.Stop()
 			deadline := time.After(isolatedInterruptEscalationTimeout)

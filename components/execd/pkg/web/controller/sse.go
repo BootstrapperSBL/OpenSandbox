@@ -37,9 +37,8 @@ var sseHeaders = map[string]string{
 	"X-Accel-Buffering": "no",
 }
 
-// ssePingInterval is the keepalive period for SSE streams. It must stay well
-// below downstream gateway/proxy idle timeouts so a silent command (e.g. a
-// long pip install producing no stdout) cannot get the stream reaped.
+// ssePingInterval is the SSE keepalive period; it must stay well below
+// gateway idle timeouts so silent commands cannot get the stream reaped.
 var ssePingInterval = 3 * time.Second
 
 // setupSSEResponse is idempotent: once headers are committed, subsequent calls

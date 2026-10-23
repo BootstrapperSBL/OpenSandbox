@@ -267,9 +267,8 @@ func (c *IsolatedSessionController) Run() {
 	}
 	defer cancel()
 
-	// Fail fast on an unknown session while the response is still JSON:
-	// once SSE headers are committed below, errors can only be delivered as
-	// stream events.
+	// Unknown-session runs must stay JSON 404s, so probe before the SSE
+	// headers below are committed.
 	if _, err := isolatedRunner.GetIsolatedSession(sessionID); err != nil {
 		if errors.Is(err, runtime.ErrContextNotFound) {
 			c.RespondError(http.StatusNotFound, model.ErrorCodeSessionNotFound, "session not found")
@@ -298,10 +297,8 @@ func (c *IsolatedSessionController) Run() {
 		return
 	}
 
-	// Foreground mode: stream via SSE. Commit the response headers up front
-	// and keep the stream alive with periodic pings so gateway idle timeouts
-	// cannot reap the connection while a silent command (e.g. pip install)
-	// produces no stdout for long stretches.
+	// Commit SSE headers up front and ping periodically so gateway idle
+	// timeouts cannot reap the stream while a silent command runs.
 	c.setupSSEResponse()
 
 	pingCtx, pingCancel := context.WithCancel(ctx)
@@ -328,20 +325,15 @@ func (c *IsolatedSessionController) Run() {
 	err := isolatedRunner.RunInIsolatedSession(ctx, sessionID, req.Code, req.Envs, onStdout)
 	durationMs := float64(time.Since(startTime)) / float64(time.Millisecond)
 
-	// Stop the ping goroutine before the final event and before the handler
-	// returns, so nothing writes to the response writer after Go's net/http
-	// closes it.
+	// Stop pinging before the final event and handler return.
 	pingCancel()
 	pingWg.Wait()
 
 	if err != nil {
 		if errors.Is(err, runtime.ErrContextNotFound) {
-			// The session can vanish between the pre-flight probe and the
-			// run's internal lookup (concurrent DELETE, exited-session
-			// cleanup). SSE headers are already committed at this point, so
-			// the status code can no longer change — surface the failure as
-			// a terminal stream event instead of appending a JSON body
-			// mid-stream.
+			// The session vanished after the probe (e.g. concurrent delete).
+			// SSE headers are already committed, so the failure must go out
+			// as a terminal stream event, not a JSON body.
 			telemetry.RecordIsolatedRun(ctx, "error", durationMs)
 			c.writeIsolatedRunError("SessionNotFound", "session not found")
 			return
@@ -364,6 +356,8 @@ func (c *IsolatedSessionController) Run() {
 	c.writeSingleEvent("IsolatedComplete", event.ToJSON(), true, event.Summary())
 }
 
+// writeIsolatedRunError emits a terminal IsolatedError SSE event; only call
+// after the SSE headers are committed.
 func (c *IsolatedSessionController) writeIsolatedRunError(ename, evalue string) {
 	event := model.ServerStreamEvent{
 		Type:      model.StreamEventTypeError,
