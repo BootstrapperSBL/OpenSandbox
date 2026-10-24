@@ -12,22 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import unittest
 from types import SimpleNamespace
 
 from app.k8s_resources import _event_matches_sandbox, pod_name_candidates_for_sandbox
 
 
-def test_pod_name_candidates_include_batch_suffix():
-    assert pod_name_candidates_for_sandbox("abc") == ["abc-0", "abc"]
+class K8sEventFilterTests(unittest.TestCase):
+    def test_pod_name_candidates_include_batch_suffix(self):
+        self.assertEqual(pod_name_candidates_for_sandbox("abc"), ["abc-0", "abc"])
+
+    def test_event_matches_pooled_pod_name(self):
+        ev = SimpleNamespace(
+            involved_object=SimpleNamespace(kind="Pod", name="abc-0"),
+        )
+        names = set(pod_name_candidates_for_sandbox("abc"))
+        self.assertTrue(_event_matches_sandbox(ev, names))
+        self.assertFalse(
+            _event_matches_sandbox(
+                SimpleNamespace(involved_object=SimpleNamespace(kind="Pod", name="other-0")),
+                names,
+            )
+        )
 
 
-def test_event_matches_pooled_pod_name():
-    ev = SimpleNamespace(
-        involved_object=SimpleNamespace(kind="Pod", name="abc-0"),
-    )
-    names = set(pod_name_candidates_for_sandbox("abc"))
-    assert _event_matches_sandbox(ev, names)
-    assert not _event_matches_sandbox(
-        SimpleNamespace(involved_object=SimpleNamespace(kind="Pod", name="other-0")),
-        names,
-    )
+if __name__ == "__main__":
+    unittest.main()
