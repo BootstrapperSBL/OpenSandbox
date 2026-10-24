@@ -81,9 +81,7 @@ from opensandbox_server.integrations.idle_pause.redis_client import (
     close_idle_pause_redis_client,
     connect_idle_pause_redis_from_config,
 )
-from opensandbox_server.services.composite_service import CompositeSandboxService
 from opensandbox_server.services.fast_sandbox.endpoint import build_endpoint
-from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
 logger = logging.getLogger(__name__)
 
@@ -541,6 +539,11 @@ async def start_idle_pause_sweeper(
     if app_config.runtime.type != "kubernetes":
         logger.info("idle_pause disabled for non-kubernetes runtime (fsb backend only)")
         return None
+
+    # Imported here: FastSandboxService imports this package for its idle
+    # policy helpers, so a module-level import would be circular.
+    from opensandbox_server.services.composite_service import CompositeSandboxService
+    from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 
     fsb = None
     if isinstance(sandbox_service, CompositeSandboxService):
