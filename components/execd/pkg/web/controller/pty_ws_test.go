@@ -587,6 +587,52 @@ func TestPTYWS_TakeoverEvictsHolder(t *testing.T) {
 	ptyOutputContains(t, conn2, "SAMESHELL_alive", 8*time.Second)
 }
 
+// TestPTYWS_TakeoverClosesBusyHolderWithCloseCode verifies that a holder whose
+// output pump is in the middle of a write still gets the WSCloseTakenOver close
+// frame, rather than a bare TCP close (1006). The holder reads slowly until the
+// takeover handshake completes, so the pump is blocked writing when it is evicted.
+func TestPTYWS_TakeoverClosesBusyHolderWithCloseCode(t *testing.T) {
+	requireBash(t)
+	srv := newPTYTestServer(t)
+	defer srv.Close()
+
+	id := ptyCreateSession(t, srv)
+
+	conn1 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "")
+	ptyWaitFrame(t, conn1, "connected", 10*time.Second)
+	ptyWriteStdin(t, conn1, "yes flood_output\n")
+
+	var readSlowly atomic.Bool
+	readSlowly.Store(true)
+	closeErrCh := make(chan *websocket.CloseError, 1)
+	go func() {
+		var closeErr *websocket.CloseError
+		for {
+			if _, _, err := conn1.ReadMessage(); err != nil {
+				_ = errors.As(err, &closeErr)
+				closeErrCh <- closeErr
+				return
+			}
+			if readSlowly.Load() {
+				time.Sleep(time.Millisecond)
+			}
+		}
+	}()
+	time.Sleep(500 * time.Millisecond)
+
+	conn2 := wsDialPTY(t, srv.URL, "/pty/"+id+"/ws", "takeover=1")
+	readSlowly.Store(false)
+	defer ptyWriteStdin(t, conn2, "\x03")
+
+	select {
+	case closeErr := <-closeErrCh:
+		require.NotNil(t, closeErr, "holder should be closed with a WS CloseError after takeover")
+		require.Equal(t, model.WSCloseTakenOver, closeErr.Code)
+	case <-time.After(8 * time.Second):
+		t.Fatal("holder was not closed after takeover")
+	}
+}
+
 // TestPTYWS_TakeoverOnFreeSessionConnects verifies ?takeover=1 is a no-op when the
 // session is free: it connects normally (there is no holder to evict).
 func TestPTYWS_TakeoverOnFreeSessionConnects(t *testing.T) {
