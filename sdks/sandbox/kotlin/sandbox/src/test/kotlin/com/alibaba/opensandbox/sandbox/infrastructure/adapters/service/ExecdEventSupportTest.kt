@@ -175,7 +175,8 @@ class ExecdEventSupportTest {
 
         val error =
             decode(
-                """{"type":"error","timestamp":11,"error":{"ename":"CommandExecError","evalue":"3","traceback":["exit status 3"],"exit_code":3}}""",
+                """{"type":"error","timestamp":11,"error":{"ename":"CommandExecError","evalue":"3",""" +
+                    """"traceback":["exit status 3"],"exit_code":3}}""",
             )
         assertNotNull(error)
         assertEquals("error", error!!.type)
