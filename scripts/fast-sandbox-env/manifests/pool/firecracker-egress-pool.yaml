@@ -31,6 +31,9 @@
 # Tokens rendered by integration-env.sh (pool stage, into $WORK/gen):
 #   "@FASTLET_IMAGE@"  "@EGRESS_IMAGE@"  "@POOL_MIN@"  "@POOL_MAX@"
 #   # @WARM_IMAGES@  -> warmImages block when WARM_IMAGES=1
+#   # @OCI_FASTLET_ENV@ / # @OCI_FASTLET_MOUNTS@ / # @OCI_FASTLET_VOLUMES@
+#   -> the fastlet OCI env item + shared mounts/volumes when OCI_STACK=1
+#   (registry config is compiled into Fastlets by the pool controller)
 # (quoted in the template so the file stays valid YAML; the render step
 # substitutes the token including its quotes)
 #
@@ -51,9 +54,11 @@ spec:
         env:
         - name: FAST_SANDBOX_RUNTIME_AGENT_SOCKET
           value: /run/fast-sandbox/firecracker/runtime.sock
+# @OCI_FASTLET_ENV@
         volumeMounts:
         - name: agent-socket
           mountPath: /run/fast-sandbox/firecracker
+# @OCI_FASTLET_MOUNTS@
       - name: egress
         image: "@EGRESS_IMAGE@"
         # IfNotPresent: the environment kind-loads the image into the
@@ -123,6 +128,7 @@ spec:
       # medium: Memory would keep the plaintext v1 files off node disk.
       - name: egress-vault
         emptyDir: {}
+# @OCI_FASTLET_VOLUMES@
       nodeSelector:
         fast-sandbox.io/firecracker-node: "true"
       # P2P topology: spread the poolMin fastlets one per node so each

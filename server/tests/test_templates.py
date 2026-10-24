@@ -19,7 +19,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from kubernetes.client import ApiException, CustomObjectsApi, V1APIResource, V1APIResourceList
 from unittest.mock import Mock, patch
@@ -473,6 +473,140 @@ def test_resolve_restarts_watch_for_non_terminal_rows(service, crs, repo):
         service.resolve_template_artifact(record.template_id)
     assert excinfo.value.status_code == 404
     assert "ns-1" in service._watched_namespaces
+
+
+# -- overlaybd (OCI publication) ------------------------------------------------
+
+
+def _overlaybd_config(**overrides) -> KubernetesRuntimeConfig:
+    return KubernetesRuntimeConfig(
+        namespace="ns-1",
+        template_s3_publish_secret="sandbox-oss-credentials",
+        template_oci_publish_secret="registry-credentials",
+        **overrides,
+    )
+
+
+@pytest.fixture
+def overlaybd_service(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    config = _config()
+    config.kubernetes = _overlaybd_config()
+    svc = FastSandboxTemplateService(config, repository=repo, k8s_client=k8s)
+    yield svc
+    svc.close()
+
+
+def _overlaybd_request(**overrides) -> CreateFsbTemplateRequest:
+    overrides.setdefault("publish", "oci://registry.example.com/sandbox/templates")
+    overrides.setdefault("format", "overlaybd")
+    return _create_request(**overrides)
+
+
+def test_create_overlaybd_projects_oci_output(overlaybd_service, crs):
+    record = overlaybd_service.create_template(_overlaybd_request())
+    spec = crs.created[-1]["spec"]
+    assert spec["output"] == {
+        "rootfsSize": "5Gi",
+        "format": "overlaybd",
+        "publish": "oci://registry.example.com/sandbox/templates",
+        "publishSecretRef": {"name": "registry-credentials"},
+    }
+    assert record.spec["format"] == "overlaybd"
+
+
+def test_resolve_overlaybd_returns_manifest_ref(overlaybd_service, crs):
+    record = overlaybd_service.create_template(_overlaybd_request(entrypoint=["sleep", "1"]))
+    manifest_ref = "oci://registry.example.com/sandbox/templates@sha256:abc123"
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": manifest_ref})
+    _converge(overlaybd_service, crs, "ns-1", record.crd_name)
+    artifact_ref, entrypoint = overlaybd_service.resolve_template_artifact(record.template_id)
+    assert artifact_ref == manifest_ref
+    assert entrypoint == ["sleep", "1"]
+
+
+def test_resolve_overlaybd_without_manifest_ref_404(overlaybd_service, crs):
+    record = overlaybd_service.create_template(_overlaybd_request())
+    crs.set_status("ns-1", record.crd_name, {"phase": "Succeeded"})
+    _converge(overlaybd_service, crs, "ns-1", record.crd_name)
+    with pytest.raises(HTTPException) as excinfo:
+        overlaybd_service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+
+
+def test_resolve_overlaybd_legacy_s3_manifest_demands_rebuild(overlaybd_service, crs):
+    """Legacy overlaybd+S3 rows are unrunnable: resolve says so."""
+    record = overlaybd_service.create_template(_overlaybd_request())
+    crs.set_status(
+        "ns-1", record.crd_name, {"phase": "Succeeded", "manifestRef": "s3://b/legacy/manifest"}
+    )
+    _converge(overlaybd_service, crs, "ns-1", record.crd_name)
+    with pytest.raises(HTTPException) as excinfo:
+        overlaybd_service.resolve_template_artifact(record.template_id)
+    assert excinfo.value.status_code == 404
+    assert "rebuild" in str(excinfo.value.detail).lower()
+
+
+def test_create_overlaybd_requires_oci_publish_secret(repo, crs, monkeypatch):
+    monkeypatch.setattr(WorkloadInformer, "start", lambda self: None)
+    with patch.object(K8sClient, "_load_config"):
+        k8s = K8sClient(KubernetesRuntimeConfig())
+    crs.install(k8s)
+    svc = FastSandboxTemplateService(_config(), repository=repo, k8s_client=k8s)
+    try:
+        with pytest.raises(HTTPException) as excinfo:
+            svc.create_template(_overlaybd_request())
+        assert excinfo.value.status_code == 400
+        assert "template_oci_publish_secret" in str(excinfo.value.detail)
+    finally:
+        svc.close()
+
+
+@pytest.mark.parametrize(
+    "publish",
+    [
+        "s3://sandbox-images/publish",
+        "registry.example.com/sandbox/templates",
+        "oci://registry.example.com",
+        "oci:///templates",
+        "oci://registry.example.com/sandbox/templates:v1",
+        "oci://registry.example.com/sandbox/templates@sha256:abc",
+        "oci://registry.example.com/sandbox/templates/",
+        "oci://user:pass@registry.example.com/sandbox/templates",
+    ],
+)
+def test_create_overlaybd_rejects_invalid_publish(service, publish):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_overlaybd_request(publish=publish))
+    assert excinfo.value.status_code == 400
+
+
+def test_create_overlaybd_allows_registry_host_port(overlaybd_service, crs):
+    overlaybd_service.create_template(
+        _overlaybd_request(publish="oci://registry.example.com:5000/sandbox/templates")
+    )
+    assert crs.created[-1]["spec"]["output"]["publish"] == (
+        "oci://registry.example.com:5000/sandbox/templates"
+    )
+
+
+def test_create_native_rejects_oci_publish(service):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(
+            _create_request(publish="oci://registry.example.com/sandbox/templates")
+        )
+    assert excinfo.value.status_code == 400
+    assert "s3://" in str(excinfo.value.detail)
+
+
+def test_create_native_rejects_bucketless_publish(service):
+    with pytest.raises(HTTPException) as excinfo:
+        service.create_template(_create_request(publish="s3://"))
+    assert excinfo.value.status_code == 400
+    assert "bucket" in str(excinfo.value.detail)
 
 
 @pytest.fixture

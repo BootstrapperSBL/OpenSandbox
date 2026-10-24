@@ -34,7 +34,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: kvm
-    timeout-minutes: 180
+    # The verify matrix runs twice when OCI_STACK=1 (native + overlaybd).
+    timeout-minutes: 240
     env:
       # Full-stack profile (single round while scenarios stabilize).
       IDLE_PAUSE: "1"
@@ -80,7 +81,8 @@ jobs:
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
       - name: Run base SDK e2e
-        timeout-minutes: 30
+        # Runs once per template (native + overlaybd).
+        timeout-minutes: 60
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
       - name: Run idle-pause SDK e2e

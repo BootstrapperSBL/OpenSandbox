@@ -812,6 +812,15 @@ class KubernetesRuntimeConfig(BaseModel):
             "credentials referenced by server-created SandboxTemplates."
         ),
     )
+    template_oci_publish_secret: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "dockerconfigjson Secret used as output.publishSecretRef for "
+            "format: overlaybd SandboxTemplate builds. Required when "
+            "creating overlaybd templates."
+        ),
+    )
     template_mitm_ca_secret: Optional[str] = Field(
         default=None,
         min_length=1,
