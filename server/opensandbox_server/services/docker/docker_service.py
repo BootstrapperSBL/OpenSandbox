@@ -28,10 +28,12 @@ import logging
 import math
 import os
 import time
+from _thread import LockType
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread, Timer
 from typing import Any, Dict, Optional
+from weakref import WeakValueDictionary
 
 import docker
 from docker.errors import APIError, DockerException, NotFound as DockerNotFound
@@ -95,6 +97,7 @@ from opensandbox_server.services.constants import (
     OPENSANDBOX_EGRESS_MITMPROXY_SSL_INSECURE,
     OPENSANDBOX_EGRESS_MITMPROXY_TRANSPARENT,
     OPENSANDBOX_RUNTIME_MOUNT_PATH,
+    SANDBOX_CREATED_AT_LABEL,
     SANDBOX_EGRESS_AUTH_TOKEN_METADATA_KEY,
     SANDBOX_EMBEDDING_PROXY_PORT_LABEL,
     SANDBOX_EXPIRES_AT_LABEL,
@@ -191,6 +194,8 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                 },
             )
         self._expiration_lock = Lock()
+        self._lifecycle_locks_guard = Lock()
+        self._lifecycle_locks: WeakValueDictionary[str, LockType] = WeakValueDictionary()
         self._execd_archive_lock = Lock()
         self._bootstrap_script_lock = Lock()
         self._sandbox_expirations: Dict[str, datetime] = {}
@@ -209,6 +214,26 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         if cfg is not None and cfg >= 1:
             return cfg
         return 180
+
+    @contextmanager
+    def _sandbox_lifecycle_lock(self, sandbox_id: str):
+        # Order runtime mutations and transition records within this service
+        # instance only, not across service instances or processes. Keep this
+        # separate from the metadata store's non-reentrant file-write lock.
+        with self._lifecycle_locks_guard:
+            lock = self._lifecycle_locks.get(sandbox_id)
+            if lock is None:
+                lock = Lock()
+                self._lifecycle_locks[sandbox_id] = lock
+        # Active and waiting calls retain the lock; idle entries disappear.
+        with lock:
+            yield
+
+    def _persist_transition(self, sandbox_id: str, state: str) -> None:
+        try:
+            self._metadata_store.set_transition(sandbox_id, state, datetime.now(timezone.utc))
+        except OSError as exc:
+            logger.warning(f"Failed to persist {state} transition for sandbox {sandbox_id}: {exc}")
 
     @contextmanager
     def _docker_operation(self, action: str, sandbox_id: Optional[str] = None):
@@ -342,6 +367,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         fallback_mount_keys: Optional[list[str]] = None,
     ) -> None:
         """Timer callback to terminate expired sandboxes."""
+        with self._sandbox_lifecycle_lock(sandbox_id):
+            self._expire_sandbox_locked(sandbox_id, fallback_mount_keys)
+
+    def _expire_sandbox_locked(
+        self,
+        sandbox_id: str,
+        fallback_mount_keys: Optional[list[str]] = None,
+    ) -> None:
         mount_keys: list[str] = []
         try:
             container = self._get_container_by_sandbox_id(sandbox_id)
@@ -540,11 +573,14 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         snapshot_id = labels.get(SANDBOX_SNAPSHOT_ID_LABEL) or None
         image_spec = None if snapshot_id else ImageSpec(uri=image_uri)
 
-        created_at = parse_timestamp(container.attrs.get("Created"))
+        created_at = parse_timestamp(
+            labels.get(SANDBOX_CREATED_AT_LABEL) or container.attrs.get("Created")
+        )
+        transitioned_at = self._metadata_store.get_transition_time(resolved_id, state)
         last_transition_at = (
             parse_timestamp(finished_at)
             if finished_at and finished_at != "0001-01-01T00:00:00Z"
-            else created_at
+            else parse_timestamp(transitioned_at) if transitioned_at else created_at
         )
         expires_at = self._get_tracked_expiration(resolved_id, labels)
 
@@ -708,6 +744,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             sandbox_env, egress_env = split_egress_env(request.env)
         patched_request = request.model_copy(update={"env": sandbox_env or None})
         labels, environment = self._build_labels_and_env(sandbox_id, patched_request, expires_at)
+        labels[SANDBOX_CREATED_AT_LABEL] = created_at.isoformat()
         if auto_created_volumes:
             labels[SANDBOX_MANAGED_VOLUMES_LABEL] = json.dumps(
                 auto_created_volumes, separators=(",", ":"),
@@ -1143,6 +1180,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         ) from exc
 
     def delete_sandbox(self, sandbox_id: str) -> None:
+        with self._sandbox_lifecycle_lock(sandbox_id):
+            self._delete_sandbox_locked(sandbox_id)
+
+    def _delete_sandbox_locked(self, sandbox_id: str) -> None:
         try:
             container = self._get_container_by_sandbox_id(sandbox_id)
         except HTTPException as exc:
@@ -1187,6 +1228,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
         self._metadata_store.delete(sandbox_id)
 
     def pause_sandbox(self, sandbox_id: str) -> None:
+        with self._sandbox_lifecycle_lock(sandbox_id):
+            self._pause_sandbox_locked(sandbox_id)
+
+    def _pause_sandbox_locked(self, sandbox_id: str) -> None:
         container = self._get_container_by_sandbox_id(sandbox_id)
         state = container.attrs.get("State", {})
         if not state.get("Running", False) or state.get("Paused", False):
@@ -1224,6 +1269,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "message": f"Failed to pause sandbox container: {str(exc)}",
                 },
             ) from exc
+        self._persist_transition(sandbox_id, "Paused")
 
         if egress_expected and not sidecars:
             raise HTTPException(
@@ -1269,6 +1315,8 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     f"sandbox={sandbox_id} | failed to rollback sandbox pause: {rollback_exc}"
                 )
                 rollback_errors.append(str(rollback_exc))
+            else:
+                self._persist_transition(sandbox_id, "Running")
 
             message = f"Failed to pause egress sidecar: {str(exc)}"
             if rollback_errors:
@@ -1282,6 +1330,10 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
             ) from exc
 
     def resume_sandbox(self, sandbox_id: str) -> None:
+        with self._sandbox_lifecycle_lock(sandbox_id):
+            self._resume_sandbox_locked(sandbox_id)
+
+    def _resume_sandbox_locked(self, sandbox_id: str) -> None:
         container = self._get_container_by_sandbox_id(sandbox_id)
         state = container.attrs.get("State", {})
         if not state.get("Paused", False):
@@ -1360,6 +1412,7 @@ class DockerSandboxService(DockerDiagnosticsMixin, DockerRuntimeMixin, DockerVol
                     "message": message,
                 },
             ) from exc
+        self._persist_transition(sandbox_id, "Running")
 
     def get_access_renew_extend_seconds(self, sandbox_id: str) -> Optional[int]:
         try:

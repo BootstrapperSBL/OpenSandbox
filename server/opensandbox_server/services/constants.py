@@ -21,6 +21,7 @@ RESERVED_LABEL_PREFIX = "opensandbox.io/"
 SANDBOX_ID_LABEL = "opensandbox.io/id"
 SANDBOX_TENANT_LABEL = "opensandbox.io/tenant"
 SANDBOX_EXPIRES_AT_LABEL = "opensandbox.io/expires-at"
+SANDBOX_CREATED_AT_LABEL = "opensandbox.io/created-at"
 SANDBOX_MANUAL_CLEANUP_LABEL = "opensandbox.io/manual-cleanup"
 SANDBOX_PLATFORM_OS_LABEL = "opensandbox.io/platform-os"
 SANDBOX_PLATFORM_ARCH_LABEL = "opensandbox.io/platform-arch"
@@ -205,6 +206,7 @@ __all__ = [
     "SANDBOX_ID_LABEL",
     "SANDBOX_TENANT_LABEL",
     "SANDBOX_EXPIRES_AT_LABEL",
+    "SANDBOX_CREATED_AT_LABEL",
     "SANDBOX_MANUAL_CLEANUP_LABEL",
     "SANDBOX_PLATFORM_OS_LABEL",
     "SANDBOX_PLATFORM_ARCH_LABEL",
