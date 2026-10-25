@@ -205,6 +205,36 @@ def test_kubernetes_pool_acquisition_timeout_defaults_and_validates():
         config_module.KubernetesRuntimeConfig(pool_acquisition_timeout_seconds=0)
 
 
+def test_kubernetes_template_publish_secrets_defaults():
+    """native templates fall back to the S3 secret; the OCI publish secret
+    for overlaybd templates is opt-in and defaults to unset."""
+    kubernetes_cfg = config_module.KubernetesRuntimeConfig()
+    assert kubernetes_cfg.template_s3_publish_secret == "sandbox-oss-credentials"
+    assert kubernetes_cfg.template_oci_publish_secret is None
+
+    configured = config_module.KubernetesRuntimeConfig(
+        template_oci_publish_secret="registry-credentials"
+    )
+    assert configured.template_oci_publish_secret == "registry-credentials"
+
+    with pytest.raises(ValueError):
+        config_module.KubernetesRuntimeConfig(template_oci_publish_secret="")
+
+
+def test_kubernetes_template_oci_publish_secret_from_toml():
+    app_cfg = config_module.AppConfig.model_validate(
+        {
+            "server": {"host": "127.0.0.1", "port": 8000},
+            "runtime": {"type": "kubernetes", "execd_image": "opensandbox/execd:latest"},
+            "kubernetes": {
+                "template_oci_publish_secret": "registry-credentials",
+            },
+        }
+    )
+    assert app_cfg.kubernetes is not None
+    assert app_cfg.kubernetes.template_oci_publish_secret == "registry-credentials"
+
+
 def test_server_config_uvicorn_tuning_defaults():
     """ServerConfig exposes uvicorn concurrency knobs with sensible defaults."""
     server_cfg = ServerConfig()

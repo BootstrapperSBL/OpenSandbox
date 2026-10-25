@@ -17,7 +17,6 @@
 package runtime
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -40,6 +39,14 @@ import (
 )
 
 const isolatedRunEndMarkerPrefix = "__ISOLATED_RUN_END__"
+
+// isolatedInterruptEscalationTimeout bounds how long a cancelled run waits
+// for its end marker before the session process group is SIGKILLed.
+var isolatedInterruptEscalationTimeout = 10 * time.Second
+
+// isolatedInterruptRepeatInterval is the SIGINT re-send period used while
+// draining a cancelled no-envs script tail.
+var isolatedInterruptRepeatInterval = 500 * time.Millisecond
 
 // IsolatedRunner is the concrete isolated session runner.
 type IsolatedRunner struct {
@@ -642,38 +649,37 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		return fmt.Errorf("session not started")
 	}
 
-	// Prepend env exports before user code.
+	// The per-run UUID makes it impossible for user output to forge this
+	// run's end marker.
 	runMarker := fmt.Sprintf("%s_%s", isolatedRunEndMarkerPrefix, uuid.New().String())
 
-	var script string
+	// trap : INT makes the cancellation SIGINT kill the running command, not
+	// the persistent shell. Envs runs are subshell-wrapped so an interrupt
+	// aborts the whole script; no-envs runs stay in the main shell to keep
+	// cross-run exports working.
+	var script strings.Builder
+	script.WriteString("trap : INT\n")
 	if len(envs) > 0 {
-		script += "(\n"
+		script.WriteString("(\n")
 		for k, v := range envs {
-			script += fmt.Sprintf("export %s=%s\n", shellescape(k), shellescape(v))
-		}
-		script += code
-		if !strings.HasSuffix(script, "\n") {
-			script += "\n"
-		}
-		script += ")\n"
-	} else {
-		script += code
-		if !strings.HasSuffix(script, "\n") {
-			script += "\n"
+			script.WriteString(fmt.Sprintf("export %s=%s\n", shellescape(k), shellescape(v)))
 		}
 	}
-	script += fmt.Sprintf("echo %s $?\n", runMarker)
+	script.WriteString(code)
+	if !strings.HasSuffix(code, "\n") {
+		script.WriteString("\n")
+	}
+	if len(envs) > 0 {
+		script.WriteString(")\n")
+	}
+	script.WriteString(fmt.Sprintf("echo %s $?\n", runMarker))
 
-	// On timeout/cancel, send SIGINT to interrupt the running command
-	// without killing the persistent shell session. Closing stdin would
-	// terminate the shell entirely.
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
 	defer func() {
 		close(done)
-		// Keep runMu held until the watcher has either observed done or
-		// completed its SIGINT. Otherwise a delayed cancellation from this Run
-		// can interrupt the next serialized Run.
+		// Hold runMu until the watcher's final signal completes, so a late
+		// cancellation cannot interrupt the next serialized run.
 		<-watcherDone
 	}()
 	go func() {
@@ -681,11 +687,33 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		select {
 		case <-ctx.Done():
 			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+			// No-envs scripts queue their remaining statements in the shell
+			// after the interrupt; repeated SIGINT kills each as it starts
+			// (the trap keeps the shell alive). A marker still missing after
+			// the deadline means SIGINT is being ignored: escalate.
+			ticker := time.NewTicker(isolatedInterruptRepeatInterval)
+			defer ticker.Stop()
+			deadline := time.After(isolatedInterruptEscalationTimeout)
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
+				case <-deadline:
+					log.Warn(
+						"isolated session: %s command ignored SIGINT; escalating to SIGKILL",
+						id,
+					)
+					_ = s.signalProcessGroupIfRunning(syscall.SIGKILL)
+					return
+				}
+			}
 		case <-done:
 		}
 	}()
 
-	if _, err := io.WriteString(stdin, script); err != nil {
+	if _, err := io.WriteString(stdin, script.String()); err != nil {
 		return fmt.Errorf("write stdin: %w", err)
 	}
 
@@ -708,37 +736,12 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 // scanUntilMarker reads stdout lines until the end marker is found.
 // Returns the exit code from the marker line.
 func scanUntilMarker(ctx context.Context, stdout io.ReadCloser, runMarker string, onStdout StdoutCallback) (int, error) {
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
-
-	var exitCode int
-	markerSeen := false
+	scanner := &runOutputScanner{marker: runMarker, onStdout: onStdout}
+	var scanErr error
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
-		for scanner.Scan() {
-			line := scanner.Text()
-			// The marker may appear mid-line if the previous command's
-			// output didn't end with a newline (e.g. cat of a file
-			// without trailing newline).
-			if idx := strings.Index(line, runMarker); idx >= 0 {
-				markerSeen = true
-				if idx > 0 && onStdout != nil {
-					onStdout(line[:idx])
-				}
-				markerPart := line[idx:]
-				parts := strings.Fields(markerPart)
-				if len(parts) >= 2 {
-					if code, convErr := strconv.Atoi(parts[1]); convErr == nil {
-						exitCode = code
-					}
-				}
-				return
-			}
-			if onStdout != nil {
-				onStdout(line)
-			}
-		}
+		scanErr = scanOutputLines(stdout, scanner.onLine)
 	}()
 
 	select {
@@ -750,13 +753,64 @@ func scanUntilMarker(ctx context.Context, stdout io.ReadCloser, runMarker string
 		return 0, ctx.Err()
 	}
 
-	if err := scanner.Err(); err != nil {
-		return 0, fmt.Errorf("read stdout: %w", err)
+	if scanErr != nil {
+		return 0, fmt.Errorf("read stdout: %w", scanErr)
 	}
-	if !markerSeen {
+	if !scanner.markerSeen {
 		return 1, fmt.Errorf("session process exited without end marker (process may have died or called exit)")
 	}
-	return exitCode, nil
+	return scanner.exitCode, nil
+}
+
+// runOutputScanner forwards a run's output lines and stops at the end marker
+// line that follows them.
+type runOutputScanner struct {
+	marker   string
+	onStdout StdoutCallback
+
+	// carry holds the end of an unfinished piece of a long line, joined with
+	// the next piece: either a tail that may start a split marker, or the
+	// marker whose exit code is still to come.
+	carry      string
+	markerSeen bool
+	exitCode   int
+}
+
+// onLine handles one piece from scanOutputLines and reports whether to keep
+// scanning.
+func (s *runOutputScanner) onLine(line string, complete bool) bool {
+	line = s.carry + line
+	s.carry = ""
+	// The marker may appear mid-line if the previous command's output didn't
+	// end with a newline (e.g. cat of a file without trailing newline).
+	if idx := strings.Index(line, s.marker); idx >= 0 {
+		if idx > 0 {
+			s.emit(line[:idx])
+		}
+		if !complete {
+			s.carry = line[idx:]
+			return true
+		}
+		s.markerSeen = true
+		parts := strings.Fields(line[idx:])
+		if len(parts) >= 2 {
+			if code, err := strconv.Atoi(parts[1]); err == nil {
+				s.exitCode = code
+			}
+		}
+		return false
+	}
+	if !complete {
+		line, s.carry = holdBackMarkerPrefix(line, s.marker)
+	}
+	s.emit(line)
+	return true
+}
+
+func (s *runOutputScanner) emit(text string) {
+	if s.onStdout != nil {
+		s.onStdout(text)
+	}
 }
 
 // DeleteIsolatedSession destroys the session.

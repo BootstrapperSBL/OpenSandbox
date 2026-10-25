@@ -16,11 +16,16 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import (
+    InvalidArgumentException,
+    SandboxApiException,
+    SandboxRateLimitException,
+)
 from opensandbox.models.sandboxes import SandboxEndpoint
 
 from code_interpreter.adapters.code_adapter import CodesAdapter
@@ -167,3 +172,24 @@ async def test_run_code_non_200_raises_api_exception() -> None:
     assert ei.value.request_id == "req-code-123"
     # The server's error body is spliced into the message so logs carry the reason.
     assert "bad" in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_run_code_non_200_keeps_structured_error_and_rate_limit() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            headers={"Retry-After": "3"},
+            json={"code": "RATE_LIMITED", "message": "slow down"},
+            request=request,
+        )
+
+    cfg = ConnectionConfig(protocol="http", transport=httpx.MockTransport(handler))
+    adapter = CodesAdapter(SandboxEndpoint(endpoint="localhost:44772"), cfg)
+
+    with pytest.raises(SandboxRateLimitException) as ei:
+        await adapter.run("print(1)")
+    assert ei.value.error.code == "RATE_LIMITED"
+    assert ei.value.error.message == "slow down"
+    assert ei.value.retry_after == timedelta(seconds=3)
+    assert ei.value.response_body is not None
