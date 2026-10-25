@@ -143,6 +143,30 @@ jobs:
         run: |
           python -m unittest discover -v -s tests -p "test_*.py"
 
+      - name: Set up exact Go for held-old HTTP/2 fixture
+        # Keep the repository's Go 1.25.9 tests above on their pinned toolchain.
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+
+      - name: Test and build held-old Go fixture
+        env:
+          GOTOOLCHAIN: local
+          GOWORK: off
+          GOPROXY: off
+          GO111MODULE: off
+          GOCACHE: ${{ runner.temp }}/go1272-cache
+          GOMODCACHE: ${{ runner.temp }}/go1272-modcache
+        run: |
+          test "$(go version)" = "go version go1.27.2 linux/amd64"
+          mkdir -p "$GOCACHE" "$GOMODCACHE"
+          go test components/egress/tests/fixtures/h2_retry_client.go \
+            components/egress/tests/fixtures/h2_retry_client_test.go
+          go build -trimpath \
+            -o "$RUNNER_TEMP/h2_retry_client-go1.27.2" \
+            components/egress/tests/fixtures/h2_retry_client.go
+
       - name: Set up Python for H2 runtime coverage
         # Unit discovery above covers 3.10; exercise real runtime on 3.11 too.
         uses: actions/setup-python@v6
@@ -163,12 +187,33 @@ jobs:
             -s components/egress/tests -p 'test_credential_bound_h2*.py'
 
       - name: Run H2 loopback runtime regressions
+        id: h2_loopback_runtime
         # A real loopback destination on port 443 is part of this fixture.
         # This does not cover transparent redirects, the production UID or quarantine.
+        # With no --go-client, this selects only the manual-peer denominator,
+        # including the real pre_admission_barrier_h2 runtime case; it does not
+        # select optional Go diagnostics or imply client interoperability.
         run: |
           sudo "$RUNNER_TEMP/h2-runtime-venv/bin/python" \
             components/egress/tests/test_credential_bound_h2_runtime.py \
             --run-real-runtime --artifacts "$RUNNER_TEMP/h2-runtime-evidence"
+
+      - name: Run Go held-old early-notice H1 and H2 cases
+        # Only the two explicit early-notice cases provide standard-client
+        # parser/interoperability evidence. Historical go_retry cases remain
+        # non-gating diagnostics and are not selected here. Raw stderr is
+        # discarded by the fixture; only filtered GOAWAY JSON enters artifacts.
+        if: steps.h2_loopback_runtime.outcome == 'success'
+        run: |
+          sudo env -u GODEBUG \
+            "$RUNNER_TEMP/h2-runtime-venv/bin/python" \
+            components/egress/tests/test_credential_bound_h2_runtime.py \
+            --run-real-runtime \
+            --artifacts "$RUNNER_TEMP/h2-runtime-evidence/go-early-notice" \
+            --case go_early_notice_h1_origin \
+            --case go_early_notice_h2_origin \
+            --go-client "$RUNNER_TEMP/h2_retry_client-go1.27.2" \
+            --require-go-version go1.27.2
 
       - name: Run static TLS passthrough runtime regressions
         # Actual destination 443 and authenticated Unix IPC are required here.
