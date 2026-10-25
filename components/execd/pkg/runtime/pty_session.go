@@ -508,12 +508,19 @@ func (s *ptySession) waitAndExitPipe(mp *managedProcess, stdinW, stdoutR, stderr
 }
 
 // WriteStdin writes p to shell stdin (PTY master or pipe write-end).
+// Input that arrives once the shell is reaped is dropped, as a terminal would:
+// while the output drains the master is still open, and a write to it would
+// block once the tty input queue is full and then fail.
 func (s *ptySession) WriteStdin(p []byte) (int, error) {
 	s.mu.Lock()
 	w := s.stdin
+	exited := s.pid == 0
 	s.mu.Unlock()
 	if w == nil {
 		return 0, errors.New("session not started")
+	}
+	if exited {
+		return len(p), nil
 	}
 	return w.Write(p)
 }

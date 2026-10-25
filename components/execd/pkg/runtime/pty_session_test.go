@@ -491,3 +491,43 @@ func TestPTYSession_StopsSignallingOnceShellIsReaped(t *testing.T) {
 		ptyDrainTimeout/2, 10*time.Millisecond,
 		"session still signalable while its output drains")
 }
+
+// Input that arrives after the shell is reaped, while its output drains, is
+// dropped as a terminal would, rather than failing the client's stdin write.
+func TestPTYSession_DropsStdinOnceShellIsReaped(t *testing.T) {
+	requireBash(t)
+
+	s := newPTYSession(uuidString(), "", "echo started")
+	require.NoError(t, s.StartPTY())
+	t.Cleanup(func() { s.close() })
+	_, _, detach := s.AttachOutput()
+	defer detach()
+
+	require.Eventually(t, func() bool { return !s.IsRunning() },
+		ptyDrainTimeout/2, 10*time.Millisecond)
+	select {
+	case <-s.Done():
+		t.Fatal("session ended before its output drained")
+	default:
+	}
+
+	// More than the tty input queue holds, so a write that reached the master
+	// would block until the drain ends and then fail.
+	line := []byte(strings.Repeat("a", 1023) + "\n")
+	written := make(chan error, 1)
+	safego.Go(func() {
+		for range 64 {
+			if _, err := s.WriteStdin(line); err != nil {
+				written <- err
+				return
+			}
+		}
+		written <- nil
+	})
+	select {
+	case err := <-written:
+		require.NoError(t, err)
+	case <-time.After(ptyDrainTimeout / 2):
+		t.Fatal("stdin write blocked while the output drained")
+	}
+}
