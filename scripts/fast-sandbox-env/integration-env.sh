@@ -34,10 +34,12 @@
 # re-entry fence) plus the gateway /ping probes.
 #
 # Usage:
-#   ./scripts/fast-sandbox-env/integration-env.sh up       # full environment + pool + server/ingress + verify
-#   ./scripts/fast-sandbox-env/integration-env.sh pool     # re-apply the pool only
-#   ./scripts/fast-sandbox-env/integration-env.sh status   # component/pool/DART/OpenSandbox health
-#   ./scripts/fast-sandbox-env/integration-env.sh down     # teardown, host left clean
+#   ./scripts/fast-sandbox-env/integration-env.sh up             # environment: stack + pool + server/ingress + native template
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-native  # verify matrix on the native template (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + verify matrix (needs up)
+#   ./scripts/fast-sandbox-env/integration-env.sh pool           # re-apply the pool only
+#   ./scripts/fast-sandbox-env/integration-env.sh status         # component/pool/DART/OpenSandbox health
+#   ./scripts/fast-sandbox-env/integration-env.sh down           # teardown, host left clean
 #   ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean   # down on failure
 #
 # Environment overrides (all optional):
@@ -1196,9 +1198,6 @@ template_up() {
 	[[ -n "$manifest_ref" ]] || fail "template manifestRef is empty"
 	log "template manifestRef: $manifest_ref"
 	pass "SandboxTemplate Succeeded + artifacts published (via opensandbox CLI)"
-	if [[ "$OCI_STACK" == 1 ]]; then
-		template_up_overlaybd
-	fi
 	return 0
 }
 
@@ -2711,6 +2710,42 @@ idle_e2e() {
 	uv run pytest tests/test_fsb_idle_pause_e2e.py
 }
 
+# --- verify actions (native / overlaybd) --------------------------------------
+
+require_live_stack() {
+	kind get clusters 2>/dev/null | grep -x "$KIND_CLUSTER" >/dev/null \
+		|| die "cluster $KIND_CLUSTER is not up (run up first)"
+	curl -fsS -m 5 "$SERVER_URL/health" >/dev/null 2>&1 \
+		|| die "server $SERVER_URL is not reachable (run up first)"
+	[[ -n "$OSB_BIN" ]] || OSB_BIN="$OSB_VENV/bin/osb"
+	[[ -x "$OSB_BIN" ]] || die "osb not found at $OSB_BIN (run up first, or set OSB_BIN)"
+}
+
+verify_native() {
+	require_live_stack
+	TEMPLATE_ID="$(cat "$WORK/template-id" 2>/dev/null || true)"
+	[[ -n "$TEMPLATE_ID" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
+	run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
+	run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
+	run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
+	run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
+	run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
+}
+
+verify_overlaybd() {
+	require_live_stack
+	[[ "$OCI_STACK" == 1 ]] || {
+		log "OCI_STACK=0: overlaybd disabled; nothing to verify"
+		return 0
+	}
+	run_stage "SandboxTemplate build (overlaybd, oci:// publication)" template_up_overlaybd
+	run_stage "end-to-end verify (overlaybd template)" opensandbox_verify "$OCI_TEMPLATE_ID"
+	run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
+	run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
+	run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
+	run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
+}
+
 # --- status / summary ---------------------------------------------------------------------
 
 dart_metrics_summary() {
@@ -2822,6 +2857,9 @@ down() {
 	# A stale profile marker would let idle-e2e run against a stack whose
 	# Redis/sweeper are gone.
 	rm -f "$WORK/idle-pause"
+	# Same stale-marker risk: sdk-e2e reads $WORK/overlaybd-template-id, and
+	# its producer (template_up_overlaybd) only runs in verify-overlaybd.
+	rm -f "$WORK/overlaybd-template-id"
 	# RustFS data is owned by UID/GID 10001; leftovers pollute the host and
 	# later docker build contexts.
 	sudo_ rm -rf "$RUSTFS_DATA"
@@ -2838,20 +2876,21 @@ down() {
 
 usage() {
 	cat <<'EOF'
-usage: integration-env.sh [--auto-clean] {up|down|status|pool|sdk-e2e|idle-e2e}
+usage: integration-env.sh [--auto-clean] {up|verify-native|verify-overlaybd|down|status|pool|sdk-e2e|idle-e2e}
 
-  up       initialize the full environment: fast-sandbox@pinned-commit images,
+  up       initialize the environment: fast-sandbox@pinned-commit images,
            two-node kind cluster (KVM), RustFS, control plane, firecracker
-           firecracker runtime readiness + DART (P2P), SandboxTemplate golden
-           image, firecracker-egress-pool (egress attached), the
-           source-built OpenSandbox server + ingress gateway, and
-           end-to-end verifies driven by the opensandbox CLI
-           (create -> gateway route -> execd /ping, plus a pause/resume
-           round-trip through the checkpoint). The CLI (osb) is installed
-           fresh from PyPI unless OSB_BIN points at an existing binary.
-           With IDLE_PAUSE=1: Redis + server [automation.idle_pause] + gateway
-           activity/wake flags, plus the idle-pause/wake verify stage
-           (IDLE_PAUSE_ROUNDS cycles, per-round timing summary).
+           runtime readiness + DART (P2P), the native SandboxTemplate golden
+           image, firecracker-egress-pool (egress attached), and the
+           source-built OpenSandbox server + ingress gateway. With
+           IDLE_PAUSE=1: Redis + server [automation.idle_pause] + gateway
+           activity/wake flags.
+  verify-native    run the verify matrix against the native template
+                   (create -> gateway route -> execd /ping, pause/resume,
+                   vault, idle-pause, snapshot); requires `up`
+  verify-overlaybd build the overlaybd SandboxTemplate (oci:// publication)
+                   and run the same verify matrix against it; requires `up`
+                   (no-op when OCI_STACK=0)
   pool     re-apply only the SandboxPool (after editing manifests/pool/)
   status   nodes / pods / pool / DART P2P counters / RustFS / OpenSandbox health
   sdk-e2e  run the Python SDK e2e suite (tests/python/tests/test_fsb_e2e.py)
@@ -2888,7 +2927,7 @@ EOF
 for arg in "$@"; do
 	case "$arg" in
 		--auto-clean) AUTO_CLEAN=1 ;;
-		up|down|status|pool|sdk-e2e|idle-e2e) ACTION="$arg" ;;
+		up|down|status|pool|sdk-e2e|idle-e2e|verify-native|verify-overlaybd) ACTION="$arg" ;;
 		*) usage ;;
 	esac
 done
@@ -2942,26 +2981,11 @@ case "$ACTION" in
 		run_stage "OpenSandbox server + ingress gateway" opensandbox_up
 		run_stage "SandboxTemplate build (opensandbox CLI)" template_up
 		run_stage "SandboxPool $POOL_NAME (egress + P2P)" pool_up
-		run_stage "end-to-end verify (API create -> gateway -> execd /ping)" opensandbox_verify
-		run_stage "pause/resume verify (CLI -> FastPath checkpoint)" pause_resume_verify
-		run_stage "vault lifecycle verify (CLI -> relay -> egress-held vault)" vault_lifecycle_verify
-		run_stage "idle-pause / wake-on-access verify (OSEP-0024 profile)" idle_pause_verify
-		run_stage "snapshot verify (CLI -> SandboxSnapshot -> restore)" snapshot_verify
-		if [[ "$OCI_STACK" == 1 ]]; then
-			# Full matrix second pass: every verify stage re-runs against the
-			# overlaybd template — same assertions on the on-demand boot
-			# path (ublk attach, OCI snapshot publication, manifest_ref
-			# restore). Native keeps its own pass above.
-			run_stage "end-to-end verify (overlaybd template)" opensandbox_verify "$OCI_TEMPLATE_ID"
-			run_stage "pause/resume verify (overlaybd template)" pause_resume_verify "$OCI_TEMPLATE_ID"
-			run_stage "vault lifecycle verify (overlaybd template)" vault_lifecycle_verify "$OCI_TEMPLATE_ID"
-			run_stage "idle-pause / wake-on-access verify (overlaybd template)" idle_pause_verify "$OCI_TEMPLATE_ID"
-			run_stage "snapshot verify (overlaybd template)" snapshot_verify "$OCI_TEMPLATE_ID"
-		fi
 		trap - ERR
 		stage_summary
 		env_summary
 		highlight "== up complete: server=$SERVER_URL (header OPEN-SANDBOX-API-KEY: $SERVER_API_KEY), gateway=$GATEWAY_URL =="
+		highlight "== next: verify-native, verify-overlaybd, sdk-e2e, idle-e2e =="
 		;;
 	pool)
 		exec > >(tee -a "$WORK/run.log") 2>&1
@@ -2988,6 +3012,22 @@ case "$ACTION" in
 		trap 'on_error idle-e2e' ERR
 		idle_e2e
 		trap - ERR
+		;;
+	verify-native)
+		exec > >(tee -a "$WORK/run.log") 2>&1
+		log "=== fast-sandbox-env verify-native ($(date -u +%FT%TZ)) ==="
+		trap 'on_error verify-native' ERR
+		verify_native
+		trap - ERR
+		stage_summary
+		;;
+	verify-overlaybd)
+		exec > >(tee -a "$WORK/run.log") 2>&1
+		log "=== fast-sandbox-env verify-overlaybd ($(date -u +%FT%TZ)) ==="
+		trap 'on_error verify-overlaybd' ERR
+		verify_overlaybd
+		trap - ERR
+		stage_summary
 		;;
 	down)
 		down
