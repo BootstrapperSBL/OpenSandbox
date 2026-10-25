@@ -171,16 +171,17 @@ class FastSandboxSnapshotRuntime:
                 )
             # The request is durable and idempotent by request_id, so it may
             # have been persisted before the error (e.g. a lost reply). Report
-            # an existing snapshot, or it would be left without a record.
+            # an existing snapshot as submitted whatever its phase: a failed
+            # status would leave it without a record, and convergence records
+            # its terminal state once the row exists.
             try:
-                existing = self._fastpath.get_sandbox_snapshot(ns, snapshot_name)
+                self._fastpath.get_sandbox_snapshot(ns, snapshot_name)
             except FastPathError:
                 return SnapshotRuntimeStatus(
                     state=SnapshotState.FAILED,
                     reason="snapshot_runtime_create_failed",
                     message=f"Failed to create fsb snapshot {snapshot_name}: {exc}",
                 )
-            return self._status_from_info(existing.snapshot)
         return SnapshotRuntimeStatus(
             state=SnapshotState.CREATING,
             reason="snapshot_runtime_submitted",
