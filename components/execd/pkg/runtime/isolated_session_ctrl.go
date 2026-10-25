@@ -713,11 +713,22 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		}
 	}()
 
-	if _, err := io.WriteString(stdin, script.String()); err != nil {
-		return fmt.Errorf("write stdin: %w", err)
-	}
+	// The shell runs the script as it reads it, so write it while stdout is
+	// read: a command that fills the stdout pipe before the shell has read the
+	// rest of a large script would otherwise block both sides.
+	written := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(stdin, script.String())
+		written <- err
+	}()
 
 	exitCode, err := scanUntilMarker(ctx, stdout, runMarker, onStdout)
+	// Scanning stops at the marker, which the shell reads last, or when the
+	// shell exits, so the write has returned by then and cannot spill into the
+	// next run.
+	if writeErr := <-written; writeErr != nil && ctx.Err() == nil {
+		return fmt.Errorf("write stdin: %w", writeErr)
+	}
 	if err != nil {
 		return err
 	}
