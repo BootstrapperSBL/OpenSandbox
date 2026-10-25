@@ -2857,6 +2857,9 @@ down() {
 	# A stale profile marker would let idle-e2e run against a stack whose
 	# Redis/sweeper are gone.
 	rm -f "$WORK/idle-pause"
+	# Same stale-marker risk: sdk-e2e reads $WORK/overlaybd-template-id, and
+	# its producer (template_up_overlaybd) only runs in verify-overlaybd.
+	rm -f "$WORK/overlaybd-template-id"
 	# RustFS data is owned by UID/GID 10001; leftovers pollute the host and
 	# later docker build contexts.
 	sudo_ rm -rf "$RUSTFS_DATA"
