@@ -316,6 +316,7 @@ class CodesAdapter(Codes):
                 result=[],
                 error=None,
             )
+            execution._is_code_execution = True
 
             # Use SSE client for streaming responses (read timeout disabled)
             client = await self._get_sse_client()
