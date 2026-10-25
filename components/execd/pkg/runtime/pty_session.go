@@ -314,7 +314,7 @@ func (s *ptySession) StartPTY() error {
 		defer close(outputDoneCh)
 		s.broadcastPTY(ptmx)
 	})
-	safego.Go(func() { s.waitAndExit(mp, ptmx) })
+	safego.Go(func() { s.waitAndExit(mp, ptmx, outputDoneCh) })
 
 	return nil
 }
@@ -459,19 +459,33 @@ func (s *ptySession) writeAndFanout(chunk []byte, isStdout bool) {
 	}
 }
 
+// ptyDrainTimeout bounds how long the session waits for buffered PTY output
+// after the shell exits, in case an attached client stopped reading.
+const ptyDrainTimeout = 2 * time.Second
+
 // waitAndExit waits for the PTY-mode process and updates session state on exit.
-func (s *ptySession) waitAndExit(mp *managedProcess, ptmx *os.File) {
+func (s *ptySession) waitAndExit(mp *managedProcess, ptmx *os.File, outputDone <-chan struct{}) {
 	_ = mp.Wait()
 
-	// Close the PTY master to unblock the broadcast goroutine.
-	_ = ptmx.Close()
-
+	// The shell is reaped and its PID may be reused, so stop signalling it
+	// before waiting for its output below.
 	s.mu.Lock()
 	exitCode := mp.ExitCode()
 	s.lastExitCode = exitCode
 	s.pid = 0
 	doneCh := s.doneCh
 	s.mu.Unlock()
+
+	// Output the shell wrote before exiting can still be buffered in the
+	// master, and closing it discards that output. The broadcast goroutine
+	// stops once it has read everything (the master then returns EIO), so
+	// wait for it, but not past ptyDrainTimeout: it blocks while an attached
+	// client is not reading.
+	select {
+	case <-outputDone:
+	case <-time.After(ptyDrainTimeout):
+	}
+	_ = ptmx.Close()
 
 	close(doneCh)
 }
@@ -494,12 +508,19 @@ func (s *ptySession) waitAndExitPipe(mp *managedProcess, stdinW, stdoutR, stderr
 }
 
 // WriteStdin writes p to shell stdin (PTY master or pipe write-end).
+// Input that arrives once the shell is reaped is dropped, as a terminal would:
+// while the output drains the master is still open, and a write to it would
+// block once the tty input queue is full and then fail.
 func (s *ptySession) WriteStdin(p []byte) (int, error) {
 	s.mu.Lock()
 	w := s.stdin
+	exited := s.pid == 0
 	s.mu.Unlock()
 	if w == nil {
 		return 0, errors.New("session not started")
+	}
+	if exited {
+		return len(p), nil
 	}
 	return w.Write(p)
 }
