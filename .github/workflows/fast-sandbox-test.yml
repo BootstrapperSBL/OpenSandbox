@@ -34,7 +34,6 @@ jobs:
     needs: changes
     if: needs.changes.outputs.relevant == 'true'
     runs-on: kvm
-    # The verify matrix runs twice when OCI_STACK=1 (native + overlaybd).
     timeout-minutes: 240
     env:
       # Full-stack profile (single round while scenarios stabilize).
@@ -77,8 +76,17 @@ jobs:
           sed -i "s/^commit:.*/commit: $FSB_COMMIT_OVERRIDE/" manifests/third-party/fast-sandbox.commit
           manifests/release/build-fast-sandbox.sh --no-build --sync-crds
 
-      - name: Run integration tests
+      - name: Run integration tests (environment init)
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
+
+      - name: Run native template verify
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Run overlaybd template verify
+        # Builds the overlaybd template first; no-op when OCI_STACK=0.
+        timeout-minutes: 90
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
 
       - name: Run base SDK e2e
         # Runs once per template (native + overlaybd).
