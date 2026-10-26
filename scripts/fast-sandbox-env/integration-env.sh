@@ -1513,7 +1513,7 @@ template_up() {
 		|| fail "template CR egressMitmCertificate.key is '$cert_key', want ca.crt (certificate entry only)"
 	lineage_fp="$(template_mitm_lineage_fingerprint)"
 	[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
-		|| fail "template manifest lineage egressMitmCA.certSha256 is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
+		|| fail "template manifest platform.egressMitmCA.certSha256 is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
 	log "template baked CA: secret/$cert_ref (ca.crt), lineage fingerprint ${lineage_fp:0:16}…"
 	pass "SandboxTemplate Succeeded + artifacts published (via opensandbox CLI)"
 	return 0
@@ -1815,16 +1815,16 @@ bake_registry_ca_into_images() {
 	verify_image_ca_bake "$IMG_RUNTIME"
 }
 
-# template_mitm_lineage_fingerprint [template-id] -> the egressMitmCA.certSha256
-# the builder stamped into the published artifact-set manifest (empty when the
-# manifest or the lineage entry is missing).
+# template_mitm_lineage_fingerprint [template-id] -> the certSha256 the
+# builder stamped under platform.egressMitmCA in the published artifact-set
+# manifest (empty when the manifest or the entry is missing).
 template_mitm_lineage_fingerprint() {
 	local tid manifest_ref manifest_json
 	tid="${1:-$TEMPLATE_ID}"
 	manifest_ref="$(osb_api template get "$tid" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')"
 	[[ -n "$manifest_ref" ]] || return 0
 	manifest_json="$(rc cat "chain/$RUSTFS_BUCKET/$(dirname "${manifest_ref#s3://$RUSTFS_BUCKET/}")/manifest.json" 2>/dev/null)" || return 0
-	printf '%s' "$manifest_json" | jq -r '.lineage.egressMitmCA.certificates[0].certSha256 // empty' 2>/dev/null
+	printf '%s' "$manifest_json" | jq -r '.platform.egressMitmCA.certificates[0].certSha256 // empty' 2>/dev/null
 }
 
 # --- stage: SandboxPool (egress attached, P2P spread) --------------------------------------------
@@ -2748,15 +2748,15 @@ mitm_ca_chain_verify() {
 	# Optional template override (the overlaybd second pass); default native.
 	local template_id="${1:-$TEMPLATE_ID}"
 	local created sandbox_uid ack echo_secret
-	log "verify (mitm-ca): three-way fingerprint pinning (template lineage == egress /healthz == pinned Secret)"
+	log "verify (mitm-ca): three-way fingerprint pinning (manifest platform.egressMitmCA == egress /healthz == pinned Secret)"
 	local healthz_fp lineage_fp
 	healthz_fp="$(egress_mitm_ca_fingerprint)"
 	[[ "$healthz_fp" == "$MITM_CA_FINGERPRINT" ]] \
 		|| fail "mitm-ca verify: egress /healthz fingerprint is '${healthz_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
 	lineage_fp="$(template_mitm_lineage_fingerprint "$template_id")"
 	[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
-		|| fail "mitm-ca verify: template manifest lineage fingerprint is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
-	pass "template↔pool CA pinning: manifest lineage == egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…)"
+		|| fail "mitm-ca verify: template manifest platform.egressMitmCA fingerprint is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
+	pass "template↔pool CA pinning: manifest platform.egressMitmCA == egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…)"
 
 	# Sandbox policy: the domain allow covers the vault binding (binding
 	# validation requires the host be policy-allowed), the IP allow covers
