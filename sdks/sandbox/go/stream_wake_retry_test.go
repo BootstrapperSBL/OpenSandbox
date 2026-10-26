@@ -135,3 +135,34 @@ func TestStreamWakeRetry_DisabledReturnsMarked503(t *testing.T) {
 	require.True(t, apiErr.WakeExpired, "the marked error must reach the caller")
 	require.Equal(t, 1, int(attempts.Load()), "stream bootstrap attempts")
 }
+
+// A marker received after a redirect chain is not proof about the original
+// request: an earlier hop already received it and may have processed it. The
+// bootstrap must not be replayed, so the original request is sent exactly once.
+func TestStreamWakeRetry_NotRetriedAfterRedirect(t *testing.T) {
+	var bootstraps, wakeAnswers atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/command", func(w http.ResponseWriter, r *http.Request) {
+		bootstraps.Add(1)
+		http.Redirect(w, r, "/wake", http.StatusTemporaryRedirect)
+	})
+	mux.HandleFunc("/wake", func(w http.ResponseWriter, r *http.Request) {
+		wakeAnswers.Add(1)
+		writeStreamWakeTimeout(w)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	client := NewExecdClient(srv.URL, "tok", WithRetry(wakeConfig(5, time.Minute)))
+
+	err := client.RunCommand(context.Background(), RunCommandRequest{Command: "echo hello"}, func(StreamEvent) error {
+		return nil
+	})
+	require.Error(t, err, "a marked 503 behind a redirect must not be replayed")
+	require.Equal(t, 1, int(bootstraps.Load()), "original requests")
+	require.Equal(t, 1, int(wakeAnswers.Load()), "redirected requests")
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.Equal(t, http.StatusServiceUnavailable, apiErr.StatusCode, "status code")
+	require.True(t, !apiErr.WakeExpired, "a redirected answer must not claim wake provenance")
+}

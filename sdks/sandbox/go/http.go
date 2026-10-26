@@ -508,12 +508,21 @@ func (c *Client) doStreamRequest(ctx context.Context, method, path string, body 
 // gateway-owned OSEP-0024 wake marker for the wake retry contract.
 func handleError(resp *http.Response) error {
 	retryAfter, retryAfterPresent := parseRetryAfterValue(resp.Header.Get("Retry-After"))
+	wakeExpired := resp.StatusCode == http.StatusServiceUnavailable &&
+		resp.Header.Get(wakeMarkerHeader) == wakeMarkerExpired
+	// The marker only proves that the final hop never forwarded the request.
+	// When the client followed a redirect first, an earlier hop already
+	// received the request (and may have processed it), so replaying the
+	// original request is no longer provably free of a second execution.
+	if wakeExpired && resp.Request != nil && resp.Request.Response != nil {
+		wakeExpired = false
+	}
 	apiErr := &APIError{
 		StatusCode:        resp.StatusCode,
 		RequestID:         resp.Header.Get("X-Request-Id"),
 		RetryAfter:        retryAfter,
 		RetryAfterPresent: retryAfterPresent,
-		WakeExpired:       resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get(wakeMarkerHeader) == wakeMarkerExpired,
+		WakeExpired:       wakeExpired,
 	}
 	data, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
