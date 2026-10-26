@@ -135,12 +135,15 @@ def running():
                 if not _barrier_release.exists():
                     emit("pre_admission_barrier_timeout", stream_id=client_stream_id)
                     raise RuntimeError("pre-admission test barrier timed out")
+                emit("pre_admission_release_observed", stream_id=client_stream_id,
+                     before_registry_acquire=True)
                 admission = original(token, client_stream_id=client_stream_id)
                 state = live.registry.drain_state(token)
                 emit("pre_admission_result", stream_id=client_stream_id,
                      action=admission.action, reason=admission.reason,
                      handle_created=admission.handle is not None,
                      fenced=None if state is None else state.fenced,
+                     frozen=None if state is None else state.frozen_last_stream_id,
                      registry_request_count=live.registry.request_count)
                 return admission
             return original(token, client_stream_id=client_stream_id)

@@ -103,6 +103,21 @@ def require(condition, message):
         raise AssertionError(message)
 
 
+def pre_admission_order_is_valid(
+    entered_ns, ack_ns, release_ns, result_ns,
+    entered_sequence, release_sequence, result_sequence,
+):
+    """Prove ACK precedes release; event sequence disambiguates clock ties."""
+    timestamps = (entered_ns, ack_ns, release_ns, result_ns)
+    sequences = (entered_sequence, release_sequence, result_sequence)
+    return (
+        all(type(value) is int and value > 0 for value in timestamps)
+        and all(type(value) is int and value > 0 for value in sequences)
+        and entered_ns < ack_ns < release_ns <= result_ns
+        and entered_sequence < release_sequence < result_sequence
+    )
+
+
 def wait_for(predicate, timeout=10, message="condition did not become true"):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -901,21 +916,34 @@ def case_pre_admission_barrier(harness):
             "barrier did not pause the real stream before LiveRuntime.acquire_request")
 
     harness.install(2, None, retry=True)
-    fenced = harness.wait_connection(lambda state: state["fenced"])
-    require(fenced["frozen"] == 1,
-            "real IPC barrier scope must freeze the admitted stream-1 high-water mark")
     require(harness.final_ack_ns > 0 and harness.ipc.active() is not None,
             "authenticated Unix IPC fence was not acknowledged before release")
     harness.barrier_release_path.write_text("release\n")
 
+    released = wait_for(
+        lambda: next((item for item in harness.events()
+                      if item.get("kind") == "pre_admission_release_observed"), None),
+        timeout=10, message="paused admission did not observe the release after ACK")
     admission = wait_for(
         lambda: next((item for item in harness.events()
                       if item.get("kind") == "pre_admission_result"), None),
         timeout=10, message="paused real admission did not resume after the fence ACK")
+    require(released.get("stream_id") == 3
+            and released.get("before_registry_acquire") is True,
+            "barrier release must be observed before the real Registry admission")
+    require(pre_admission_order_is_valid(
+                entered.get("monotonic_ns"), harness.final_ack_ns,
+                released.get("monotonic_ns"), admission.get("monotonic_ns"),
+                entered.get("sequence"), released.get("sequence"),
+                admission.get("sequence")),
+            "pre-admission order must be entered, authenticated ACK, release, then Registry result")
     require(admission.get("action") == "deny"
             and admission.get("reason") == "connection_fenced"
             and admission.get("handle_created") is False
-            and admission.get("fenced") is True,
+            and admission.get("fenced") is True
+            and admission.get("frozen") == 1
+            and admission.get("registry_request_count") == 1
+            and admission.get("stream_id") == 3,
             "Registry did not deny the request that resumed after fence publication")
     client.until(lambda: 3 in client.resets,
                  message="post-ACK pre-admission request did not receive REFUSED_STREAM")
@@ -928,10 +956,12 @@ def case_pre_admission_barrier(harness):
     require(hook.get("attached") is True and hook.get("admitted") is False
             and hook.get("fenced") is True and hook.get("private_token_present") is False,
             "denied request acquired a handle or received credential injection")
-    harness.wait_connection(lambda value: value["fenced"]
-                            and [item["stream_id"] for item in value["active"]] == [1])
-    registry = wait_for(lambda: (state := harness.state())
-                        if state.get("registry_requests") == 1 else None,
+    fenced = harness.wait_connection(lambda value: value["fenced"]
+                                     and [item["stream_id"] for item in value["active"]] == [1])
+    require(fenced["frozen"] == 1,
+            "real IPC barrier scope must freeze the admitted stream-1 high-water mark")
+    registry = wait_for(lambda: (state if state.get("registry_requests") == 1 else None)
+                        if (state := harness.state()) else None,
                         timeout=5, message="rejected stream changed the Registry request count")
     require(registry["registry_requests"] == 1,
             "the rejected stream changed the Registry request count or released the old request")

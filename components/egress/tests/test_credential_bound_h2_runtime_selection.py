@@ -4,6 +4,7 @@
 """Pure case-selection and denominator checks for the opt-in runtime runner."""
 
 import unittest
+from types import SimpleNamespace
 
 import test_credential_bound_h2_runtime as runner
 
@@ -16,7 +17,208 @@ def initial_cases(overrides=None):
     ]
 
 
+class _BarrierScheduleClient:
+    def __init__(self, harness):
+        self.harness = harness
+        self.resets = {}
+        self.headers = {}
+        self.bodies = {1: bytearray(b"old-prefix")}
+        self.ended = set()
+        self.closed = False
+        self.requests = []
+
+    def request(self, stream_id, path, logical_id):
+        self.requests.append((stream_id, path, logical_id))
+        self.harness.emit(
+            "pre_admission_barrier_entered",
+            stream_id=stream_id,
+            before_registry_acquire=True,
+        )
+
+    def until(self, predicate, timeout=10, message="condition did not become true"):
+        if not predicate():
+            raise AssertionError(message)
+
+    def credit(self):
+        self.bodies[1] = runner.BODY
+        self.ended.add(1)
+
+    def close(self):
+        self.closed = True
+
+
+class _BarrierReleasePath:
+    def __init__(self, harness):
+        self.harness = harness
+
+    def write_text(self, _value):
+        self.harness.released = True
+        self.harness.emit(
+            "pre_admission_release_observed",
+            stream_id=3,
+            before_registry_acquire=True,
+        )
+        self.harness.emit(
+            "pre_admission_result",
+            stream_id=3,
+            action="deny",
+            reason="connection_fenced",
+            handle_created=False,
+            fenced=True,
+            frozen=1,
+            registry_request_count=1,
+        )
+        self.harness.client.resets[3] = 7
+        self.harness.emit(
+            "requestheaders",
+            logical_id="new",
+            attached=True,
+            admitted=False,
+            fenced=True,
+            private_token_present=False,
+        )
+
+
+class _BarrierScheduleHarness:
+    """Stdlib-only scheduler that rejects H2 state waits while paused."""
+
+    def __init__(self):
+        self.protocol = "h2"
+        self.final_ack_ns = 0
+        self._clock = 100
+        self._sequence = 0
+        self._events = []
+        self.released = False
+        self.wait_connection_calls = 0
+        self.cleaned = False
+        self.registry_requests = 1
+        self.install_calls = []
+        self.backpressured_calls = []
+        self.origin = SimpleNamespace(records=[
+            {"path": "/v1/old", "credential": "one", "protocol": "h2"}
+        ])
+        self.client = _BarrierScheduleClient(self)
+        self.ipc = SimpleNamespace(active=lambda: {"epoch": 2})
+        self.barrier_release_path = _BarrierReleasePath(self)
+
+    def emit(self, kind, **values):
+        self._clock += 10
+        self._sequence += 1
+        self._events.append({
+            "kind": kind,
+            "monotonic_ns": self._clock,
+            "sequence": self._sequence,
+            **values,
+        })
+        return self._events[-1]
+
+    def install(self, epoch, secret=runner.SECRET_ONE, *, retry=False):
+        self.install_calls.append((epoch, secret, retry))
+        if epoch == 2:
+            self._clock += 10
+            self.final_ack_ns = self._clock
+
+    def connect(self):
+        return self.client
+
+    def backpressured(self, client):
+        self.backpressured_calls.append(client)
+        return {
+            "adapter": "BoundH2Server",
+            "client_h2": True,
+            "destination_port": 443,
+            "layer_chain": [
+                "Socks5Proxy", "NextLayer", "ServerTLSLayer",
+                "ClientTLSLayer", "NextLayer", "HttpLayer",
+            ],
+            "active": [{"stream_id": 1}],
+        }
+
+    def events(self):
+        return list(self._events)
+
+    def wait_connection(self, predicate, timeout=10):
+        self.wait_connection_calls += 1
+        if not self.released:
+            raise AssertionError(
+                "production state cannot be observed while pre-admission is paused"
+            )
+        active = [] if 1 in self.client.ended else [{"stream_id": 1}]
+        state = {"fenced": True, "frozen": 1, "active": active}
+        if not predicate(state):
+            raise AssertionError("expected production H2 state was not observed")
+        return state
+
+    def state(self):
+        return {"registry_requests": self.registry_requests}
+
+    def evidence(self):
+        return {"origin_attempt_counts": {"manual-1": 1}}
+
+    def expect_clean_runtime(self):
+        if (not self.client.closed or 1 not in self.client.ended
+                or bytes(self.client.bodies[1]) != runner.BODY):
+            raise AssertionError("old stream cleanup was not completed")
+        self.cleaned = True
+
+
 class RuntimeSelectionTests(unittest.TestCase):
+    def test_pre_admission_barrier_requires_enter_ack_release_result_order(self):
+        self.assertTrue(
+            runner.pre_admission_order_is_valid(10, 20, 30, 30, 1, 2, 3)
+        )
+        self.assertFalse(
+            runner.pre_admission_order_is_valid(0, 20, 30, 30, 1, 2, 3)
+        )
+        self.assertFalse(
+            runner.pre_admission_order_is_valid(20, 10, 30, 30, 1, 2, 3)
+        )
+        self.assertFalse(
+            runner.pre_admission_order_is_valid(10, 20, 20, 30, 1, 2, 3)
+        )
+        self.assertFalse(
+            runner.pre_admission_order_is_valid(10, 20, 30, 29, 1, 2, 3)
+        )
+        self.assertFalse(
+            runner.pre_admission_order_is_valid(10, 20, 30, 30, 1, 3, 2)
+        )
+        self.assertFalse(
+            runner.pre_admission_order_is_valid(10, 20, 30, 30, True, 2, 3)
+        )
+
+    def test_pre_admission_runner_releases_before_waiting_for_h2_state(self):
+        harness = _BarrierScheduleHarness()
+        runner.case_pre_admission_barrier(harness)
+
+        events = harness.events()
+        kinds = [event["kind"] for event in events]
+        entered, released, admission = (
+            next(event for event in events if event["kind"] == kind)
+            for kind in (
+                "pre_admission_barrier_entered",
+                "pre_admission_release_observed",
+                "pre_admission_result",
+            )
+        )
+        self.assertTrue(harness.released)
+        self.assertLess(kinds.index("pre_admission_barrier_entered"),
+                        kinds.index("pre_admission_release_observed"))
+        self.assertLess(kinds.index("pre_admission_release_observed"),
+                        kinds.index("pre_admission_result"))
+        self.assertLess(entered["monotonic_ns"], harness.final_ack_ns)
+        self.assertLess(harness.final_ack_ns, released["monotonic_ns"])
+        self.assertLess(released["sequence"], admission["sequence"])
+        self.assertEqual(harness.client.requests, [(3, "/v1/new", "new")])
+        self.assertEqual(harness.client.resets, {3: 7})
+        self.assertNotIn(3, harness.client.headers)
+        self.assertEqual(bytes(harness.client.bodies[1]), runner.BODY)
+        self.assertEqual(harness.install_calls, [
+            (1, runner.SECRET_ONE, False), (2, None, True)
+        ])
+        self.assertEqual(harness.backpressured_calls, [harness.client])
+        self.assertEqual(harness.wait_connection_calls, 2)
+        self.assertTrue(harness.cleaned)
+
     def test_no_go_client_keeps_existing_runtime_denominator(self):
         self.assertEqual(runner.select_cases(None, False), runner.CASES)
 
