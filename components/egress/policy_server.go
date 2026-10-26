@@ -58,14 +58,11 @@ type alwaysRulesLoader interface {
 // nftApplier: static allow/deny sets plus dynamic DNS-learned entries; teardown on shutdown.
 type nftApplier interface {
 	ApplyStatic(context.Context, *policy.NetworkPolicy) error
-	// ApplyStaticDropEstablished applies p and, when drops is non-empty, denies
-	// those destinations even for ct state established,related. matched is the
-	// best-effort count of matching TCP conntrack flows before the apply.
-	ApplyStaticDropEstablished(context.Context, *policy.NetworkPolicy, nftables.EstablishedDrops) (int, error)
 	// ApplyStaticComputingEstablishedDrops snapshots DNS leases, computes the
 	// teardown set, and applies under one lock so AddResolvedDomain cannot race.
+	// The returned count is the best-effort number of matching TCP conntrack
+	// flows observed before the apply.
 	ApplyStaticComputingEstablishedDrops(context.Context, *policy.NetworkPolicy, *policy.NetworkPolicy) (int, error)
-	SnapshotResolvedDomains() map[string][]netip.Addr
 	Quiesce()
 	AddResolvedDomain(context.Context, string, []nftables.ResolvedIP) error
 	AddUpstreamProxyIPs(context.Context, []nftables.ResolvedIP) error
@@ -917,6 +914,13 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 			http.Error(w, reason, http.StatusNotImplemented)
 			return false, nil
 		}
+		if s.nft == nil {
+			// dns-only enforcement has no nft chain to install teardown rules
+			// in; answering 200 with droppedEstablished=0 would be
+			// indistinguishable from "matched zero flows".
+			http.Error(w, "dropEstablished requires dns+nft enforcement", http.StatusNotImplemented)
+			return false, nil
+		}
 	}
 	if s.revisionRecovery != nil {
 		m := s.revisionMitmLocked()
@@ -975,9 +979,6 @@ func (s *policyServer) commitPolicy(ctx context.Context, w http.ResponseWriter, 
 			http.Error(w, fmt.Sprintf("failed to apply nftables policy: %v", err), http.StatusInternalServerError)
 			return false, nil
 		}
-	} else if dropEstablished {
-		zero := 0
-		dropped = &zero
 	}
 	s.proxy.UpdatePolicy(pol)
 	return true, dropped

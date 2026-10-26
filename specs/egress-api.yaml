@@ -86,6 +86,13 @@ paths:
             established/related conntrack bypass on the dns+nft sidecar: matching
             keep-alive flows are dropped. Opt-in because tearing down long-lived
             connections can surprise callers that only meant to block new dials.
+            The teardown rules stay installed across later policy applies until
+            the destination is allowed again.
+
+            Unsupported configurations return `501 Not Implemented` without
+            changing the policy: `dns`-only enforcement (no nftables chain), the
+            experimental revision runtime, and an upstream proxy
+            (`OPENSANDBOX_EGRESS_UPSTREAM_PROXY`) combined with transparent MITM.
           schema:
             type: boolean
             default: false
@@ -131,6 +138,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '501':
+          $ref: '#/components/responses/DropEstablishedNotImplemented'
         '503':
           description: |
             The internal experimental revision runtime is unavailable, the
@@ -165,6 +174,13 @@ paths:
             established/related conntrack bypass on the dns+nft sidecar: matching
             keep-alive flows are dropped. Opt-in because tearing down long-lived
             connections can surprise callers that only meant to block new dials.
+            The teardown rules stay installed across later policy applies until
+            the destination is allowed again.
+
+            Unsupported configurations return `501 Not Implemented` without
+            changing the policy: `dns`-only enforcement (no nftables chain), the
+            experimental revision runtime, and an upstream proxy
+            (`OPENSANDBOX_EGRESS_UPSTREAM_PROXY`) combined with transparent MITM.
           schema:
             type: boolean
             default: false
@@ -207,6 +223,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
+        '501':
+          $ref: '#/components/responses/DropEstablishedNotImplemented'
         '503':
           description: |
             The internal experimental revision runtime is unavailable, the
@@ -393,6 +411,15 @@ components:
             type: string
     Conflict:
       description: The request conflicts with the current Credential Vault revision.
+      content:
+        text/plain:
+          schema:
+            type: string
+    DropEstablishedNotImplemented:
+      description: |
+        `dropEstablished=true` was requested but this sidecar cannot honor it
+        (`dns`-only enforcement, the experimental revision runtime, or an
+        upstream proxy with transparent MITM). The policy was not changed.
       content:
         text/plain:
           schema:

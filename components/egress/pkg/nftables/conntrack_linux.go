@@ -21,6 +21,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/alibaba/opensandbox/egress/pkg/constants"
 )
 
 // countMatchingConntrackFlows reads /proc/net/nf_conntrack and counts TCP flows
@@ -49,7 +51,15 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 		}
 		var dst netip.Addr
 		dport := 0
+		marked := false
 		for _, tok := range f[6:] {
+			if v, ok := strings.CutPrefix(tok, "mark="); ok {
+				// Marked proxy upstream flows are accepted ahead of teardown.
+				if n, err := strconv.ParseUint(v, 0, 32); err == nil && n&constants.MarkValue != 0 {
+					marked = true
+				}
+				continue
+			}
 			if v, ok := strings.CutPrefix(tok, "dst="); ok && !dst.IsValid() {
 				if a, err := netip.ParseAddr(v); err == nil {
 					dst = a.Unmap()
@@ -62,7 +72,7 @@ func countMatchingConntrackFlowsData(data []byte, drops EstablishedDrops) int {
 				}
 			}
 		}
-		if dst.IsValid() && drops.MatchesFlow(dst, dport) {
+		if !marked && dst.IsValid() && drops.MatchesFlow(dst, dport) {
 			matched++
 		}
 	}

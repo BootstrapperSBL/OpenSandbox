@@ -21,8 +21,9 @@ import (
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
 
-// EstablishedPortDrop is a destination:port teardown target for flows that
-// were allowed only on specific TCP ports.
+// EstablishedPortDrop is a destination:port teardown (or keep) target for
+// TCP flows. Exactly one of Addr/Prefix is set for a scoped target; when both
+// are unset the entry covers every destination (port-only rule).
 type EstablishedPortDrop struct {
 	Addr   netip.Addr
 	Prefix netip.Prefix
@@ -30,27 +31,39 @@ type EstablishedPortDrop struct {
 	Ranges []policy.PortRange
 }
 
-// EstablishedDrops lists destinations that a policy change no longer allows.
-// ApplyStaticDropEstablished installs drop rules for these destinations ahead
-// of the usual `ct state established,related accept`, so keep-alive flows to
-// removed allows die on the next packet instead of surviving on conntrack.
+// EstablishedDrops lists destinations whose established/related flows a
+// policy change should tear down. The nft chain evaluates the buckets in this
+// order, and MatchesFlow mirrors it:
 //
-// When CatchAll is set (default-action tighten allow→deny), keep rules for
-// KeepAddrs/KeepPrefixes/PortDrops-as-keeps are emitted first, then a blanket
-// established drop replaces the generic accept.
+//  1. infrastructure accepts (mark, loopback, DNS redirect, ::1, upstream proxy)
+//  2. dyn_allow_v4/v6 established accepts
+//  3. Deny*: destinations the new policy explicitly denies — dropped
+//     unconditionally, so an overlapping allow can never shield them
+//  4. Keep*: destinations the new policy still allows (static allows minus
+//     portless denies, surviving domain-lease IPs, port-scoped allows) plus
+//     the static allow sets — accepted
+//  5. Addrs/Prefixes/PortDrops: allows the change removed — dropped
+//  6. CatchAll ? blanket established drop : blanket established accept
 type EstablishedDrops struct {
-	Addrs        []netip.Addr
-	Prefixes     []netip.Prefix
-	PortDrops    []EstablishedPortDrop
-	CatchAll     bool
+	DenyAddrs     []netip.Addr
+	DenyPrefixes  []netip.Prefix
+	DenyPortDrops []EstablishedPortDrop
+
+	Addrs     []netip.Addr
+	Prefixes  []netip.Prefix
+	PortDrops []EstablishedPortDrop
+	CatchAll  bool
+
 	KeepAddrs    []netip.Addr
 	KeepPrefixes []netip.Prefix
 	KeepPorts    []EstablishedPortDrop
 }
 
-// Empty reports whether there is nothing to drop.
+// Empty reports whether there is nothing to drop. Keep entries alone never
+// change the ruleset.
 func (d EstablishedDrops) Empty() bool {
-	return len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll
+	return len(d.DenyAddrs) == 0 && len(d.DenyPrefixes) == 0 && len(d.DenyPortDrops) == 0 &&
+		len(d.Addrs) == 0 && len(d.Prefixes) == 0 && len(d.PortDrops) == 0 && !d.CatchAll
 }
 
 // Matches reports whether addr is covered by this drop set (port-agnostic).
@@ -61,55 +74,42 @@ func (d EstablishedDrops) Matches(addr netip.Addr) bool {
 }
 
 // MatchesFlow reports whether an ORIGINAL-direction TCP flow to addr[:dport]
-// should be torn down. dport 0 means "any/unknown port" and only matches
-// portless address/prefix/catch-all targets.
+// is torn down by the generated chain. dport 0 means "any/unknown port" and
+// only matches portless address/prefix/catch-all targets. Loopback
+// destinations are always accepted ahead of the teardown rules.
 func (d EstablishedDrops) MatchesFlow(addr netip.Addr, dport int) bool {
 	if !addr.IsValid() {
 		return false
 	}
 	addr = addr.Unmap()
-	if d.isKept(addr, dport) {
+	if addr.IsLoopback() {
+		return false
+	}
+	if targetsMatch(d.DenyAddrs, d.DenyPrefixes, d.DenyPortDrops, addr, dport) {
+		return true
+	}
+	if targetsMatch(d.KeepAddrs, d.KeepPrefixes, d.KeepPorts, addr, dport) {
 		return false
 	}
 	if d.CatchAll {
 		return true
 	}
-	for _, a := range d.Addrs {
-		if a == addr {
-			return true
-		}
-	}
-	for _, p := range d.Prefixes {
-		if p.Contains(addr) {
-			return true
-		}
-	}
-	if dport > 0 {
-		for _, pd := range d.PortDrops {
-			if !portDropCoversAddr(pd, addr) {
-				continue
-			}
-			if portDropCoversPort(pd, dport) {
-				return true
-			}
-		}
-	}
-	return false
+	return targetsMatch(d.Addrs, d.Prefixes, d.PortDrops, addr, dport)
 }
 
-func (d EstablishedDrops) isKept(addr netip.Addr, dport int) bool {
-	for _, a := range d.KeepAddrs {
-		if a == addr {
+func targetsMatch(addrs []netip.Addr, prefixes []netip.Prefix, ports []EstablishedPortDrop, addr netip.Addr, dport int) bool {
+	for _, a := range addrs {
+		if a.Unmap() == addr {
 			return true
 		}
 	}
-	for _, p := range d.KeepPrefixes {
+	for _, p := range prefixes {
 		if p.Contains(addr) {
 			return true
 		}
 	}
 	if dport > 0 {
-		for _, pd := range d.KeepPorts {
+		for _, pd := range ports {
 			if portDropCoversAddr(pd, addr) && portDropCoversPort(pd, dport) {
 				return true
 			}
@@ -120,9 +120,12 @@ func (d EstablishedDrops) isKept(addr netip.Addr, dport int) bool {
 
 func portDropCoversAddr(pd EstablishedPortDrop, addr netip.Addr) bool {
 	if pd.Addr.IsValid() {
-		return pd.Addr == addr
+		return pd.Addr.Unmap() == addr
 	}
-	return pd.Prefix.IsValid() && pd.Prefix.Contains(addr)
+	if pd.Prefix.IsValid() {
+		return pd.Prefix.Contains(addr)
+	}
+	return true // port-only: every destination
 }
 
 func portDropCoversPort(pd EstablishedPortDrop, dport int) bool {
@@ -140,7 +143,9 @@ func portDropCoversPort(pd EstablishedPortDrop, dport int) bool {
 }
 
 // SnapshotResolvedDomains returns a copy of the DNS-learned address map the
-// manager currently tracks. Safe to call without holding an external lock.
+// manager currently tracks. Not part of the policy server's nftApplier
+// interface: production code snapshots under the manager lock inside
+// ApplyStaticComputingEstablishedDrops.
 func (m *Manager) SnapshotResolvedDomains() map[string][]netip.Addr {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -163,47 +168,44 @@ func (m *Manager) snapshotResolvedDomainsLocked() map[string][]netip.Addr {
 	return out
 }
 
-// ComputeEstablishedDrops derives the destinations a policy change removed.
-// priorDomains is the pre-apply DNS-learned map (from SnapshotResolvedDomains).
+// ComputeEstablishedDrops derives the teardown set for oldPol → newPol.
+// priorDomains is the pre-apply DNS-learned map (from the manager snapshot).
 //
-// A destination is dropped when the new policy no longer allows it via a
-// surviving domain lease or a portless IP/CIDR allow (EvaluateIP). Removed
-// static allow CIDRs are retained as the *subtracted* prefixes so still-allowed
-// subnets are not torn down. Port-scoped allows contribute PortDrops.
+// Deny* comes from newPol's explicit IP/CIDR/port deny rules. Addrs/Prefixes/
+// PortDrops are removed allows (removed domains' learned IPs, removed IP/CIDR
+// allows minus retained subnets, removed port-scoped allows). Keep* is always
+// computed from what newPol still allows — static allows minus portless
+// denies, surviving domain-lease IPs, and port-scoped allows (including
+// port-only ones) — so a removed prefix can never cut a flow newPol permits.
 func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains map[string][]netip.Addr) EstablishedDrops {
 	if newPol == nil {
 		newPol = policy.DefaultDenyPolicy()
 	}
 
+	// IPs still covered by a surviving domain lease (and not explicitly denied).
 	survivingDomainIPs := make(map[netip.Addr]struct{})
-	var addrs []netip.Addr
-	seenAddr := make(map[netip.Addr]struct{})
-	addAddr := func(addr netip.Addr) {
-		if !addr.IsValid() {
-			return
-		}
-		addr = addr.Unmap()
-		if _, ok := seenAddr[addr]; ok {
-			return
-		}
-		seenAddr[addr] = struct{}{}
-		addrs = append(addrs, addr)
-	}
-
-	// Pass 1: collect IPs still covered by a surviving domain lease.
 	for domain, ips := range priorDomains {
 		if newPol.Evaluate(domain) != policy.ActionAllow {
 			continue
 		}
 		for _, ip := range ips {
-			if ip.IsValid() {
-				survivingDomainIPs[ip.Unmap()] = struct{}{}
+			if !ip.IsValid() {
+				continue
 			}
+			ip = ip.Unmap()
+			if ipExplicitlyDenied(newPol, ip) {
+				continue
+			}
+			survivingDomainIPs[ip] = struct{}{}
 		}
 	}
 
-	// Pass 2: removed-domain candidates, excluding shared CDN IPs that a
-	// surviving lease or an explicit IP/CIDR allow still permits.
+	var out EstablishedDrops
+	removedAddrs := newAddrSet()
+	removedPrefixes := newPrefixSet()
+
+	// Removed-domain candidates, excluding shared CDN IPs that a surviving
+	// lease or an explicit IP/CIDR allow still permits.
 	for domain, ips := range priorDomains {
 		if newPol.Evaluate(domain) == policy.ActionAllow {
 			continue
@@ -219,25 +221,9 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 			if newPol.EvaluateIP(ip) == policy.ActionAllow {
 				continue
 			}
-			addAddr(ip)
+			removedAddrs.add(ip)
 		}
 	}
-
-	var prefixes []netip.Prefix
-	seenPrefix := make(map[string]struct{})
-	addPrefix := func(pfx netip.Prefix) {
-		if !pfx.IsValid() {
-			return
-		}
-		key := pfx.Masked().String()
-		if _, ok := seenPrefix[key]; ok {
-			return
-		}
-		seenPrefix[key] = struct{}{}
-		prefixes = append(prefixes, pfx.Masked())
-	}
-
-	var portDrops []EstablishedPortDrop
 
 	if oldPol != nil {
 		for _, r := range oldPol.Egress {
@@ -246,176 +232,381 @@ func ComputeEstablishedDrops(oldPol, newPol *policy.NetworkPolicy, priorDomains 
 			}
 			hasPorts := len(r.Ports) > 0 || len(r.PortRanges) > 0
 			switch {
-			case hasPorts && r.Target != "" && looksLikeIP(r):
+			case hasPorts && looksLikeIP(r):
 				ip := parseRuleIP(r)
 				if !ip.IsValid() {
+					continue
+				}
+				if _, keep := survivingDomainIPs[ip]; keep {
 					continue
 				}
 				ports, ranges := portsNoLongerAllowed(newPol, ip, r.Ports, r.PortRanges)
 				if len(ports) == 0 && len(ranges) == 0 {
 					continue
 				}
-				portDrops = append(portDrops, EstablishedPortDrop{Addr: ip, Ports: ports, Ranges: ranges})
-			case hasPorts && r.Target != "" && looksLikeCIDR(r):
+				out.PortDrops = append(out.PortDrops, EstablishedPortDrop{Addr: ip, Ports: ports, Ranges: ranges})
+			case hasPorts && looksLikeCIDR(r):
 				pfx := parseRulePrefix(r)
 				if !pfx.IsValid() {
-					continue
-				}
-				// Port+CIDR: if the whole prefix is still portlessly allowed, skip;
-				// otherwise emit the old ports against the prefix (conservative).
-				if prefixFullyAllowedPortless(newPol, pfx) {
 					continue
 				}
 				if portsFullyAllowedOnPrefix(newPol, pfx, r.Ports, r.PortRanges) {
 					continue
 				}
-				portDrops = append(portDrops, EstablishedPortDrop{
+				out.PortDrops = append(out.PortDrops, EstablishedPortDrop{
 					Prefix: pfx.Masked(),
 					Ports:  append([]int(nil), r.Ports...),
 					Ranges: append([]policy.PortRange(nil), r.PortRanges...),
 				})
 			case hasPorts:
-				// Port-only (no target) or domain+ports (rejected by normalize): skip.
+				// Port-only allow removal: tearing down every destination on
+				// those ports would need the full complement of newPol's allows.
+				// Leave it to conntrack; callers can tighten with a port deny.
 				continue
-			case r.Target != "" && looksLikeIP(r):
+			case looksLikeIP(r):
 				ip := parseRuleIP(r)
-				if ip.IsValid() && newPol.EvaluateIP(ip) != policy.ActionAllow {
-					if _, keep := survivingDomainIPs[ip.Unmap()]; !keep {
-						addAddr(ip)
-					}
-				}
-			case r.Target != "" && looksLikeCIDR(r):
-				pfx := parseRulePrefix(r)
-				if !pfx.IsValid() {
+				if !ip.IsValid() || newPol.EvaluateIP(ip) == policy.ActionAllow {
 					continue
 				}
-				for _, removed := range removedPrefixParts(newPol, pfx) {
-					addPrefix(removed)
+				if _, keep := survivingDomainIPs[ip]; keep {
+					continue
+				}
+				removedAddrs.add(ip)
+			case looksLikeCIDR(r):
+				for _, removed := range removedPrefixParts(newPol, parseRulePrefix(r)) {
+					removedPrefixes.add(removed)
 				}
 			}
 		}
 	}
 
-	// New deny rules for literal IP/CIDR must also cut established flows even
-	// when the previous policy was default-allow with no explicit allow entry.
+	// Explicit denies in newPol cut established flows even when the previous
+	// policy was default-allow with no explicit allow entry. They are emitted
+	// ahead of every keep so an overlapping allow cannot shield them.
+	denyAddrs := newAddrSet()
+	denyPrefixes := newPrefixSet()
 	for _, r := range newPol.Egress {
-		if r.Action != policy.ActionDeny {
-			continue
-		}
-		hasPorts := len(r.Ports) > 0 || len(r.PortRanges) > 0
-		if hasPorts {
-			if looksLikeIP(r) {
-				ip := parseRuleIP(r)
-				if ip.IsValid() {
-					portDrops = append(portDrops, EstablishedPortDrop{
-						Addr:   ip,
-						Ports:  append([]int(nil), r.Ports...),
-						Ranges: append([]policy.PortRange(nil), r.PortRanges...),
-					})
-				}
-			} else if looksLikeCIDR(r) {
-				pfx := parseRulePrefix(r)
-				if pfx.IsValid() {
-					portDrops = append(portDrops, EstablishedPortDrop{
-						Prefix: pfx.Masked(),
-						Ports:  append([]int(nil), r.Ports...),
-						Ranges: append([]policy.PortRange(nil), r.PortRanges...),
-					})
-				}
-			}
+		if r.Action != policy.ActionDeny || len(r.Ports) > 0 || len(r.PortRanges) > 0 {
 			continue
 		}
 		if looksLikeIP(r) {
-			addAddr(parseRuleIP(r))
-			continue
-		}
-		if looksLikeCIDR(r) {
-			addPrefix(parseRulePrefix(r))
+			denyAddrs.add(parseRuleIP(r))
+		} else if looksLikeCIDR(r) {
+			denyPrefixes.add(parseRulePrefix(r))
 		}
 	}
+	portDeny, portAllow := newPol.PortScopedRules()
+	for _, r := range portDeny {
+		if pd, ok := portDropFromScoped(r); ok {
+			out.DenyPortDrops = append(out.DenyPortDrops, pd)
+		}
+	}
+	out.DenyAddrs = denyAddrs.sorted()
+	out.DenyPrefixes = denyPrefixes.sorted()
+	out.Addrs = removedAddrs.sorted()
+	out.Prefixes = removedPrefixes.sorted()
 
-	var keepAddrs []netip.Addr
-	var keepPrefixes []netip.Prefix
-	var keepPorts []EstablishedPortDrop
-	catchAll := oldPol != nil &&
+	out.CatchAll = oldPol != nil &&
 		oldPol.DefaultAction == policy.ActionAllow &&
 		newPol.DefaultAction != policy.ActionAllow
 
-	if catchAll {
-		seenKeep := make(map[netip.Addr]struct{})
-		for ip := range survivingDomainIPs {
-			if _, ok := seenKeep[ip]; ok {
-				continue
-			}
-			seenKeep[ip] = struct{}{}
-			keepAddrs = append(keepAddrs, ip)
+	// Keeps: everything newPol still allows, deny-aware.
+	keepAddrs := newAddrSet()
+	for ip := range survivingDomainIPs {
+		keepAddrs.add(ip)
+	}
+	keepPrefixes := newPrefixSet()
+	denyPfx := portlessDenyPrefixes(newPol)
+	for _, r := range newPol.Egress {
+		if r.Action != policy.ActionAllow || len(r.Ports) > 0 || len(r.PortRanges) > 0 {
+			continue
 		}
-		seenKeepPfx := make(map[string]struct{})
-		for _, r := range newPol.Egress {
-			if r.Action != policy.ActionAllow {
-				continue
-			}
-			hasPorts := len(r.Ports) > 0 || len(r.PortRanges) > 0
-			if hasPorts {
-				if looksLikeIP(r) {
-					ip := parseRuleIP(r)
-					if ip.IsValid() {
-						keepPorts = append(keepPorts, EstablishedPortDrop{
-							Addr:   ip,
-							Ports:  append([]int(nil), r.Ports...),
-							Ranges: append([]policy.PortRange(nil), r.PortRanges...),
-						})
-					}
-				} else if looksLikeCIDR(r) {
-					pfx := parseRulePrefix(r)
-					if pfx.IsValid() {
-						keepPorts = append(keepPorts, EstablishedPortDrop{
-							Prefix: pfx.Masked(),
-							Ports:  append([]int(nil), r.Ports...),
-							Ranges: append([]policy.PortRange(nil), r.PortRanges...),
-						})
-					}
-				}
-				continue
-			}
-			if looksLikeIP(r) {
-				ip := parseRuleIP(r)
-				if !ip.IsValid() {
-					continue
-				}
-				if _, ok := seenKeep[ip]; ok {
-					continue
-				}
-				seenKeep[ip] = struct{}{}
-				keepAddrs = append(keepAddrs, ip)
-			} else if looksLikeCIDR(r) {
-				pfx := parseRulePrefix(r)
-				if !pfx.IsValid() {
-					continue
-				}
-				key := pfx.Masked().String()
-				if _, ok := seenKeepPfx[key]; ok {
-					continue
-				}
-				seenKeepPfx[key] = struct{}{}
-				keepPrefixes = append(keepPrefixes, pfx.Masked())
+		var pfx netip.Prefix
+		if looksLikeIP(r) {
+			pfx = hostPrefix(parseRuleIP(r))
+		} else if looksLikeCIDR(r) {
+			pfx = parseRulePrefix(r).Masked()
+		}
+		if !pfx.IsValid() {
+			continue
+		}
+		for _, part := range prefixDiff(pfx, denyPfx) {
+			if part.IsSingleIP() {
+				keepAddrs.add(part.Addr())
+			} else {
+				keepPrefixes.add(part)
 			}
 		}
-		sort.Slice(keepAddrs, func(i, j int) bool { return keepAddrs[i].Compare(keepAddrs[j]) < 0 })
-		sort.Slice(keepPrefixes, func(i, j int) bool { return keepPrefixes[i].String() < keepPrefixes[j].String() })
+	}
+	for _, r := range portAllow {
+		if pd, ok := portDropFromScoped(r); ok {
+			out.KeepPorts = append(out.KeepPorts, pd)
+		}
+	}
+	out.KeepAddrs = keepAddrs.sorted()
+	out.KeepPrefixes = keepPrefixes.sorted()
+	return out
+}
+
+// stillRelevant returns the part of a previously applied teardown set that
+// must be re-emitted when p is applied without dropEstablished, so the next
+// full ruleset rebuild does not silently reopen flows a dropEstablished commit
+// closed. Destinations p allows again stop being dropped, and keeps accumulate
+// (p's allows plus the currently learned domain IPs) so a destination that was
+// allowed at any point after the commit is never torn down by a later plain
+// apply the caller did not opt in to.
+func (d EstablishedDrops) stillRelevant(p *policy.NetworkPolicy, learned []netip.Addr) EstablishedDrops {
+	if d.Empty() {
+		return EstablishedDrops{}
+	}
+	if p == nil {
+		p = policy.DefaultDenyPolicy()
+	}
+	var out EstablishedDrops
+
+	// Deny bucket: only what p still explicitly denies (it precedes keeps).
+	denyAddrs := newAddrSet()
+	for _, a := range d.DenyAddrs {
+		if ipExplicitlyDenied(p, a) {
+			denyAddrs.add(a)
+		}
+	}
+	denyPrefixes := newPrefixSet()
+	curDeny := portlessDenyPrefixes(p)
+	for _, old := range d.DenyPrefixes {
+		for _, cur := range curDeny {
+			if !old.Overlaps(cur) {
+				continue
+			}
+			if old.Bits() >= cur.Bits() {
+				denyPrefixes.add(old)
+			} else {
+				denyPrefixes.add(cur)
+			}
+		}
+	}
+	portDeny, portAllow := p.PortScopedRules()
+	for _, old := range d.DenyPortDrops {
+		for _, r := range portDeny {
+			if cur, ok := portDropFromScoped(r); ok && samePortDrop(old, cur) {
+				out.DenyPortDrops = append(out.DenyPortDrops, old)
+				break
+			}
+		}
+	}
+	out.DenyAddrs = denyAddrs.sorted()
+	out.DenyPrefixes = denyPrefixes.sorted()
+
+	// Removed bucket: drop entries p fully allows again; partial re-allows
+	// are shielded by the recomputed keeps.
+	removedAddrs := newAddrSet()
+	for _, a := range d.Addrs {
+		if p.EvaluateIP(a) != policy.ActionAllow {
+			removedAddrs.add(a)
+		}
+	}
+	removedPrefixes := newPrefixSet()
+	for _, pfx := range d.Prefixes {
+		for _, part := range removedPrefixParts(p, pfx) {
+			removedPrefixes.add(part)
+		}
+	}
+	for _, pd := range d.PortDrops {
+		switch {
+		case pd.Addr.IsValid():
+			ports, ranges := portsNoLongerAllowed(p, pd.Addr, pd.Ports, pd.Ranges)
+			if len(ports) > 0 || len(ranges) > 0 {
+				out.PortDrops = append(out.PortDrops, EstablishedPortDrop{Addr: pd.Addr, Ports: ports, Ranges: ranges})
+			}
+		case pd.Prefix.IsValid():
+			if !portsFullyAllowedOnPrefix(p, pd.Prefix, pd.Ports, pd.Ranges) {
+				out.PortDrops = append(out.PortDrops, pd)
+			}
+		}
+	}
+	out.Addrs = removedAddrs.sorted()
+	out.Prefixes = removedPrefixes.sorted()
+	out.CatchAll = d.CatchAll && p.DefaultAction != policy.ActionAllow
+
+	if out.Empty() {
+		return EstablishedDrops{}
 	}
 
-	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Compare(addrs[j]) < 0 })
-	sort.Slice(prefixes, func(i, j int) bool { return prefixes[i].String() < prefixes[j].String() })
-	return EstablishedDrops{
-		Addrs:        addrs,
-		Prefixes:     prefixes,
-		PortDrops:    portDrops,
-		CatchAll:     catchAll,
-		KeepAddrs:    keepAddrs,
-		KeepPrefixes: keepPrefixes,
-		KeepPorts:    keepPorts,
+	// Keeps accumulate: previous keeps ∪ p's allows ∪ learned domain IPs.
+	fresh := ComputeEstablishedDrops(nil, p, nil)
+	keepAddrs := newAddrSet()
+	for _, a := range d.KeepAddrs {
+		keepAddrs.add(a)
 	}
+	for _, a := range fresh.KeepAddrs {
+		keepAddrs.add(a)
+	}
+	for _, a := range learned {
+		keepAddrs.add(a)
+	}
+	keepPrefixes := newPrefixSet()
+	for _, pfx := range d.KeepPrefixes {
+		keepPrefixes.add(pfx)
+	}
+	for _, pfx := range fresh.KeepPrefixes {
+		keepPrefixes.add(pfx)
+	}
+	out.KeepAddrs = keepAddrs.sorted()
+	out.KeepPrefixes = keepPrefixes.sorted()
+	out.KeepPorts = append([]EstablishedPortDrop(nil), d.KeepPorts...)
+	for _, r := range portAllow {
+		cur, ok := portDropFromScoped(r)
+		if !ok {
+			continue
+		}
+		dup := false
+		for _, k := range out.KeepPorts {
+			if samePortDrop(k, cur) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out.KeepPorts = append(out.KeepPorts, cur)
+		}
+	}
+	return out
+}
+
+func portDropFromScoped(r policy.PortScopedRule) (EstablishedPortDrop, bool) {
+	pd := EstablishedPortDrop{
+		Ports:  append([]int(nil), r.Ports...),
+		Ranges: append([]policy.PortRange(nil), r.Ranges...),
+	}
+	if len(pd.Ports) == 0 && len(pd.Ranges) == 0 {
+		return EstablishedPortDrop{}, false
+	}
+	if r.Target == "" {
+		return pd, true
+	}
+	if ip, err := netip.ParseAddr(r.Target); err == nil {
+		pd.Addr = ip.Unmap()
+		return pd, true
+	}
+	if pfx, err := netip.ParsePrefix(r.Target); err == nil {
+		pd.Prefix = pfx.Masked()
+		return pd, true
+	}
+	return EstablishedPortDrop{}, false
+}
+
+func samePortDrop(a, b EstablishedPortDrop) bool {
+	if a.Addr != b.Addr || a.Prefix != b.Prefix || len(a.Ports) != len(b.Ports) || len(a.Ranges) != len(b.Ranges) {
+		return false
+	}
+	for i := range a.Ports {
+		if a.Ports[i] != b.Ports[i] {
+			return false
+		}
+	}
+	for i := range a.Ranges {
+		if a.Ranges[i] != b.Ranges[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ipExplicitlyDenied reports whether a portless IP/CIDR deny rule covers ip.
+func ipExplicitlyDenied(p *policy.NetworkPolicy, ip netip.Addr) bool {
+	if p == nil || !ip.IsValid() {
+		return false
+	}
+	ip = ip.Unmap()
+	for _, pfx := range portlessDenyPrefixes(p) {
+		if pfx.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// portlessDenyPrefixes returns newPol's portless IP/CIDR deny rules as prefixes.
+func portlessDenyPrefixes(p *policy.NetworkPolicy) []netip.Prefix {
+	if p == nil {
+		return nil
+	}
+	var out []netip.Prefix
+	for _, r := range p.Egress {
+		if r.Action != policy.ActionDeny || len(r.Ports) > 0 || len(r.PortRanges) > 0 {
+			continue
+		}
+		if looksLikeIP(r) {
+			if pfx := hostPrefix(parseRuleIP(r)); pfx.IsValid() {
+				out = append(out, pfx)
+			}
+		} else if looksLikeCIDR(r) {
+			if pfx := parseRulePrefix(r); pfx.IsValid() {
+				out = append(out, pfx.Masked())
+			}
+		}
+	}
+	return out
+}
+
+func hostPrefix(ip netip.Addr) netip.Prefix {
+	if !ip.IsValid() {
+		return netip.Prefix{}
+	}
+	ip = ip.Unmap()
+	p, err := ip.Prefix(ip.BitLen())
+	if err != nil {
+		return netip.Prefix{}
+	}
+	return p
+}
+
+type addrSet struct {
+	seen map[netip.Addr]struct{}
+	list []netip.Addr
+}
+
+func newAddrSet() *addrSet { return &addrSet{seen: make(map[netip.Addr]struct{})} }
+
+func (s *addrSet) add(a netip.Addr) {
+	if !a.IsValid() {
+		return
+	}
+	a = a.Unmap()
+	if _, ok := s.seen[a]; ok {
+		return
+	}
+	s.seen[a] = struct{}{}
+	s.list = append(s.list, a)
+}
+
+func (s *addrSet) sorted() []netip.Addr {
+	sort.Slice(s.list, func(i, j int) bool { return s.list[i].Compare(s.list[j]) < 0 })
+	return s.list
+}
+
+type prefixSet struct {
+	seen map[netip.Prefix]struct{}
+	list []netip.Prefix
+}
+
+func newPrefixSet() *prefixSet { return &prefixSet{seen: make(map[netip.Prefix]struct{})} }
+
+func (s *prefixSet) add(p netip.Prefix) {
+	if !p.IsValid() {
+		return
+	}
+	p = p.Masked()
+	if _, ok := s.seen[p]; ok {
+		return
+	}
+	s.seen[p] = struct{}{}
+	s.list = append(s.list, p)
+}
+
+func (s *prefixSet) sorted() []netip.Prefix {
+	sort.Slice(s.list, func(i, j int) bool { return s.list[i].String() < s.list[j].String() })
+	return s.list
 }
 
 func looksLikeIP(r policy.EgressRule) bool {
@@ -469,6 +660,11 @@ func prefixFullyAllowedPortless(newPol *policy.NetworkPolicy, pfx netip.Prefix) 
 	if newPol.EvaluateIP(pfx.Addr()) != policy.ActionAllow {
 		return false
 	}
+	for _, deny := range portlessDenyPrefixes(newPol) {
+		if deny.Overlaps(pfx) {
+			return false
+		}
+	}
 	last := lastAddr(pfx)
 	if last.IsValid() && last != pfx.Addr() && newPol.EvaluateIP(last) != policy.ActionAllow {
 		return false
@@ -476,10 +672,22 @@ func prefixFullyAllowedPortless(newPol *policy.NetworkPolicy, pfx netip.Prefix) 
 	return true
 }
 
+// overlappingPortlessAllows returns newPol's portless allows inside/overlapping
+// oldPfx, minus newPol's portless denies (a deny inside a retained allow is not
+// retained).
 func overlappingPortlessAllows(newPol *policy.NetworkPolicy, oldPfx netip.Prefix) []netip.Prefix {
 	if newPol == nil {
 		return nil
 	}
+	denies := portlessDenyPrefixes(newPol)
+	var allows []netip.Prefix
+	for _, a := range rawOverlappingPortlessAllows(newPol, oldPfx) {
+		allows = append(allows, prefixDiff(a, denies)...)
+	}
+	return allows
+}
+
+func rawOverlappingPortlessAllows(newPol *policy.NetworkPolicy, oldPfx netip.Prefix) []netip.Prefix {
 	var out []netip.Prefix
 	for _, r := range newPol.Egress {
 		if r.Action != policy.ActionAllow || len(r.Ports) > 0 || len(r.PortRanges) > 0 {
@@ -610,10 +818,10 @@ func setHostBit(addr netip.Addr, bitIndexAfterMSB int) netip.Addr {
 	return netip.AddrFrom16(b)
 }
 
+// portsNoLongerAllowed returns the subset of ports/ranges that newPol no
+// longer admits for new TCP dials to addr, evaluated in chain order (port
+// deny, plain deny, port allow, plain allow, default).
 func portsNoLongerAllowed(newPol *policy.NetworkPolicy, addr netip.Addr, ports []int, ranges []policy.PortRange) ([]int, []policy.PortRange) {
-	if newPol.EvaluateIP(addr) == policy.ActionAllow {
-		return nil, nil
-	}
 	var outPorts []int
 	for _, p := range ports {
 		if !tcpPortAllowed(newPol, addr, p) {
@@ -622,10 +830,10 @@ func portsNoLongerAllowed(newPol *policy.NetworkPolicy, addr netip.Addr, ports [
 	}
 	var outRanges []policy.PortRange
 	for _, r := range ranges {
-		// Expand small ranges conservatively into ports still denied; for
-		// large floor ranges keep the range if any port inside is denied.
+		// Expand small ranges into the ports still denied; for large floor
+		// ranges keep the whole range if any boundary port is denied.
 		if r.Hi-r.Lo > 64 {
-			if !tcpPortAllowed(newPol, addr, r.Lo) || !tcpPortAllowed(newPol, addr, r.Hi) {
+			if !tcpRangeAllowed(newPol, addr, r) {
 				outRanges = append(outRanges, r)
 			}
 			continue
@@ -639,12 +847,56 @@ func portsNoLongerAllowed(newPol *policy.NetworkPolicy, addr netip.Addr, ports [
 	return outPorts, outRanges
 }
 
+// tcpRangeAllowed samples a large range at its bounds and at every port-scoped
+// rule boundary that falls inside it, which is where the verdict can change.
+func tcpRangeAllowed(newPol *policy.NetworkPolicy, addr netip.Addr, r policy.PortRange) bool {
+	samples := []int{r.Lo, r.Hi}
+	deny, allow := newPol.PortScopedRules()
+	for _, rule := range append(append([]policy.PortScopedRule(nil), deny...), allow...) {
+		for _, p := range rule.Ports {
+			samples = append(samples, p, p-1, p+1)
+		}
+		for _, rg := range rule.Ranges {
+			samples = append(samples, rg.Lo, rg.Hi, rg.Lo-1, rg.Hi+1)
+		}
+	}
+	for _, p := range samples {
+		if p < r.Lo || p > r.Hi {
+			continue
+		}
+		if !tcpPortAllowed(newPol, addr, p) {
+			return false
+		}
+	}
+	return true
+}
+
 func portsFullyAllowedOnPrefix(newPol *policy.NetworkPolicy, pfx netip.Prefix, ports []int, ranges []policy.PortRange) bool {
-	// Sample network + last address; if both still allow every listed port,
-	// treat the port-scoped allow as retained for the whole prefix.
+	// Sample the network and last address plus every rule target inside the
+	// prefix (where the verdict can differ); if all still allow every listed
+	// port, treat the port-scoped allow as retained for the whole prefix.
+	pfx = pfx.Masked()
 	samples := []netip.Addr{pfx.Addr()}
 	if last := lastAddr(pfx); last.IsValid() && last != pfx.Addr() {
 		samples = append(samples, last)
+	}
+	if newPol != nil {
+		for _, r := range newPol.Egress {
+			var t netip.Prefix
+			if looksLikeIP(r) {
+				t = hostPrefix(parseRuleIP(r))
+			} else if looksLikeCIDR(r) {
+				t = parseRulePrefix(r).Masked()
+			}
+			if t.IsValid() && t.Overlaps(pfx) {
+				if pfx.Contains(t.Addr()) {
+					samples = append(samples, t.Addr())
+				}
+				if l := lastAddr(t); pfx.Contains(l) {
+					samples = append(samples, l)
+				}
+			}
+		}
 	}
 	for _, addr := range samples {
 		leftPorts, leftRanges := portsNoLongerAllowed(newPol, addr, ports, ranges)
@@ -655,25 +907,30 @@ func portsFullyAllowedOnPrefix(newPol *policy.NetworkPolicy, pfx netip.Prefix, p
 	return true
 }
 
+// tcpPortAllowed mirrors the egress chain for a new TCP dial to addr:port:
+// port-scoped deny, plain deny set, port-scoped allow, plain allow set, then
+// the chain default. A portless allow therefore never overrides a port-scoped
+// deny (e.g. allow 1.2.3.4 + deny ports [8080] still denies :8080).
 func tcpPortAllowed(newPol *policy.NetworkPolicy, addr netip.Addr, port int) bool {
 	if newPol == nil || !addr.IsValid() || port < 1 || port > 65535 {
 		return false
 	}
-	if newPol.EvaluateIP(addr) == policy.ActionAllow {
-		return true
-	}
+	addr = addr.Unmap()
 	deny, allow := newPol.PortScopedRules()
 	for _, r := range deny {
 		if portScopedMatches(r, addr, port) {
 			return false
 		}
 	}
+	if ipExplicitlyDenied(newPol, addr) {
+		return false
+	}
 	for _, r := range allow {
 		if portScopedMatches(r, addr, port) {
 			return true
 		}
 	}
-	return newPol.DefaultAction == policy.ActionAllow
+	return newPol.EvaluateIP(addr) == policy.ActionAllow
 }
 
 func portScopedMatches(r policy.PortScopedRule, addr netip.Addr, port int) bool {

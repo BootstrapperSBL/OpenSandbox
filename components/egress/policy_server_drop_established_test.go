@@ -128,3 +128,20 @@ func TestCommitPolicy_DropEstablishedUnsupportedWithRevisionRuntime(t *testing.T
 	require.Contains(t, w.Body.String(), "revision runtime")
 	require.Equal(t, 0, nft.calls)
 }
+
+func TestCommitPolicy_DropEstablishedUnsupportedWithoutNft(t *testing.T) {
+	initial, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","target":"deb.debian.org"}]}`)
+	require.NoError(t, err)
+	proxy := &stubProxy{updated: initial}
+	srv := &policyServer{
+		proxy:           proxy,
+		enforcementMode: "dns",
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/policy?dropEstablished=true", strings.NewReader(`["deb.debian.org"]`))
+	w := httptest.NewRecorder()
+	srv.handlePolicy(w, req)
+	require.Equal(t, http.StatusNotImplemented, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "dns+nft")
+	require.Same(t, initial, proxy.updated, "policy must not change on 501")
+}
