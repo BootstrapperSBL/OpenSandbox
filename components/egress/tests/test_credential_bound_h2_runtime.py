@@ -969,11 +969,7 @@ def case_pre_admission_barrier(harness):
             "post-ACK pre-admission request reached the origin")
     assert_credential(harness, "/v1/old", "one")
 
-    client.credit()
-    client.until(lambda: 1 in client.ended, message="already-admitted old response did not finish")
-    require(bytes(client.bodies[1]) == BODY,
-            "already-admitted old response did not retain its original body")
-    harness.wait_connection(lambda value: not value["active"])
+    assert_graceful(client, [1], 1)
     client.close()
     harness.expect_clean_runtime()
 

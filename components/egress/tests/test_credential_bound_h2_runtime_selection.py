@@ -24,6 +24,8 @@ class _BarrierScheduleClient:
         self.headers = {}
         self.bodies = {1: bytearray(b"old-prefix")}
         self.ended = set()
+        self.eof = False
+        self.frames = []
         self.closed = False
         self.requests = []
 
@@ -42,6 +44,15 @@ class _BarrierScheduleClient:
     def credit(self):
         self.bodies[1] = runner.BODY
         self.ended.add(1)
+        self.frames = [
+            {"type": "GoAwayFrame", "stream_id": 0, "end_stream": False,
+             "error_code": 0, "last_stream_id": 1, "sequence": 1},
+            {"type": "DataFrame", "stream_id": 1, "end_stream": True, "sequence": 2},
+            {"type": "GoAwayFrame", "stream_id": 0, "end_stream": False,
+             "error_code": 0, "last_stream_id": 1, "sequence": 3},
+        ]
+        self.eof = True
+        self.harness.connection_present = False
 
     def close(self):
         self.closed = True
@@ -89,6 +100,7 @@ class _BarrierScheduleHarness:
         self._sequence = 0
         self._events = []
         self.released = False
+        self.connection_present = True
         self.wait_connection_calls = 0
         self.cleaned = False
         self.registry_requests = 1
@@ -143,7 +155,9 @@ class _BarrierScheduleHarness:
             raise AssertionError(
                 "production state cannot be observed while pre-admission is paused"
             )
-        active = [] if 1 in self.client.ended else [{"stream_id": 1}]
+        if not self.connection_present:
+            raise AssertionError("completed adapter was normally removed from the Registry")
+        active = [{"stream_id": 1}]
         state = {"fenced": True, "frozen": 1, "active": active}
         if not predicate(state):
             raise AssertionError("expected production H2 state was not observed")
@@ -216,8 +230,28 @@ class RuntimeSelectionTests(unittest.TestCase):
             (1, runner.SECRET_ONE, False), (2, None, True)
         ])
         self.assertEqual(harness.backpressured_calls, [harness.client])
-        self.assertEqual(harness.wait_connection_calls, 2)
+        self.assertEqual(harness.wait_connection_calls, 1)
+        self.assertTrue(harness.client.eof)
+        self.assertFalse(harness.connection_present)
         self.assertTrue(harness.cleaned)
+
+    def test_barrier_graceful_gate_rejects_incomplete_or_misordered_terminal(self):
+        cases = (
+            (lambda client: setattr(client, "eof", False), "EOF"),
+            (lambda client: client.frames.pop(), "one notice and one final GOAWAY"),
+            (lambda client: (client.frames[1].update(sequence=3),
+                             client.frames[2].update(sequence=2)),
+             "old END_STREAM was not retained"),
+        )
+        for mutate, message in cases:
+            with self.subTest(message=message):
+                harness = _BarrierScheduleHarness()
+                client = harness.client
+                client.credit()
+                client.credit = lambda: None
+                mutate(client)
+                with self.assertRaisesRegex(AssertionError, message):
+                    runner.assert_graceful(client, [1], 1)
 
     def test_no_go_client_keeps_existing_runtime_denominator(self):
         self.assertEqual(runner.select_cases(None, False), runner.CASES)
