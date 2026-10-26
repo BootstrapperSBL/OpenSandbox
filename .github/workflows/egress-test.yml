@@ -97,7 +97,8 @@ jobs:
             TestNftStartFailurePreservesKernelAndRetry \
             TestNftRealMissingTableFallback
           bash scripts/ci-nft-go-test.sh . \
-            TestRevisionNftEffectsRealFileAndKernel
+            TestRevisionNftEffectsRealFileAndKernel \
+            TestTransitionRealNftChangedIPKernelRules
 
       - name: Run privileged quarantine packet regressions
         working-directory: components/egress
