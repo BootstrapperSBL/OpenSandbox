@@ -46,7 +46,7 @@ Current limits: TCP only (no UDP); at most 256 ports per rule; domain targets ca
 | Two layers, two costs | DNS filtering alone is cheap and universal but only gates names. `dns+nft` adds packet-level default-deny with DNS-learned, leased exceptions. |
 | Encrypted DNS is an escape hatch | DoT (853) is always dropped, and blocking DoH over 443 is a one-switch option. |
 | Fail-closed over best-effort | If redirect rules cannot be installed, the sidecar exits instead of running as silent pass-through; a supervisor restarts it with backoff and a crash-loop breaker. |
-| Portable by fallback, honest about limits | Redirects install via iptables where available and fall back to native nftables (Firecracker-style guest kernels). gVisor's netstack cannot support this — Kata is the supported secure runtime — and transparent mesh sidecars conflict by construction. |
+| Portable by fallback, honest about limits | Redirects install via iptables where available and fall back to native nftables (Firecracker-style guest kernels). gVisor does not support the nftables features either path needs, so neither works there — Kata is the supported secure runtime — and transparent mesh sidecars conflict by construction. |
 
 ## Transparent TLS interception (L7)
 

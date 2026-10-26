@@ -611,10 +611,7 @@ def ensure_egress_runtime_compatible(
     effective_runtime_class: Optional[str] = None,
 ) -> None:
     """
-    Reject network_policy when the secure runtime lacks iptables nat table support.
-
-    gVisor's netstack does not implement the iptables nat table, which the egress
-    sidecar requires for DNS redirect (REDIRECT target on port 53).
+    Reject network_policy when the secure runtime cannot run the egress sidecar.
     """
     if not network_policy:
         return
@@ -632,7 +629,7 @@ def ensure_egress_runtime_compatible(
                 "code": SandboxErrorCodes.INVALID_PARAMETER,
                 "message": (
                     f"networkPolicy is not compatible with runtime '{runtime_type}': "
-                    f"gVisor does not support the iptables nat table required by the egress sidecar. "
+                    f"gVisor does not support the nftables rules required by the egress sidecar. "
                     f"Use a compatible runtime (e.g. kata) or remove networkPolicy."
                 ),
             },
