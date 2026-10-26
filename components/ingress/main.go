@@ -255,10 +255,12 @@ func newNetworkReadiness(config connectivity.TrackerConfig) (connectivity.Observ
 // newIngressHandler serves the status endpoints and proxies everything else.
 // It does not use http.ServeMux, which answers paths with "//", "." or ".."
 // segments with a redirect to the cleaned path instead of passing them on;
-// the sandbox application owns its paths.
+// the sandbox application owns its paths. The status paths are matched in
+// escaped form, so a sandbox path such as /status.ok%2Fnetwork-readiness is
+// proxied rather than read as a status endpoint.
 func newIngressHandler(reverseProxy, networkReadiness http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
+		switch r.URL.EscapedPath() {
 		case "/status.ok":
 			proxy.Healthz(w, r)
 		case "/status.ok/network-readiness":

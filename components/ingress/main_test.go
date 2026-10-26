@@ -68,4 +68,12 @@ func TestIngressHandlerServesStatusPaths(t *testing.T) {
 	if got != "proxy GET /status.ok/other" {
 		t.Errorf("/status.ok/other handled as %q; want it proxied", got)
 	}
+
+	// An encoded slash is part of a sandbox path, not a status endpoint.
+	got = ""
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/status.ok%2Fnetwork-readiness", nil))
+	if got != "proxy GET /status.ok/network-readiness" {
+		t.Errorf("/status.ok%%2Fnetwork-readiness handled as %q; want it proxied", got)
+	}
 }
