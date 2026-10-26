@@ -45,10 +45,13 @@
 # Stage 2: MITM CA chain verify (OSEP-0022 trust anchor) — proves the chain
 # `up` provisions: pinned CA Secret -> template bake -> egress mitmdump:
 #
-#   1. Three-way fingerprint pinning: the published artifact manifest's
-#      platform.egressMitmCA.certSha256 == the egress /healthz
-#      mitmCaFingerprint == the pinned Secret fingerprint (content, not
-#      name).
+#   1. Three-way fingerprint pinning on the S3 publication path: the
+#      published artifact manifest's platform.egressMitmCA.certSha256 ==
+#      the egress /healthz mitmCaFingerprint == the pinned Secret
+#      fingerprint (content, not name). An oci:// manifestRef lives in the
+#      in-cluster registry, out of rc's reach — there the assertion is the
+#      /healthz leg plus the behavioral chain below (a guest accepts the
+#      MITM certificate only because it chains to the template-baked CA).
 #   2. Negative control before the vault exists: a guest HTTPS request to
 #      the CA-signed TLS echo endpoint passes through the shared mitmdump
 #      opaquely, TLS verified against the template-baked CA (no -k), and
@@ -310,15 +313,25 @@ mitm_ca_chain_verify() {
 	load_mitm_ca_fingerprint
 	load_mitm_echo_endpoint
 	local created sandbox_uid ack echo_secret
-	log "verify (mitm-ca): three-way fingerprint pinning (manifest platform.egressMitmCA == egress /healthz == pinned Secret)"
-	local healthz_fp lineage_fp
+	log "verify (mitm-ca): fingerprint pinning (pinned Secret == egress /healthz, plus the manifest lineage on the S3 publication path)"
+	local healthz_fp lineage_fp manifest_ref
 	healthz_fp="$(egress_mitm_ca_fingerprint)"
 	[[ "$healthz_fp" == "$MITM_CA_FINGERPRINT" ]] \
 		|| fail "mitm-ca verify: egress /healthz fingerprint is '${healthz_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
-	lineage_fp="$(template_mitm_lineage_fingerprint "$template_id")"
-	[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
-		|| fail "mitm-ca verify: template manifest platform.egressMitmCA fingerprint is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
-	pass "template↔pool CA pinning: manifest platform.egressMitmCA == egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…)"
+	# The manifest lineage leg is only readable on the S3 publication path:
+	# an oci:// manifestRef lives in the in-cluster registry, out of rc's
+	# reach. There the pool-side pinning plus the behavioral chain below
+	# (the guest accepts the MITM certificate only because it chains to the
+	# template-baked CA) carry the assertion.
+	manifest_ref="$(osb_api template get "$template_id" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')"
+	if [[ "$manifest_ref" == s3://* ]]; then
+		lineage_fp="$(template_mitm_lineage_fingerprint "$template_id")"
+		[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
+			|| fail "mitm-ca verify: template manifest platform.egressMitmCA fingerprint is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
+		pass "template↔pool CA pinning: manifest platform.egressMitmCA == egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…)"
+	else
+		pass "template↔pool CA pinning: egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…); ${manifest_ref:-no manifest_ref} — guest-side chain proven behaviorally below"
+	fi
 
 	# Sandbox policy: the domain allow covers the vault binding (binding
 	# validation requires the host be policy-allowed), the IP allow covers

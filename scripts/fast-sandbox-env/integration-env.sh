@@ -2774,15 +2774,25 @@ mitm_ca_chain_verify() {
 		|| die "no pinned MITM CA fingerprint at $MITM_CA_FINGERPRINT_FILE (run up first; mitm_ca_up stores it there)"
 	load_mitm_echo_endpoint
 	local created sandbox_uid ack echo_secret
-	log "verify (mitm-ca): three-way fingerprint pinning (manifest platform.egressMitmCA == egress /healthz == pinned Secret)"
-	local healthz_fp lineage_fp
+	log "verify (mitm-ca): fingerprint pinning (pinned Secret == egress /healthz, plus the manifest lineage on the S3 publication path)"
+	local healthz_fp lineage_fp manifest_ref
 	healthz_fp="$(egress_mitm_ca_fingerprint)"
 	[[ "$healthz_fp" == "$MITM_CA_FINGERPRINT" ]] \
 		|| fail "mitm-ca verify: egress /healthz fingerprint is '${healthz_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
-	lineage_fp="$(template_mitm_lineage_fingerprint "$template_id")"
-	[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
-		|| fail "mitm-ca verify: template manifest platform.egressMitmCA fingerprint is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
-	pass "template↔pool CA pinning: manifest platform.egressMitmCA == egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…)"
+	# The manifest lineage leg is only readable on the S3 publication path:
+	# an oci:// manifestRef lives in the in-cluster registry, out of rc's
+	# reach. There the pool-side pinning plus the behavioral chain below
+	# (the guest accepts the MITM certificate only because it chains to the
+	# template-baked CA) carry the assertion.
+	manifest_ref="$(osb_api template get "$template_id" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')"
+	if [[ "$manifest_ref" == s3://* ]]; then
+		lineage_fp="$(template_mitm_lineage_fingerprint "$template_id")"
+		[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
+			|| fail "mitm-ca verify: template manifest platform.egressMitmCA fingerprint is '${lineage_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
+		pass "template↔pool CA pinning: manifest platform.egressMitmCA == egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…)"
+	else
+		pass "template↔pool CA pinning: egress /healthz == pinned (${MITM_CA_FINGERPRINT:0:16}…); ${manifest_ref:-no manifest_ref} — guest-side chain proven behaviorally below"
+	fi
 
 	# Sandbox policy: the domain allow covers the vault binding (binding
 	# validation requires the host be policy-allowed), the IP allow covers
