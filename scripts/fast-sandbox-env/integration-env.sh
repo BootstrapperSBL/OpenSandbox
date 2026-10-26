@@ -1097,6 +1097,18 @@ load_mitm_ca_fingerprint() {
 	fi
 }
 
+# Cross-invocation companion of load_mitm_ca_fingerprint: the echo endpoint's
+# kind-network IP is a docker-container fact, re-derived (not persisted) so a
+# verify action sees the live container rather than a stale address.
+load_mitm_echo_endpoint() {
+	MITM_ECHO_NET="$(kind_network 2>/dev/null || true)"
+	MITM_ECHO_IP="$(docker inspect -f \
+		'{{range $k,$v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{end}}' \
+		"$MITM_ECHO_CONTAINER" 2>/dev/null || true)"
+	[[ -n "$MITM_ECHO_IP" ]] \
+		|| die "TLS echo container $MITM_ECHO_CONTAINER is not running (run up first; mitm_echo_up starts it)"
+}
+
 mitm_ca_up() {
 	local stored_fp openssl_err
 	openssl_err="$LOGS_DIR/mitm-ca-openssl.err"
@@ -2747,6 +2759,12 @@ EOF
 mitm_ca_chain_verify() {
 	# Optional template override (the overlaybd second pass); default native.
 	local template_id="${1:-$TEMPLATE_ID}"
+	# Fingerprint pins live in a file precisely because up and the verify
+	# actions are separate invocations (same pattern as require_template_id).
+	load_mitm_ca_fingerprint
+	[[ -n "$MITM_CA_FINGERPRINT" ]] \
+		|| die "no pinned MITM CA fingerprint at $MITM_CA_FINGERPRINT_FILE (run up first; mitm_ca_up stores it there)"
+	load_mitm_echo_endpoint
 	local created sandbox_uid ack echo_secret
 	log "verify (mitm-ca): three-way fingerprint pinning (manifest platform.egressMitmCA == egress /healthz == pinned Secret)"
 	local healthz_fp lineage_fp
