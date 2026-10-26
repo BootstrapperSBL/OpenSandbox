@@ -250,6 +250,21 @@ def test_create_snapshot_fails_when_no_snapshot_was_persisted() -> None:
     assert "deadline exceeded" in (status.message or "")
 
 
+def test_create_snapshot_is_submitted_when_the_probe_also_fails() -> None:
+    # Only NotFound proves the snapshot was never persisted. If FastPath is
+    # restarting, the probe fails like the create did; report it as submitted
+    # so the row is written and converges, instead of risking an orphan.
+    fastpath = FakeFastPathClient()
+    fastpath.create_error = FastPathError("UNAVAILABLE", "connection refused")
+    fastpath.get_snapshot_error = FastPathError("UNAVAILABLE", "connection refused")
+    runtime, _, _ = _runtime(fastpath=fastpath)
+
+    status = runtime.create_snapshot(SNAPSHOT_ID, SANDBOX_ID, namespace="tenant-a")
+
+    assert status.state == SnapshotState.CREATING
+    assert status.reason == "snapshot_runtime_submitted"
+
+
 def test_create_snapshot_maps_failed_precondition_to_conflict() -> None:
     fastpath = FakeFastPathClient()
     fastpath.create_error = FastPathError(
