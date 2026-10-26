@@ -24,7 +24,7 @@ try:
     import h2.settings
     from hyperframe.frame import (
         ContinuationFrame, DataFrame, Frame, GoAwayFrame, HeadersFrame,
-        RstStreamFrame, WindowUpdateFrame,
+        RstStreamFrame, SettingsFrame, WindowUpdateFrame,
     )
     from mitmproxy import connection, http
     from mitmproxy.proxy import commands, events
@@ -727,6 +727,106 @@ class SocketFreeManualPeerStressTests(unittest.TestCase):
             [event.error_code for event in goaways],
             [h2.errors.ErrorCodes.NO_ERROR, h2.errors.ErrorCodes.PROTOCOL_ERROR],
         )
+
+    def _install_serializer_spy(self, adapter):
+        conn = adapter.h2_conn
+        del conn._prepare_for_sending
+        class_prepare = type(conn)._prepare_for_sending
+        original_calls = []
+
+        def prepare_spy(instance, frames):
+            original_calls.append(tuple(frames))
+            return class_prepare(instance, frames)
+
+        with patch.object(type(conn), "_prepare_for_sending", prepare_spy):
+            adapter._install_retirement_serializer()
+        return conn, original_calls
+
+    def test_retirement_serializer_skips_registry_on_empty_and_ordinary_batches(self):
+        h = Harness()
+        h.runtime.state.fenced = True
+        h.runtime.state.frozen_last_stream_id = 0
+        # Count the original serializer and restore the class method afterward.
+        conn, original_calls = self._install_serializer_spy(h.adapter)
+
+        registry_reads = []
+        h.runtime.registry.drain_state = lambda token: (
+            registry_reads.append(token) or h.runtime.state
+        )
+        conn._prepare_for_sending([])
+        conn._prepare_for_sending([SettingsFrame(0)])
+
+        self.assertEqual(registry_reads, [])
+        self.assertEqual(len(original_calls), 2)
+        self.assertEqual(original_calls[0], ())
+        self.assertEqual(len(original_calls[1]), 1)
+        self.assertIsInstance(original_calls[1][0], SettingsFrame)
+
+    def test_retirement_serializer_clamps_direct_mixed_goaways_and_is_instance_scoped(
+        self,
+    ):
+        h = Harness()
+        h.runtime.state.fenced = True
+        h.runtime.state.frozen_last_stream_id = 5
+        conn, original_calls = self._install_serializer_spy(h.adapter)
+
+        registry_reads = []
+        h.runtime.registry.drain_state = lambda token: (
+            registry_reads.append(token) or h.runtime.state
+        )
+        # First GOAWAY is a direct error path. Multiple controls in one batch
+        # and later batches retain the frozen and serialized minimum bounds.
+        batch = [
+            SettingsFrame(0),
+            GoAwayFrame(
+                0,
+                last_stream_id=9,
+                error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+            ),
+            GoAwayFrame(
+                0,
+                last_stream_id=3,
+                error_code=h2.errors.ErrorCodes.NO_ERROR,
+            ),
+            GoAwayFrame(
+                0,
+                last_stream_id=8,
+                error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+            ),
+        ]
+        conn._prepare_for_sending(batch)
+        self.assertEqual(
+            [frame.last_stream_id for frame in batch[1:]], [5, 3, 3]
+        )
+        self.assertEqual(len(registry_reads), 1)
+        self.assertEqual(len(original_calls), 1)
+
+        # A missing registry state after first serialization cannot loosen the
+        # already serialized bound while this concrete transport still lives.
+        h.runtime.state = None
+        next_batch = [
+            GoAwayFrame(
+                0,
+                last_stream_id=12,
+                error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+            )
+        ]
+        conn._prepare_for_sending(next_batch)
+        self.assertEqual(next_batch[0].last_stream_id, 3)
+        self.assertEqual(len(registry_reads), 2)
+        self.assertEqual(len(original_calls), 2)
+
+        # The instance-installed wrapper does not affect a sibling connection.
+        sibling = type(conn)(h2.config.H2Configuration(client_side=False))
+        sibling_goaway = GoAwayFrame(
+            0,
+            last_stream_id=12,
+            error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        )
+        sibling._prepare_for_sending([sibling_goaway])
+        self.assertEqual(sibling_goaway.last_stream_id, 12)
+        self.assertEqual(len(registry_reads), 2)
+        self.assertEqual(len(original_calls), 2)
 
     def test_h1_normal_response_releases_only_after_upload_finishes(self):
         h = Harness(upstream="h1")

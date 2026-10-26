@@ -139,6 +139,13 @@ class BoundH2Server(Http2Server):
         original_prepare = connection._prepare_for_sending
 
         def prepare_for_sending(frames):
+            # The pinned h2 4.1.0 call sites pass re-iterable frame lists.
+            # Ordinary DATA/HEADERS/control batches do not consume retirement
+            # state, so keep them off the registry-wide lock and deadline scan.
+            if not any(isinstance(frame, GoAwayFrame) for frame in frames):
+                original_prepare(frames)
+                return
+
             state = self.runtime.registry.drain_state(self.token)
             if (
                 state is not None
