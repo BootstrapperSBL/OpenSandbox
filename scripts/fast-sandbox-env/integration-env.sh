@@ -2125,8 +2125,6 @@ render_server_config() { # > $GEN_DIR/osb-server-config.toml
 	mkdir -p "$GEN_DIR"
 	awk -v api_key="$SERVER_API_KEY" \
 		-v fastpath="$FASTPATH_ENDPOINT" -v fsb_ns="$RESOURCE_NS" -v pool="$POOL_NAME" \
-	awk -v api_key="$SERVER_API_KEY" \
-		-v fastpath="$FASTPATH_ENDPOINT" -v fsb_ns="$RESOURCE_NS" -v pool="$POOL_NAME" \
 		-v execd="$EXECD" -v oci_secret="$OCI_REGISTRY_SECRET" -v oci_stack="$OCI_STACK" \
 		-v mitm_ca="$MITM_CA_SECRET" '
 		{ if ($0 == "# @OCI_PUBLISH_SECRET@") {
