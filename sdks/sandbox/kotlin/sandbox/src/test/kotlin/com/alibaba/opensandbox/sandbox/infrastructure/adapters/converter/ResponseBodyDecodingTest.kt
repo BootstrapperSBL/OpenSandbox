@@ -35,7 +35,6 @@ class ResponseBodyDecodingTest {
     @Serializable
     private data class Sample(val id: String)
 
-    /** Serializer whose deserialize throws the given throwable, emulating e.g. a broken generated serializer. */
     private class FailingSerializer(
         private val error: Throwable,
     ) : KSerializer<Sample> {
@@ -72,9 +71,6 @@ class ResponseBodyDecodingTest {
 
     @Test
     fun `wraps linkage errors such as AbstractMethodError with the raw body`() {
-        // LinkageError is an Error, not an Exception: without an explicit catch
-        // branch it would escape every adapter-level catch (Exception) block and
-        // the raw response body would be lost entirely.
         val boom = AbstractMethodError("missing typeParametersSerializers()")
         val thrown =
             assertThrows<SandboxInternalException> {

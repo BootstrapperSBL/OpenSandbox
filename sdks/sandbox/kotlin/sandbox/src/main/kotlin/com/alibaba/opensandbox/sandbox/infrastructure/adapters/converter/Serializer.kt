@@ -37,20 +37,9 @@ internal val jsonParser =
         coerceInputValues = true
     }
 
-/** Upper bound for response payloads embedded in decode-failure messages. */
 internal const val DECODE_FAILURE_PAYLOAD_LIMIT = 2048
 
-/**
- * Decodes a raw HTTP response body, converting deserialization failures into a
- * [SandboxInternalException] whose message keeps the raw payload (truncated to
- * [DECODE_FAILURE_PAYLOAD_LIMIT] characters) so the server's actual response is
- * never lost to the failure itself.
- *
- * Covers both [Exception]s (e.g. SerializationException) and [LinkageError]s
- * (e.g. AbstractMethodError from a serializer/runtime version mismatch): the
- * latter is an `Error`, so adapter-level `catch (Exception)` blocks would
- * otherwise let it escape without any response context.
- */
+/** Decodes a response body, keeping the raw payload (truncated) in the thrown [SandboxInternalException] on failure. */
 internal fun <T> Json.decodeResponseBody(
     serializer: KSerializer<T>,
     payload: String,

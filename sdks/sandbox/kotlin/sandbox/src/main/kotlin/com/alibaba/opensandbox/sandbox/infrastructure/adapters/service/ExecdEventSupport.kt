@@ -28,11 +28,8 @@ public object ExecdEventSupport {
      *
      * [onError] is invoked with the raw line for payloads that fail to parse;
      * callers must pass it so malformed SSE lines are never dropped silently.
-     *
-     * A [LinkageError] (e.g. `AbstractMethodError` from a serializer/runtime
-     * version mismatch) is systemic: the raw line is reported through [onError]
-     * and then the error is rethrown, because skipping every event would turn
-     * the failure into a silent stream death.
+     * A [LinkageError] is reported and rethrown instead of skipped, because
+     * skipping every event would turn the failure into a silent stream death.
      */
     public fun decodeEventLine(
         line: String,

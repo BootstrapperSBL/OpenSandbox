@@ -89,8 +89,6 @@ class ExecdEventSupportTest {
 
     @Test
     fun `reports linkage errors through onError and rethrows them`() {
-        // Serializer/runtime version mismatches surface as AbstractMethodError,
-        // an Error subtype that plain catch (Exception) blocks never see.
         val boom = AbstractMethodError("missing typeParametersSerializers()")
         val linkageReported = mutableListOf<Pair<String, Throwable>>()
         val rawLine = """data: {"type":"error","timestamp":1}"""
