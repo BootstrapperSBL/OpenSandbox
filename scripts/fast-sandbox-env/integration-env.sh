@@ -2730,16 +2730,21 @@ vault_lifecycle_verify() {
 # broken TLS chain) is kept per attempt at $LOGS_DIR/mitm-guest-curl.err for
 # the failure dump.
 mitm_ca_guest_echo() {
+	# The CLI joins command-run words with shlex.quote into one shell line —
+	# the curl invocation must ride as separate words (one quoted string
+	# would be executed as a single program name and exit 127).
 	osb_api command run "$VERIFY_ID" -- \
-		"curl -fsS -m 20 --resolve $MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/echo" \
+		curl -fsS -m 20 --resolve "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" \
+		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/echo" \
 		2>"$LOGS_DIR/mitm-guest-curl.err"
 }
 
-# osb_command_succeeds <command>: wait_for probe variant — the guest command
-# must exit 0 (a failed execd command makes the CLI exit non-zero). stderr
-# lands in the same per-attempt diagnostics file as mitm_ca_guest_echo.
+# osb_command_succeeds <command words...>: wait_for probe variant — the
+# guest command must exit 0 (a failed execd command makes the CLI exit
+# non-zero). stderr lands in the same per-attempt diagnostics file as
+# mitm_ca_guest_echo.
 osb_command_succeeds() {
-	osb_api command run "$VERIFY_ID" -- "$1" >/dev/null 2>"$LOGS_DIR/mitm-guest-curl.err"
+	osb_api command run "$VERIFY_ID" -- "$@" >/dev/null 2>"$LOGS_DIR/mitm-guest-curl.err"
 }
 
 # mitm_ca_guest_header_is <key> <value>: the echo reflected the exact header.
@@ -2802,7 +2807,9 @@ mitm_ca_chain_verify() {
 	# header appears. Proves the header in the positive case comes from the
 	# vault, not from anything ambient.
 	wait_for "pre-vault guest HTTPS reaches the echo (passthrough, baked-CA verified)" 120 \
-		osb_command_succeeds "curl -fsS -m 20 --resolve $MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/echo"
+		osb_command_succeeds curl -fsS -m 20 \
+		--resolve "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" \
+		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/echo"
 	if mitm_ca_guest_echo | grep -qi 'x-api-key'; then
 		fail "mitm-ca verify: x-api-key present before any vault binding existed"
 	fi
