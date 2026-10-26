@@ -220,12 +220,26 @@ jobs:
         # Explicit CONNECT proves neither transparent redirects nor nft enforcement.
         # REQUIRE converts unavailable prerequisites to failures, never green skips.
         run: |
+          expected_parent_netns="$(readlink /proc/self/ns/net)"
           sudo env \
+            EXPECTED_PARENT_NETNS="$expected_parent_netns" \
+            H2_RUNTIME_PYTHON="$RUNNER_TEMP/h2-runtime-venv/bin/python" \
             PATH="$RUNNER_TEMP/h2-runtime-venv/bin:$PATH" \
             OPENSANDBOX_STATIC_RUNTIME_TESTS=1 \
             OPENSANDBOX_STATIC_RUNTIME_REQUIRE=1 \
-            "$RUNNER_TEMP/h2-runtime-venv/bin/python" -m unittest discover -v \
-            -s components/egress/tests -p 'static_passthrough_runtime_test.py'
+            unshare --net bash -euo pipefail -c '
+              parent_netns="$(readlink "/proc/$PPID/ns/net")"
+              child_netns="$(readlink /proc/self/ns/net)"
+              pid1_netns="$(readlink /proc/1/ns/net)"
+              printf "netns_guard child=%s expected_parent=%s actual_parent=%s pid1=%s\\n" \
+                "$child_netns" "$EXPECTED_PARENT_NETNS" "$parent_netns" "$pid1_netns"
+              test "$parent_netns" = "$EXPECTED_PARENT_NETNS"
+              test "$child_netns" != "$EXPECTED_PARENT_NETNS"
+              test "$child_netns" != "$pid1_netns"
+              ip link set lo up
+              exec "$H2_RUNTIME_PYTHON" -m unittest discover -v \
+                -s components/egress/tests -p "static_passthrough_runtime_test.py"
+            '
 
       - name: Make H2 runtime evidence readable by the runner
         if: always()
