@@ -452,9 +452,28 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 	return id, nil
 }
 
+// sessionTmpBindHosted reports whether the session's namespace /tmp is the
+// session-private bind backed by its upper-root directory: strict profile
+// (the default) with no overlay covering /tmp. Only that shape hosts /tmp
+// on the host side, so only it can be served by the files view.
+func sessionTmpBindHosted(session *isolatedSession) bool {
+	switch isolation.Profile(session.opts.Profile) {
+	case isolation.ProfileStrict, "":
+	default:
+		return false
+	}
+	specs := make([]isolation.OverlaySpec, 0, len(session.overlays))
+	for _, ov := range session.overlays {
+		specs = append(specs, isolation.OverlaySpec{Path: ov.path, Mode: ov.mode})
+	}
+	return !isolation.OverlaysCoverPath(specs, "/tmp")
+}
+
 // allocateSessionUppers assigns host upper/work pairs to a session's
 // persistent overlays. Ephemeral overlays use the bwrap tmpfs upper and need
-// no allocation.
+// no allocation, but every session still gets an upper-root subtree: it
+// holds the /tmp backing directory and the durable cleanup record that makes
+// teardown crash-safe.
 func (r *IsolatedRunner) allocateSessionUppers(session *isolatedSession) error {
 	persistCount := 0
 	for _, ov := range session.overlays {
@@ -462,14 +481,24 @@ func (r *IsolatedRunner) allocateSessionUppers(session *isolatedSession) error {
 			persistCount++
 		}
 	}
+
+	var (
+		upperID string
+		pairs   []isolation.UpperDirPair
+		err     error
+	)
 	if persistCount == 0 {
-		return nil
+		upperID, err = r.upperMgr.AllocateSessionDir()
+	} else {
+		upperID, pairs, err = r.upperMgr.AllocateN(persistCount)
 	}
-	upperID, pairs, err := r.upperMgr.AllocateN(persistCount)
 	if err != nil {
 		return fmt.Errorf("allocate upper: %w", err)
 	}
 	session.upperID = upperID
+	if sessionTmpBindHosted(session) {
+		session.tmpDir = r.upperMgr.TmpDir(upperID)
+	}
 	next := 0
 	for i := range session.overlays {
 		ov := &session.overlays[i]
@@ -1035,14 +1064,29 @@ func newMergedView(s *isolatedSession) vfs.FS {
 	}
 
 	// Without binds, preserve the historical view shapes (a bare MergedView
-	// for the single-overlay session).
-	if len(s.opts.Binds) == 0 {
+	// for the single-overlay session). A hosted /tmp counts as a second
+	// mount and falls through to the router.
+	if s.tmpDir == "" && len(s.opts.Binds) == 0 {
 		switch len(views) {
 		case 0:
 			return isolation.NewMultiMergedView(nil)
 		case 1:
 			return overlayView(s.overlays[0])
 		}
+	}
+
+	// The strict profile's private /tmp is the session's host-backed bind
+	// under its upper-root subtree; serve it so files and run share one
+	// /tmp view. Appending it last is safe: no overlay shares the /tmp
+	// destination (guarded at allocation), deeper overlay prefixes win by
+	// length, and binds registered earlier keep the equal-prefix tie
+	// against a caller bind on /tmp — mirroring bwrap's argv shadow order.
+	if s.tmpDir != "" {
+		views = append(views, isolation.OverlayView{
+			Path: "/tmp",
+			Root: s.tmpDir,
+			FS:   isolation.NewBindView(s.tmpDir, false, uid, gid),
+		})
 	}
 
 	// RelativeBase indexing below requires at least one overlay; Create

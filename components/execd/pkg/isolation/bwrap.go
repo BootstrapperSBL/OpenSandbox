@@ -61,9 +61,15 @@ func buildArgvWithLifecycle(
 	// 2. Root filesystem (read-only).
 	argv = append(argv, "--ro-bind", "/", "/")
 
-	// 3. /tmp — skip if an overlay mounts over /tmp (its mount would override).
-	if !overlaysCoverPath(opts.Overlays, "/tmp") {
-		argv = append(argv, bwrapTmpSegment(opts.Profile)...)
+	// 3. /tmp — the session-private host-backed bind when the runner
+	// provisioned a backing dir, else the profile default. Skipped if an
+	// overlay mounts over /tmp (its mount would override).
+	if !OverlaysCoverPath(opts.Overlays, "/tmp") {
+		if opts.TmpDir != "" {
+			argv = append(argv, "--bind", opts.TmpDir, "/tmp")
+		} else {
+			argv = append(argv, bwrapTmpSegment(opts.Profile)...)
+		}
 	}
 
 	// 4. Overlay mounts (workspace, root overlay, extra overlays), ordered
@@ -227,6 +233,9 @@ func validateWrapOptions(opts WrapOptions) error {
 	if opts.UidMode != "" && !opts.UidMode.Valid() {
 		return fmt.Errorf("isolation: unknown uid mode %q", opts.UidMode)
 	}
+	if opts.TmpDir != "" && !filepath.IsAbs(opts.TmpDir) {
+		return fmt.Errorf("isolation: tmp dir %q must be an absolute path", opts.TmpDir)
+	}
 	return validateBinds(opts.Binds)
 }
 
@@ -342,20 +351,6 @@ func bwrapTmpSegment(p Profile) []string {
 		// balanced and others: share container /tmp.
 		return []string{"--bind", "/tmp", "/tmp"}
 	}
-}
-
-// overlaysCoverPath reports whether any overlay mounts over path, either
-// at path itself or at one of its ancestors: bubblewrap applies mounts in
-// argv order and a later shallower mount shadows the subtree of any earlier
-// segment, so an ancestor overlay already provides path.
-func overlaysCoverPath(overlays []OverlaySpec, path string) bool {
-	for _, ov := range overlays {
-		p := filepath.Clean(ov.Path)
-		if p == path || p == "/" || strings.HasPrefix(path, p+"/") {
-			return true
-		}
-	}
-	return false
 }
 
 // pathDepth counts the segments of a cleaned absolute path: "/" → 0,

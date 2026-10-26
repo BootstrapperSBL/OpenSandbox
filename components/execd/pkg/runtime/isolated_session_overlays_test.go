@@ -144,8 +144,10 @@ func TestCreateIsolatedSession_MultiOverlayAllocation(t *testing.T) {
 	}
 }
 
-func TestCreateIsolatedSession_AllEphemeralOverlaysSkipUpperAllocation(t *testing.T) {
+func TestCreateIsolatedSession_AllEphemeralOverlaysStillOwnHostState(t *testing.T) {
 	runner := newTestRunner(t)
+	iso := &capturingIsolator{stubIsolator: *newStubIsolator()}
+	runner.isolator = iso
 	ephemeral := false
 	id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
 		Overlays: []IsolatedOverlayOptions{
@@ -161,11 +163,94 @@ func TestCreateIsolatedSession_AllEphemeralOverlaysSkipUpperAllocation(t *testin
 	if session == nil {
 		t.Fatal("created session was not published")
 	}
-	if session.upperID != "" {
-		t.Errorf("ephemeral-only session allocated upper entry %q", session.upperID)
+	// Ephemeral overlays need no upper pairs, but the session still owns an
+	// upper-root subtree: it holds the /tmp backing dir and the durable
+	// cleanup record.
+	if session.upperID == "" {
+		t.Fatal("ephemeral-only session did not allocate its upper-root subtree")
 	}
 	if session.overlays[0].upperDir != "" {
 		t.Errorf("ephemeral overlay upper = %q, want empty", session.overlays[0].upperDir)
+	}
+
+	// Strict profile (default) hosts /tmp on a bind from that subtree.
+	if session.tmpDir != runner.upperMgr.TmpDir(session.upperID) {
+		t.Errorf("session.tmpDir = %q, want %q", session.tmpDir, runner.upperMgr.TmpDir(session.upperID))
+	}
+	if info, err := os.Stat(session.tmpDir); err != nil || !info.IsDir() {
+		t.Fatalf("/tmp backing dir missing: %v", err)
+	}
+	wrap, ok := iso.lastWrap()
+	if !ok {
+		t.Fatal("isolator did not receive WrapOptions")
+	}
+	if wrap.TmpDir != session.tmpDir {
+		t.Errorf("WrapOptions.TmpDir = %q, want %q", wrap.TmpDir, session.tmpDir)
+	}
+}
+
+func TestCreateIsolatedSession_TmpBindHostedShapes(t *testing.T) {
+	cases := []struct {
+		name       string
+		profile    string
+		overlays   []IsolatedOverlayOptions
+		wantHosted bool
+	}{
+		{
+			name:       "strict_ephemeral_hosts_tmp",
+			profile:    string(isolation.ProfileStrict),
+			overlays:   []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			wantHosted: true,
+		},
+		{
+			name:       "balanced_keeps_shared_tmp",
+			profile:    string(isolation.ProfileBalanced),
+			overlays:   []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			wantHosted: false,
+		},
+		{
+			name:    "overlay_on_tmp_suppresses_host_bind",
+			profile: string(isolation.ProfileStrict),
+			overlays: []IsolatedOverlayOptions{
+				{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"},
+				{Path: "/tmp", Mode: "rw"},
+			},
+			wantHosted: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newTestRunner(t)
+			iso := &capturingIsolator{stubIsolator: *newStubIsolator()}
+			runner.isolator = iso
+			id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+				Profile:  tc.profile,
+				Overlays: tc.overlays,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runner.DeleteIsolatedSession(id)
+
+			session := runner.lookup(id)
+			if session == nil {
+				t.Fatal("created session was not published")
+			}
+			if tc.wantHosted && session.tmpDir == "" {
+				t.Fatal("strict session without /tmp overlay must host /tmp")
+			}
+			if !tc.wantHosted && session.tmpDir != "" {
+				t.Fatalf("session.tmpDir = %q, want empty", session.tmpDir)
+			}
+			wrap, ok := iso.lastWrap()
+			if !ok {
+				t.Fatal("isolator did not receive WrapOptions")
+			}
+			if wrap.TmpDir != session.tmpDir {
+				t.Errorf("WrapOptions.TmpDir = %q, want %q", wrap.TmpDir, session.tmpDir)
+			}
+		})
 	}
 }
 

@@ -287,7 +287,7 @@ A session can carry **several independent overlay mounts** via the `overlays` re
 - Each entry has its own mount semantics, so workspace files, system-level changes (`apt install` → `/usr`, config → `/etc`), and additional project directories get **independent copy-on-write uppers**.
 - Mounts are applied shallow-first; a nested overlay (e.g. `/workspace` on top of a `/` root overlay) shadows its ancestors within its own subtree. Paths must be absolute and unique.
 - `persist` (overlay mode only, default `true`): `true` allocates a host upper directory under `upper_root`; `false` uses an ephemeral tmpfs upper whose writes are discarded when the session ends. `rw`/`ro` entries must not set `persist`. An ephemeral upper lives inside the namespace only, so the files API serves `persist=false` overlays from their host-side content: in-session writes under such an overlay are not observable through the files API and files-API writes into it are rejected.
-- The files API routes each request to the session mount (overlay or bind) whose mount path is the longest prefix of the requested path; relative paths resolve against the first overlay. Paths outside every session mount — a `binds` destination that was not configured, a strict profile's private `/tmp`, `/etc`, ... — are rejected with an error instead of being silently resolved against the workspace.
+- The files API routes each request to the session mount (overlay or bind) whose mount path is the longest prefix of the requested path; relative paths resolve against the first overlay. Paths outside every session mount — a `binds` destination that was not configured, `/etc`, ... — are rejected with an error instead of being silently resolved against the workspace. The exception is the strict profile's private `/tmp`, which is host-backed and therefore served like any other session mount (see [Profiles and Defaults](#profiles-and-defaults)).
 - Background runs use the **first** overlay for their log location: it must be `rw`, or `overlay` with `persist: true`; otherwise background runs are rejected.
 
 ---
@@ -326,8 +326,10 @@ The `profile` field currently controls only how `/tmp` is exposed inside the nam
 
 | Profile | `/tmp` |
 |---|---|
-| `strict` (default) | Private tmpfs (`--tmpfs /tmp`) |
+| `strict` (default) | Session-private tmpfs (`--tmpfs /tmp`) |
 | `balanced` | Shared with the sandbox (`--bind /tmp /tmp`) |
+
+In the `strict` profile the private `/tmp` is backed by a host directory under the session's `upper_root` subtree, bind-mounted into the namespace, so `session.files` and `session.run` see the same `/tmp` content in both directions. The directory is created empty at session start, lives only as long as the session, and is removed with the rest of the session state on `DELETE` / idle collection. A `binds` entry or overlay sharing the `/tmp` destination still shadows it, exactly as inside the namespace. The `balanced` profile shares the sandbox's own `/tmp`, which stays outside the files API's mount view.
 
 `workspace.mode` and `env_passthrough` are **independent** of the profile: when they are omitted, execd normalizes `workspace.mode` to `overlay` and `env_passthrough.mode` to `deny` regardless of which profile you pick. Set those fields explicitly if you want persistent workspace writes (`"rw"`) or host env passthrough (`"allow"`).
 
@@ -348,7 +350,7 @@ Private Sessions are not recoverable across an execd restart. Deployments that e
 
 ## Filesystem Proxy
 
-Reads and writes the session's **merged** mount view — the workspace overlays plus every `binds` destination — from outside the namespace. This is how SDKs `upload`, `download`, and `list` without spawning a shell, including against bind-mounted persistent data. The files API serves exactly those session mounts: absolute paths outside every mount (namespace-only locations such as a strict profile's private `/tmp`, or unconfigured `binds` destinations) are rejected with an error rather than resolving to a different file. All paths are per session under `/v1/isolated/session/{id}/`:
+Reads and writes the session's **merged** mount view — the workspace overlays plus every `binds` destination — from outside the namespace. This is how SDKs `upload`, `download`, and `list` without spawning a shell, including against bind-mounted persistent data. The files API serves exactly those session mounts: absolute paths outside every mount (namespace-only locations such as an unconfigured `binds` destination) are rejected with an error rather than resolving to a different file. The strict profile's private `/tmp` is host-backed and is part of the view (see [Profiles and Defaults](#profiles-and-defaults)). All paths are per session under `/v1/isolated/session/{id}/`:
 
 | Method | Path |
 |---|---|

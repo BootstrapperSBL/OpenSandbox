@@ -30,6 +30,11 @@ import (
 
 const cleanupRegistryName = ".execd-cleanup"
 
+// tmpDirName is the per-session directory backing the namespace /tmp bind
+// (strict profile). It lives inside the session subtree, so session
+// teardown removes it with everything else.
+const tmpDirName = "tmp"
+
 // UpperManager manages upper directories for overlay workspaces.
 type UpperManager struct {
 	root         string
@@ -152,9 +157,50 @@ func (m *UpperManager) Allocate() (sessionID, upperDir, workDir string, err erro
 	return id, pairs[0].UpperDir, pairs[0].WorkDir, nil
 }
 
+// TmpDir returns the /tmp backing directory of an allocated session.
+func (m *UpperManager) TmpDir(sessionID string) string {
+	return filepath.Join(m.root, sessionID, tmpDirName)
+}
+
+// AllocateSessionDir creates a session directory without overlay pairs, for
+// sessions whose mounts need no host uppers. The directory still carries a
+// durable cleanup record and holds the session's /tmp backing directory, so
+// teardown and crash recovery treat it like any allocated session.
+// Returns ErrUpperLimitExceeded if maxBytes > 0 and current usage already
+// meets or exceeds the limit.
+func (m *UpperManager) AllocateSessionDir() (sessionID string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.maxBytes > 0 {
+		usage, usageErr := m.usageLocked()
+		if usageErr != nil {
+			return "", fmt.Errorf("upper: measure usage before allocation: %w", usageErr)
+		}
+		if usage >= m.maxBytes {
+			return "", fmt.Errorf("%w: %d >= %d bytes", ErrUpperLimitExceeded, usage, m.maxBytes)
+		}
+	}
+
+	id, err := m.createCleanupRecordLocked()
+	if err != nil {
+		return "", err
+	}
+	sessionDir := filepath.Join(m.root, id)
+	if err := os.MkdirAll(filepath.Join(sessionDir, tmpDirName), 0o755); err != nil {
+		if rollbackErr := m.rollbackAllocationLocked(id, sessionDir, nil); rollbackErr != nil {
+			return "", errors.Join(err, rollbackErr)
+		}
+		return "", fmt.Errorf("upper: mkdir session dir %s: %w", sessionDir, err)
+	}
+	m.entries[id] = &UpperEntry{InUse: true, dir: sessionDir}
+	return id, nil
+}
+
 // AllocateN creates a new session directory holding n upper + work pairs,
 // one per overlay mount. Pair 0 lives at <root>/<id>/upper and
-// <root>/<id>/work; pair i>0 at <root>/<id>/upper-<i> and work-<i>.
+// <root>/<id>/work; pair i>0 at <root>/<id>/upper-<i> and work-<i>. The
+// session directory also holds the /tmp backing directory (TmpDir).
 // Returns ErrUpperLimitExceeded if maxBytes > 0 and current usage already
 // meets or exceeds the limit.
 func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair, err error) {
@@ -187,6 +233,9 @@ func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair,
 			return "", nil, errors.Join(cause, rollbackErr)
 		}
 		return "", nil, cause
+	}
+	if err := os.MkdirAll(filepath.Join(sessionDir, tmpDirName), 0o755); err != nil {
+		return failAllocation(fmt.Errorf("upper: mkdir %s: %w", filepath.Join(sessionDir, tmpDirName), err))
 	}
 	for i := range n {
 		upperName, workName := "upper", "work"

@@ -18,6 +18,8 @@ package isolation
 import (
 	"context"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 // Profile presets default isolation settings.
@@ -149,14 +151,34 @@ type Capabilities struct {
 
 // WrapOptions configures a single isolated execution.
 type WrapOptions struct {
-	Profile        Profile
-	Overlays       []OverlaySpec
-	ExtraWritable  []string
-	Binds          []BindMount
+	Profile       Profile
+	Overlays      []OverlaySpec
+	ExtraWritable []string
+	Binds         []BindMount
+	// TmpDir is an absolute host directory bound to the namespace /tmp,
+	// replacing the profile's /tmp segment. It is the session-private /tmp
+	// backing directory under the session's upper-root subtree, so the
+	// files API can serve the same content run sees. Empty keeps the
+	// profile default (strict: private tmpfs, balanced: shared bind).
+	TmpDir         string
 	ShareNet       bool
 	EnvPassthrough EnvSpec
 	Uid, Gid       *uint32
 	UidMode        UidMode // "" or "setpriv" → setpriv; "userns" → user namespace
+}
+
+// OverlaysCoverPath reports whether any overlay mounts over path, either
+// at path itself or at one of its ancestors: bubblewrap applies mounts in
+// argv order and a later shallower mount shadows the subtree of any earlier
+// segment, so an ancestor overlay already provides path.
+func OverlaysCoverPath(overlays []OverlaySpec, path string) bool {
+	for _, ov := range overlays {
+		p := filepath.Clean(ov.Path)
+		if p == path || p == "/" || strings.HasPrefix(path, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // Isolator wraps an *exec.Cmd in a namespace-isolated execution environment.

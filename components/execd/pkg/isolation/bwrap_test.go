@@ -84,6 +84,51 @@ func TestBuildArgv_TmpSegment(t *testing.T) {
 	}
 }
 
+func TestBuildArgv_TmpDir(t *testing.T) {
+	t.Run("host_backed_bind_replaces_profile_segment", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Profile = ProfileStrict
+		opts.TmpDir = "/var/lib/execd/isolation/abc/tmp"
+		argv, err := buildArgv(opts, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		s := strings.Join(argv, " ")
+		if !strings.Contains(s, "--bind /var/lib/execd/isolation/abc/tmp /tmp") {
+			t.Errorf("missing host-backed /tmp bind:\n  %s", s)
+		}
+		if strings.Contains(s, "--tmpfs /tmp") {
+			t.Errorf("profile tmpfs segment must be replaced:\n  %s", s)
+		}
+	})
+
+	t.Run("overlay_on_tmp_skips_host_bind", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Profile = ProfileStrict
+		opts.TmpDir = "/var/lib/execd/isolation/abc/tmp"
+		opts.Overlays = append(opts.Overlays, OverlaySpec{Path: "/tmp", Mode: WorkspaceRW})
+		argv, err := buildArgv(opts, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		s := strings.Join(argv, " ")
+		if strings.Contains(s, "/var/lib/execd/isolation/abc/tmp") {
+			t.Errorf("host-backed /tmp bind must be skipped when an overlay covers /tmp:\n  %s", s)
+		}
+		if !strings.Contains(s, "--bind /tmp /tmp") {
+			t.Errorf("overlay segment missing:\n  %s", s)
+		}
+	})
+
+	t.Run("relative_tmp_dir_rejected", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.TmpDir = "relative/tmp"
+		if _, err := buildArgv(opts, ""); err == nil {
+			t.Error("expected error for relative tmp dir")
+		}
+	})
+}
+
 func TestBuildArgv_WorkspaceSegment(t *testing.T) {
 	ws := func(mode WorkspaceMode) WrapOptions {
 		opts := basicWrapOpts()
@@ -164,11 +209,11 @@ func TestOverlaysCoverPath(t *testing.T) {
 		{Path: "/data", Mode: WorkspaceOverlay},
 	}
 
-	assert.True(t, overlaysCoverPath(overlays, "/tmp"),
+	assert.True(t, OverlaysCoverPath(overlays, "/tmp"),
 		"a / overlay is an ancestor of /tmp and covers it")
-	assert.True(t, overlaysCoverPath(overlays, "/data/sub"),
+	assert.True(t, OverlaysCoverPath(overlays, "/data/sub"),
 		"an exact overlay path covers its own subtree")
-	assert.False(t, overlaysCoverPath(overlays[1:], "/tmp"),
+	assert.False(t, OverlaysCoverPath(overlays[1:], "/tmp"),
 		"a sibling overlay must not cover /tmp")
 }
 
