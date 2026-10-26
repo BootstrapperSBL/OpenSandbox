@@ -76,7 +76,7 @@ async function collectBytes(
         const { done, value } = await reader.read();
         if (done) break;
         if (value) {
-          chunks.push(value);
+          chunks.push(Uint8Array.from(value));
           total += value.length;
         }
       }
@@ -85,7 +85,7 @@ async function collectBytes(
     }
   } else {
     for await (const chunk of source) {
-      chunks.push(chunk);
+      chunks.push(Uint8Array.from(chunk));
       total += chunk.length;
     }
   }
@@ -178,14 +178,14 @@ async function* multipartUploadBody(opts: {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value) yield value;
+        if (value) yield Uint8Array.from(value);
       }
     } finally {
       reader.releaseLock();
     }
   } else {
     for await (const chunk of opts.file) {
-      yield chunk;
+      yield Uint8Array.from(chunk);
     }
   }
 

@@ -99,11 +99,11 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-The Server validates `timeoutSeconds`; `preStart` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+The Server validates `timeoutSeconds`; `preStart` accepts 1�C10800 seconds, while `periodic` accepts 1�C300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
 
 ### Idle policy (auto-pause and wake-on-access)
 
-`lifecycle.idlePolicy` (OSEP-0024, fast-sandbox only) tells the control plane to auto-pause the sandbox after `idleTimeoutSeconds` (30–86400) of continuously idle ingress-observed traffic, and to wake it on the next request. It is control-plane state: it never reaches the guest, is allowed in template mode (`Sandbox.createFromTemplate({ idlePolicy })`), and is rejected by non-fast-sandbox backends. Omitting it preserves non-automated behavior exactly.
+`lifecycle.idlePolicy` (OSEP-0024, fast-sandbox only) tells the control plane to auto-pause the sandbox after `idleTimeoutSeconds` (30�C86400) of continuously idle ingress-observed traffic, and to wake it on the next request. It is control-plane state: it never reaches the guest, is allowed in template mode (`Sandbox.createFromTemplate({ idlePolicy })`), and is rejected by non-fast-sandbox backends. Omitting it preserves non-automated behavior exactly.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -124,7 +124,7 @@ const sandbox = await Sandbox.create({
 
 ### Renewal policy (renew-on-access)
 
-`lifecycle.renewalPolicy.extendSeconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + extendSeconds, current expiresAt)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` — see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0.
+`lifecycle.renewalPolicy.extendSeconds` (OSEP-0009) opts the sandbox into automatic expiration extension on observed access: each proxied or gateway-observed request moves the expiration to `max(now + extendSeconds, current expiresAt)`. It is control-plane state and never reaches the guest. Requires the server operator to enable `[renew_intent]` �� see [Renew-on-Access](/guides/renew-on-access). The deprecated `extensions["access.renew.extend.seconds"]` key remains supported through 1.x and is removed in 2.0.
 
 ```ts
 const sandbox = await Sandbox.create({
@@ -139,7 +139,7 @@ const sandbox = await Sandbox.create({
 
 ### Wake retry
 
-A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` header; the transport recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK throws `SandboxWakeTimeoutException` (carrying `attempts` and `waitedMs`) while the server-side resume continues in the background. Bare `503` responses follow the existing rules untouched. Tune it on the connection config: `wakeRetryEnabled` (default true), `wakeMaxAttempts` (5), `wakeOverallDeadlineSeconds` (60, `null` for unbounded). The SSE transport is wrapped too, so `commands.run()` wakes a paused sandbox like any other request (an established stream is never re-dispatched — only the marked 503 connect replays); the upload transport stays bare because upload bodies are streams and cannot be replayed.
+A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` header; the transport recognizes it and resends the original request after the `Retry-After` delay (safe for any method �� the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the SDK throws `SandboxWakeTimeoutException` (carrying `attempts` and `waitedMs`) while the server-side resume continues in the background. Bare `503` responses follow the existing rules untouched. Tune it on the connection config: `wakeRetryEnabled` (default true), `wakeMaxAttempts` (5), `wakeOverallDeadlineSeconds` (60, `null` for unbounded). The SSE transport is wrapped too, so `commands.run()` wakes a paused sandbox like any other request (an established stream is never re-dispatched �� only the marked 503 connect replays); the upload transport stays bare because upload bodies are streams and cannot be replayed.
 
 ## Client Pool and observability
 
@@ -303,7 +303,7 @@ try {
 
 #### Persistent environment variables
 
-Set environment variables that the runtime injects into every subsequent command and session — without hand-writing shell escaping against the sandbox env file.
+Set environment variables that the runtime injects into every subsequent command and session �� without hand-writing shell escaping against the sandbox env file.
 
 ```ts
 await sandbox.commands.setEnv("MY_TOKEN", "it's a safe value");
@@ -613,6 +613,8 @@ See [Credential Vault](/guides/credential-vault) for auth types, binding guidanc
 Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node.js so you can safely reuse the same `ConnectionConfig`. Once you are finished interacting with the sandbox or administration APIs, call `sandbox.close()` / `manager.close()` to release the underlying agent.
 
 ## Browser Notes
+
+Uploads copy each consumed byte chunk before requesting the next one, so producers can reuse a `Uint8Array` or Node.js `Buffer` between chunks. A `ReadableStream` producer must still keep a chunk unchanged while it is queued and has not yet been consumed.
 
 ::: warning
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.
