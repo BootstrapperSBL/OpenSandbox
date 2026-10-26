@@ -1397,7 +1397,7 @@ def run_case(name, artifacts, args):
 
 
 def summarize_results(cases, selected):
-    """Keep manual stress, real admission, delayed and GOAWAY cases distinct."""
+    """Summarize the full frozen matrix; omitted results remain NOT_RUN."""
     groups = {
         "manual_peer_late_goaway_stress": MANUAL_PEER_CASES,
         "real_live_runtime_pre_admission_barrier": REAL_RUNTIME_CASES,
@@ -1408,18 +1408,49 @@ def summarize_results(cases, selected):
         "go_early_notice_h2_origin": ("go_early_notice_h2_origin",),
     }
     vocabulary = ("PASS", "FAIL", "BLOCKED", "NOT_RUN")
+    all_cases = (*CASES, *GO_CASES)
+    known_cases = set(all_cases)
+    case_statuses = {}
+
+    for item in cases:
+        if not isinstance(item, dict):
+            raise ValueError("case results must be mappings")
+        name = item.get("case")
+        status = item.get("status")
+        if not isinstance(name, str) or name not in known_cases:
+            raise ValueError(f"unknown case: {name!r}")
+        if name in case_statuses:
+            raise ValueError(f"duplicate case result: {name!r}")
+        if status not in vocabulary:
+            raise ValueError(f"unknown case status for {name!r}: {status!r}")
+        case_statuses[name] = status
+
+    selected = tuple(selected)
+    if any(not isinstance(name, str) or name not in known_cases for name in selected):
+        raise ValueError("unknown selected case")
+    if len(set(selected)) != len(selected):
+        raise ValueError("duplicate selected case")
+
+    def result_status(statuses):
+        return ("FAIL" if "FAIL" in statuses else
+                "BLOCKED" if "BLOCKED" in statuses else
+                "NOT_RUN" if "NOT_RUN" in statuses or not statuses else
+                "PASS")
 
     def group(names):
-        statuses = [item["status"] for item in cases if item["case"] in names]
-        status = ("FAIL" if "FAIL" in statuses else "BLOCKED" if "BLOCKED" in statuses
-                  else "NOT_RUN" if "NOT_RUN" in statuses or not statuses else "PASS")
-        return {"denominator": len(names), "status": status,
-                "counts": {value: statuses.count(value) for value in vocabulary}}
+        statuses = [case_statuses.get(name, "NOT_RUN") for name in names]
+        return {
+            "denominator": len(names),
+            "status": result_status(statuses),
+            "counts": {value: statuses.count(value) for value in vocabulary},
+        }
 
-    return {"status": group(selected)["status"],
-            "summary": {value: sum(item["status"] == value for item in cases)
-                        for value in vocabulary},
-            "denominator_summaries": {name: group(names) for name, names in groups.items()}}
+    summary_statuses = [case_statuses.get(name, "NOT_RUN") for name in all_cases]
+    return {
+        "status": result_status([case_statuses.get(name, "NOT_RUN") for name in selected]),
+        "summary": {value: summary_statuses.count(value) for value in vocabulary},
+        "denominator_summaries": {name: group(names) for name, names in groups.items()},
+    }
 
 
 def main(argv=None):

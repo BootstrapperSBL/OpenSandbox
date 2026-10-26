@@ -68,6 +68,42 @@ class RuntimeSelectionTests(unittest.TestCase):
             "FAIL",
         )
 
+    def test_sparse_candidate_results_leave_missing_rows_not_run(self):
+        selected = [*runner.REAL_RUNTIME_CASES, *runner.GO_EARLY_CASES]
+        summary = runner.summarize_results(
+            [{"case": runner.REAL_RUNTIME_CASES[0], "status": "PASS"}],
+            selected,
+        )
+
+        candidate = summary["denominator_summaries"]["candidate_acceptance"]
+        self.assertEqual("NOT_RUN", summary["status"])
+        self.assertEqual("NOT_RUN", candidate["status"])
+        self.assertEqual(3, candidate["denominator"])
+        self.assertEqual(
+            {"PASS": 1, "FAIL": 0, "BLOCKED": 0, "NOT_RUN": 2},
+            candidate["counts"],
+        )
+        self.assertEqual(
+            {"PASS": 1, "FAIL": 0, "BLOCKED": 0, "NOT_RUN": 19},
+            summary["summary"],
+        )
+        self.assertEqual(20, sum(summary["summary"].values()))
+        for group in summary["denominator_summaries"].values():
+            self.assertEqual(group["denominator"], sum(group["counts"].values()))
+
+    def test_duplicate_cases_and_unknown_statuses_are_rejected(self):
+        name = runner.REAL_RUNTIME_CASES[0]
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            runner.summarize_results(
+                [{"case": name, "status": "PASS"},
+                 {"case": name, "status": "NOT_RUN"}],
+                [name],
+            )
+        with self.assertRaisesRegex(ValueError, "status"):
+            runner.summarize_results([{"case": name, "status": "SKIPPED"}], [name])
+        with self.assertRaisesRegex(ValueError, "unknown selected case"):
+            runner.summarize_results([], ["unknown-case"])
+
     def test_early_notice_failure_keeps_candidate_gate_nonzero(self):
         selected = runner.select_cases(None, True)
         statuses = {name: "PASS" for name in selected}
