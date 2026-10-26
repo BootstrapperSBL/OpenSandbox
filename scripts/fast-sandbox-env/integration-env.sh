@@ -2719,6 +2719,9 @@ vault_lifecycle_verify() {
 }
 
 # --- stage: MITM CA chain verify (OSEP-0022: baked CA + injection + pinning) ----
+# NOTE: verify/vault.sh carries the split-layout copy of this stage (plus its
+# helpers); keep the two in sync until the env.sh split is completed and the
+# verify scripts become the single home.
 
 # Guest-side HTTPS request to the echo endpoint via `osb command run` (the
 # only sandbox-reachable surface). `curl --resolve` pins the SNI to the echo
