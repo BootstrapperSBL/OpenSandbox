@@ -357,7 +357,11 @@ class OriginServer(socketserver.ThreadingTCPServer):
 
     def response(self, path, token):
         body = BODY if path in ("/v1/old", "/v1/old-two") else SMALL_BODY
-        return body, [("content-type", "application/octet-stream"),
+        held_h2_old = (self.protocol == "h2"
+                       and self.scenario in ("go_retry", "go_retry_early_notice")
+                       and path == "/v1/old")
+        content_type = "text/event-stream" if held_h2_old else "application/octet-stream"
+        return body, [("content-type", content_type),
                       ("content-length", str(len(body))), ("x-credential-echo", token)]
 
     def finish(self):

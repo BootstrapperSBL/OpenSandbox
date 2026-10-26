@@ -177,6 +177,26 @@ class _BarrierScheduleHarness:
 
 
 class RuntimeSelectionTests(unittest.TestCase):
+    def test_only_held_h2_old_response_uses_existing_streaming_mime(self):
+        cases = (
+            ("h2", "go_retry_early_notice", "/v1/old", "text/event-stream"),
+            ("h2", "go_retry", "/v1/old", "text/event-stream"),
+            ("h2", "normal", "/v1/old", "application/octet-stream"),
+            ("h2", "go_retry_early_notice", "/v1/new", "application/octet-stream"),
+            ("h1", "go_retry_early_notice", "/v1/old", "application/octet-stream"),
+        )
+        for protocol, scenario, path, expected_type in cases:
+            with self.subTest(protocol=protocol, scenario=scenario, path=path):
+                origin = SimpleNamespace(protocol=protocol, scenario=scenario)
+                body, fields = runner.OriginServer.response(origin, path, "one")
+                headers = dict(fields)
+                expected_body = (runner.BODY if path == "/v1/old"
+                                 else runner.SMALL_BODY)
+                self.assertEqual(body, expected_body)
+                self.assertEqual(headers["content-type"], expected_type)
+                self.assertEqual(headers["content-length"], str(len(expected_body)))
+                self.assertNotIn("transfer-encoding", headers)
+
     def test_pre_admission_barrier_requires_enter_ack_release_result_order(self):
         self.assertTrue(
             runner.pre_admission_order_is_valid(10, 20, 30, 30, 1, 2, 3)
