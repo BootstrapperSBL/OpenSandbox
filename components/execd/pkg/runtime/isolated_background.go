@@ -196,11 +196,11 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 	// bash is unavailable) so it is parsed as its own program: shell syntax
 	// errors in the code cannot break the control wrapper, which would
 	// otherwise leave the run stuck `running` (the wrapper's completion lines
-	// are only parsed after the code). The file is written from a quoted
-	// here-document, which keeps the code verbatim, instead of passing the
-	// code to `-c`, where Linux limits a single argument to 128 KiB. It is
-	// removed when the code exits. The code's output is redirected to the
-	// log file; its exit code is captured and written to the code file. The
+	// are only parsed after the code). The file is written byte for byte by
+	// the printf builtin, which is not subject to the 128 KiB limit Linux puts
+	// on a single exec argument (and so on `-c`). It is removed when the code
+	// exits. The code's output is redirected to the log file; its exit code
+	// is captured and written to the code file. The
 	// script's mkdir creates the run dir as the session's own uid (so it is
 	// writable even when the session runs as a different uid than execd); if
 	// the dir cannot be created or is not writable (e.g. a lower-layer .execd
@@ -217,13 +217,10 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 			script += "export " + shellescape(k) + "=" + shellescape(v) + "; "
 		}
 	}
-	delimiter := "EXECD_RUN_" + strings.ReplaceAll(runID, "-", "_")
-	script += "F=\"$D/" + runID + ".sh\"; cat >\"$F\" <<'" + delimiter + "'\n" + code
-	if !strings.HasSuffix(code, "\n") {
-		script += "\n"
-	}
-	script += delimiter + "\n" + shell + " \"$F\" </dev/null >\"$D/" + runID + ".log\" 2>&1"
-	script += "\ncode=$?; rm -f \"$F\"; mkdir -p \"$D\" 2>/dev/null && [ -w \"$D\" ] || D=" +
+	scriptFile := "\"$D/" + runID + ".sh\""
+	script += "printf '%s' " + shellescape(code) + " >" + scriptFile + "; "
+	script += shell + " " + scriptFile + " </dev/null >\"$D/" + runID + ".log\" 2>&1"
+	script += "\ncode=$?; rm -f " + scriptFile + "; mkdir -p \"$D\" 2>/dev/null && [ -w \"$D\" ] || D=" +
 		shellescape(paths.nsWorkspace)
 	script += "\necho \"$code\" >\"$D/" + runID + ".code\"; } >/dev/null 2>&1 &\n"
 

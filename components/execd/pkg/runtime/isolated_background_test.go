@@ -833,6 +833,38 @@ func TestRunInIsolatedSessionBackground_LargeCode(t *testing.T) {
 	}
 }
 
+// TestRunInIsolatedSessionBackground_RunsCodeVerbatim verifies that the code
+// runs exactly as given: a missing final newline is not added (it would turn
+// a trailing backslash into a line continuation), and the wrapper does not
+// change the caller's environment.
+func TestRunInIsolatedSessionBackground_RunsCodeVerbatim(t *testing.T) {
+	runner := newTestRunner(t)
+	id := newBackgroundTestSession(t, runner, "rw")
+	defer runner.DeleteIsolatedSession(id)
+
+	for _, tc := range []struct {
+		code string
+		envs map[string]string
+		want string
+	}{
+		{code: `printf x\`, want: `x\`},
+		{code: `printf %s "$F"`, envs: map[string]string{"F": "from-caller"}, want: "from-caller"},
+	} {
+		runID, _, err := runner.RunInIsolatedSessionBackground(id, tc.code, tc.envs)
+		if err != nil {
+			t.Fatalf("RunInIsolatedSessionBackground(%q): %v", tc.code, err)
+		}
+		waitForBackgroundRun(t, runner, id, runID)
+		output, _, err := runner.SeekIsolatedBackgroundOutput(id, runID, 0)
+		if err != nil {
+			t.Fatalf("SeekIsolatedBackgroundOutput: %v", err)
+		}
+		if string(output) != tc.want {
+			t.Errorf("code %q: output = %q, want %q", tc.code, output, tc.want)
+		}
+	}
+}
+
 // TestBackgroundRunCompletesAfterRunDirDeleted verifies that a background
 // command deleting its own .execd/background-runs directory cannot strand the
 // run: the exit-code marker falls back to the workspace root and the watcher
