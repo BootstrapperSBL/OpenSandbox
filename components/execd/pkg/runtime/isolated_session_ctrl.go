@@ -674,6 +674,11 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	}
 	script.WriteString(fmt.Sprintf("echo %s $?\n", runMarker))
 
+	// runCtx is also cancelled when the script cannot be written, so the
+	// cancellation below interrupts whatever still holds stdout open.
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
 	done := make(chan struct{})
 	watcherDone := make(chan struct{})
 	defer func() {
@@ -685,7 +690,7 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 	go func() {
 		defer close(watcherDone)
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			_ = s.signalProcessGroupIfRunning(syscall.SIGINT)
 			// No-envs scripts queue their remaining statements in the shell
 			// after the interrupt; repeated SIGINT kills each as it starts
@@ -713,11 +718,25 @@ func (r *IsolatedRunner) RunInIsolatedSession(ctx context.Context, id string, co
 		}
 	}()
 
-	if _, err := io.WriteString(stdin, script.String()); err != nil {
-		return fmt.Errorf("write stdin: %w", err)
-	}
+	// The shell runs the script as it reads it, so write it while stdout is
+	// read: a command that fills the stdout pipe before the shell has read the
+	// rest of a large script would otherwise block both sides.
+	written := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(stdin, script.String())
+		if err != nil {
+			cancelRun()
+		}
+		written <- err
+	}()
 
-	exitCode, err := scanUntilMarker(ctx, stdout, runMarker, onStdout)
+	exitCode, err := scanUntilMarker(runCtx, stdout, runMarker, onStdout)
+	// Scanning stops at the marker, which the shell reads last, when the shell
+	// exits, or after a failed write, so the write has returned by then and
+	// cannot spill into the next run.
+	if writeErr := <-written; writeErr != nil && ctx.Err() == nil {
+		return fmt.Errorf("write stdin: %w", writeErr)
+	}
 	if err != nil {
 		return err
 	}
