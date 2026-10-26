@@ -198,9 +198,11 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 	// otherwise leave the run stuck `running` (the wrapper's completion lines
 	// are only parsed after the code). The file is written byte for byte by
 	// the printf builtin, which is not subject to the 128 KiB limit Linux puts
-	// on a single exec argument (and so on `-c`). It is removed when the code
-	// exits. The code's output is redirected to the log file; its exit code
-	// is captured and written to the code file. The
+	// on a single exec argument (and so on `-c`); if the write fails, the code
+	// is not run and the run exits with 126, as `-c` did for oversized code.
+	// The file is removed when the code exits. Unlike with `-c`, the code sees
+	// that file as $0. The code's output is redirected to the log file; its
+	// exit code is captured and written to the code file. The
 	// script's mkdir creates the run dir as the session's own uid (so it is
 	// writable even when the session runs as a different uid than execd); if
 	// the dir cannot be created or is not writable (e.g. a lower-layer .execd
@@ -218,9 +220,9 @@ func (r *IsolatedRunner) RunInIsolatedSessionBackground(
 		}
 	}
 	scriptFile := "\"$D/" + runID + ".sh\""
-	script += "printf '%s' " + shellescape(code) + " >" + scriptFile + "; "
-	script += shell + " " + scriptFile + " </dev/null >\"$D/" + runID + ".log\" 2>&1"
-	script += "\ncode=$?; rm -f " + scriptFile + "; mkdir -p \"$D\" 2>/dev/null && [ -w \"$D\" ] || D=" +
+	script += "if printf '%s' " + shellescape(code) + " >" + scriptFile + "; then " +
+		shell + " " + scriptFile + " </dev/null >\"$D/" + runID + ".log\" 2>&1; code=$?" +
+		"\nelse code=126; fi; rm -f " + scriptFile + "; mkdir -p \"$D\" 2>/dev/null && [ -w \"$D\" ] || D=" +
 		shellescape(paths.nsWorkspace)
 	script += "\necho \"$code\" >\"$D/" + runID + ".code\"; } >/dev/null 2>&1 &\n"
 

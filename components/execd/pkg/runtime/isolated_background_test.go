@@ -834,9 +834,8 @@ func TestRunInIsolatedSessionBackground_LargeCode(t *testing.T) {
 }
 
 // TestRunInIsolatedSessionBackground_RunsCodeVerbatim verifies that the code
-// runs exactly as given: a missing final newline is not added (it would turn
-// a trailing backslash into a line continuation), and the wrapper does not
-// change the caller's environment.
+// reaches the shell byte for byte and that the wrapper does not change the
+// caller's environment.
 func TestRunInIsolatedSessionBackground_RunsCodeVerbatim(t *testing.T) {
 	runner := newTestRunner(t)
 	id := newBackgroundTestSession(t, runner, "rw")
@@ -847,7 +846,7 @@ func TestRunInIsolatedSessionBackground_RunsCodeVerbatim(t *testing.T) {
 		envs map[string]string
 		want string
 	}{
-		{code: `printf x\`, want: `x\`},
+		{code: `printf 'a\\b\n'`, want: "a\\b\n"},
 		{code: `printf %s "$F"`, envs: map[string]string{"F": "from-caller"}, want: "from-caller"},
 	} {
 		runID, _, err := runner.RunInIsolatedSessionBackground(id, tc.code, tc.envs)
@@ -862,6 +861,40 @@ func TestRunInIsolatedSessionBackground_RunsCodeVerbatim(t *testing.T) {
 		if string(output) != tc.want {
 			t.Errorf("code %q: output = %q, want %q", tc.code, output, tc.want)
 		}
+	}
+}
+
+// TestRunInIsolatedSessionBackground_ScriptWriteFailure verifies that a
+// script file that cannot be written completely is not run: the run fails
+// with exit code 126 instead of running a truncated prefix of the code.
+func TestRunInIsolatedSessionBackground_ScriptWriteFailure(t *testing.T) {
+	runner := newTestRunner(t)
+	id := newBackgroundTestSession(t, runner, "rw")
+	defer runner.DeleteIsolatedSession(id)
+
+	// Limit file sizes in the session shell, and ignore SIGXFSZ so that an
+	// oversized write fails instead of killing the shell.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := runner.RunInIsolatedSession(ctx, id, "ulimit -f 8; trap '' XFSZ", nil, nil); err != nil {
+		t.Fatalf("limit file size: %v", err)
+	}
+
+	code := "echo truncated-prefix-ran\n#" + strings.Repeat("x", 150*1024) + "\necho done"
+	runID, _, err := runner.RunInIsolatedSessionBackground(id, code, nil)
+	if err != nil {
+		t.Fatalf("RunInIsolatedSessionBackground: %v", err)
+	}
+	snapshot := waitForBackgroundRun(t, runner, id, runID)
+	output, _, err := runner.SeekIsolatedBackgroundOutput(id, runID, 0)
+	if err != nil {
+		t.Fatalf("SeekIsolatedBackgroundOutput: %v", err)
+	}
+	if snapshot.ExitCode == nil || *snapshot.ExitCode != 126 {
+		t.Errorf("ExitCode = %v, want 126; output = %q", snapshot.ExitCode, output)
+	}
+	if strings.Contains(string(output), "truncated-prefix-ran") {
+		t.Errorf("a truncated script ran: output = %q", output)
 	}
 }
 
