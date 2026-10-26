@@ -18,6 +18,7 @@ Connection configuration for OpenSandbox operations.
 """
 
 import os
+import ssl
 from datetime import timedelta
 
 import httpx  # type: ignore[reportMissingImports]
@@ -52,6 +53,7 @@ class ConnectionConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     _owns_transport: bool = PrivateAttr(default=True)
+    _ssl_context: ssl.SSLContext | None = PrivateAttr(default=None)
 
     api_key: str | None = Field(
         default=None, description="API key for authentication with sandbox service"
@@ -171,7 +173,10 @@ class ConnectionConfig(BaseModel):
         shared `transport` on this config is never touched. Callers that
         close what they build (e.g. adapter clients) can do so safely.
         """
+        if self._ssl_context is None:
+            self._ssl_context = httpx.create_ssl_context()
         inner = httpx.AsyncHTTPTransport(
+            verify=self._ssl_context,
             limits=httpx.Limits(
                 max_connections=max_connections,
                 max_keepalive_connections=max_keepalive_connections,

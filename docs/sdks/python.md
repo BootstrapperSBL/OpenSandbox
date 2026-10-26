@@ -276,6 +276,10 @@ sandbox = await Sandbox.create(
 
 ### 3. Command Execution & Streaming
 
+Both synchronous and asynchronous streaming APIs accept an optional leading
+UTF-8 byte order mark (BOM), including when it spans network chunks. Only the
+stream's initial BOM is removed; U+FEFF characters in event data are preserved.
+
 Execute commands and handle output streams in real-time.
 
 ```python
@@ -515,6 +519,8 @@ await sandbox.patch_metadata({"project": "demo", "obsolete-key": None})
 ### 1. Connection Configuration
 
 The `ConnectionConfig` class manages API server connection settings.
+
+Reuse a `ConnectionConfig` (or `ConnectionConfigSync`) when creating multiple sandboxes. SDK-owned transports share that configuration's lazily loaded SSL context, avoiding repeated CA certificate loading, while each Sandbox/Manager keeps its own connection pool and closes it independently. TLS verification remains enabled. Create a new configuration to reload the system or environment-configured trust store. For connection pooling across sandboxes, supply a shared `transport` and close it after all users finish.
 
 | Parameter         | Description                                | Default                      | Environment Variable   |
 | ----------------- | ------------------------------------------ | ---------------------------- | ---------------------- |

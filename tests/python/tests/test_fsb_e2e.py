@@ -66,6 +66,8 @@ from opensandbox.sandbox import Sandbox
 logger = logging.getLogger(__name__)
 
 FSB_TEMPLATE_ID = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ID", "")
+# Set per run by the env's sdk-e2e (native + overlaybd templates differ).
+FSB_TEMPLATE_ORIGIN = os.getenv("OPENSANDBOX_TEST_FSB_TEMPLATE_ORIGIN", "fast-sandbox-env")
 # alpine ships busybox wget: a real HTTPS request, so egress probes
 # exercise both gates of the fsb dns+nft chain (DNS resolution and
 # transport). Override with e.g. curlimages/curl if cert-verified curl
@@ -221,10 +223,10 @@ class TestFsbE2E:
         info = await manager.get_template(FSB_TEMPLATE_ID)
         assert info.status.phase == TemplatePhase.SUCCEEDED
         assert info.status.manifest_ref, "template manifestRef is empty"
-        assert info.metadata.get("origin") == "fast-sandbox-env"
+        assert info.metadata.get("origin") == FSB_TEMPLATE_ORIGIN
 
         paged = await manager.list_templates(
-            TemplateFilter(metadata={"origin": "fast-sandbox-env"})
+            TemplateFilter(metadata={"origin": FSB_TEMPLATE_ORIGIN})
         )
         assert FSB_TEMPLATE_ID in [t.template_id for t in paged.template_infos]
 

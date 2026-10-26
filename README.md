@@ -3,6 +3,10 @@
 
   <h1>OpenSandbox</h1>
 
+  <p align="center">
+    <a href="https://aaif.io/projects/opensandbox"><strong>An Agentic AI Foundation (AAIF) Project</strong></a>
+  </p>
+
 <p align="center">
   <a href="https://github.com/opensandbox-group/OpenSandbox"><img src="https://img.shields.io/github/stars/opensandbox-group/OpenSandbox?style=flat-square&logo=github&logoColor=white&label=Stars&color=181717" alt="Stars" /></a>
   <a href="https://www.bestpractices.dev/projects/12588"><img src="https://img.shields.io/badge/OpenSSF-Best-4C566A?style=flat-square" alt="OpenSSF Best Practices" /></a>
@@ -267,6 +271,6 @@ Tagged release images are signed keylessly with Cosign and include provenance at
 
 ## About
 
-OpenSandbox is an [open source project under the Linux Foundation](https://aaif.io/projects/opensandbox), contributed by Alibaba.
+OpenSandbox is a project of the [Agentic AI Foundation (AAIF)](https://aaif.io/projects/opensandbox).
 
 Licensed under the [Apache 2.0 License](LICENSE).

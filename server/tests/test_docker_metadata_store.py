@@ -60,6 +60,22 @@ class TestExtractUserLabels:
     def test_empty_returns_empty(self):
         assert _extract_user_labels({}) == {}
 
+    def test_keeps_only_recorded_metadata_keys(self):
+        labels = {
+            "team": "infra",
+            "maintainer": "from the image",
+            "opensandbox.io/metadata-keys": '["team"]',
+        }
+        assert _extract_user_labels(labels) == {"team": "infra"}
+
+    def test_recorded_empty_metadata(self):
+        labels = {"maintainer": "from the image", "opensandbox.io/metadata-keys": "[]"}
+        assert _extract_user_labels(labels) == {}
+
+    def test_malformed_metadata_keys_fall_back_to_user_labels(self):
+        labels = {"team": "infra", "opensandbox.io/metadata-keys": "not json"}
+        assert _extract_user_labels(labels) == {"team": "infra"}
+
 
 class TestDockerMetadataStore:
 
@@ -226,6 +242,19 @@ class TestDockerMetadataStore:
         assert store.get_expiration("sbx-001") is None
 
     # -- crash recovery ------------------------------------------------------
+
+    def test_transition_is_state_associated_and_separate_from_user_metadata(self, tmp_path: Path):
+        store = self._make_store(tmp_path)
+        transitioned_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        store.set_transition("sbx-001", "Paused", transitioned_at)
+        store.patch("sbx-001", {}, {"state": "user-value"})
+
+        reconstructed = self._make_store(tmp_path)
+        assert reconstructed.get_transition_time("sbx-001", "Paused") == transitioned_at.isoformat()
+        assert reconstructed.get_transition_time("sbx-001", "Running") is None
+        assert reconstructed.get("sbx-001", {}) == {"state": "user-value"}
+        reconstructed.delete("sbx-001")
+        assert reconstructed.get_transition_time("sbx-001", "Paused") is None
 
     def test_tmp_file_not_read_on_reload(self, tmp_path: Path):
         """Tmp files written during atomic save must not be picked up by get()."""

@@ -33,12 +33,12 @@ from opensandbox.adapters.converter.execution_event_dispatcher import (
     ExecutionEventDispatcher,
 )
 from opensandbox.adapters.converter.response_handler import (
-    extract_request_id,
+    build_api_exception_from_httpx,
     handle_api_error,
     require_parsed,
 )
 from opensandbox.config import ConnectionConfig
-from opensandbox.exceptions import InvalidArgumentException, SandboxApiException
+from opensandbox.exceptions import InvalidArgumentException
 from opensandbox.models.execd import Execution, ExecutionHandlers
 from opensandbox.models.sandboxes import SandboxEndpoint
 from opensandbox.transport import unwrap_retry_transport
@@ -324,15 +324,10 @@ class CodesAdapter(Codes):
             async with client.stream("POST", url, json=api_request) as response:
                 if response.status_code != 200:
                     await response.aread()
-                    error_body = response.text
                     logger.error(
-                        f"Failed to run code. Status: {response.status_code}, Body: {error_body}"
+                        f"Failed to run code. Status: {response.status_code}, Body: {response.text}"
                     )
-                    raise SandboxApiException(
-                        message=f"Failed to run code. Status code: {response.status_code}, Body: {error_body}",
-                        status_code=response.status_code,
-                        request_id=extract_request_id(response.headers),
-                    )
+                    raise build_api_exception_from_httpx(response, "Run code")
 
                 dispatcher = ExecutionEventDispatcher(execution, handlers)
 

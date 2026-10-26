@@ -230,6 +230,8 @@ const sandbox = await Sandbox.create({
 
 Execute commands and handle output streams in real-time.
 
+Command and code-interpreter event streams accept LF, CRLF, and CR line endings, including when a line ending is split across network chunks.
+
 ```ts
 import type { ExecutionHandlers } from "@alibaba-group/opensandbox";
 
@@ -474,6 +476,8 @@ await sandbox.patchMetadata({ project: "demo", "obsolete-key": null });
 ### 1. Connection Configuration
 
 The `ConnectionConfig` class manages API server connection settings.
+
+An explicit `OPEN-SANDBOX-API-KEY` in `headers` takes precedence over `apiKey` and its environment fallback, regardless of header-name casing. This also applies to the low-level lifecycle and diagnostic clients.
 
 ::: info Runtime Notes
 - In browsers, the SDK uses the global `fetch` implementation.

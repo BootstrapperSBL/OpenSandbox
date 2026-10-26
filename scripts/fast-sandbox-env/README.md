@@ -1,31 +1,37 @@
 # fast-sandbox integration environment
 
-One-command OpenSandbox ecosystem integration environment driven from the OpenSandbox repository: a two-node kind cluster (KVM passthrough) running the fast-sandbox Firecracker chain from the source pinned in `manifests/third-party/fast-sandbox.commit`, with the source-built OpenSandbox **egress** sidecar attached to the default pool and the source-built OpenSandbox **server** (fsb runtime) and **ingress gateway** wired on top — verified end to end on every `up`.
+One-command OpenSandbox ecosystem integration environment driven from the OpenSandbox repository: a two-node kind cluster (KVM passthrough) running the fast-sandbox Firecracker chain from the source pinned in `manifests/third-party/fast-sandbox.commit`, with the source-built OpenSandbox **egress** sidecar attached to the default pool and the source-built OpenSandbox **server** (fsb runtime) and **ingress gateway** wired on top — verified end to end by the `verify-native` / `verify-overlaybd` actions.
 
 All Kubernetes resources ship from the OpenSandbox Helm charts (`manifests/charts`): `base` (CRDs + RBAC), `fast-sandbox` (control plane, janitor, node installer, runtime-agent + DART), `server` and `ingress-gateway`. The only env-owned manifests left are the kind cluster config and the SandboxPool resource.
 
-The last `up` stages drive the server through the opensandbox CLI (`osb`, installed fresh from PyPI into the workspace unless `OSB_BIN` is set): create a sandbox from the golden-image template, reach the in-sandbox execd `/ping` through the signed gateway route, and delete it again. Raw HTTP calls remain only where the CLI has no equivalent (networkpolicy replace, metadata merge-patch, snapshot re-entry fence). The environment is all-or-nothing: running fast-sandbox without the OpenSandbox layers is not a supported shape of this script.
+The `verify-native` / `verify-overlaybd` actions drive the server through the opensandbox CLI (`osb`, installed fresh from PyPI into the workspace by `up` unless `OSB_BIN` is set): create a sandbox from the golden-image template, reach the in-sandbox execd `/ping` through the signed gateway route, and delete it again. Raw HTTP calls remain only where the CLI has no equivalent (networkpolicy replace, metadata merge-patch, snapshot re-entry fence). The environment is all-or-nothing: running fast-sandbox without the OpenSandbox layers is not a supported shape of this script.
 
 Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgroup v2, and `sudo` for the XFS StateRoot loop mount and sysctl bump. The CLI install requires `uv` (it manages its own ≥ 3.10 interpreter), or set `OSB_BIN` to a preinstalled `osb` binary. Full operational notes (topology, latency characteristics, production caveats): `fast-sandbox/docs/guides/firecracker-integration-env.md`.
 
 ## Usage
 
 ```bash
-./scripts/fast-sandbox-env/integration-env.sh up        # full stack + end-to-end + pause/resume verify
-./scripts/fast-sandbox-env/integration-env.sh status    # component / pool / DART / OpenSandbox health
-./scripts/fast-sandbox-env/integration-env.sh pool      # re-apply the pool only
-./scripts/fast-sandbox-env/integration-env.sh sdk-e2e   # Python SDK e2e suite against the live stack
-./scripts/fast-sandbox-env/integration-env.sh idle-e2e  # OSEP-0024 idle-pause/wake suite (needs IDLE_PAUSE=1 up)
-./scripts/fast-sandbox-env/integration-env.sh down      # teardown, host left clean
+./scripts/fast-sandbox-env/integration-env.sh up              # environment: stack + pool + server/ingress + native template
+./scripts/fast-sandbox-env/integration-env.sh verify-native   # verify matrix on the native template (needs up)
+./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd  # overlaybd template build + verify matrix (needs up)
+./scripts/fast-sandbox-env/integration-env.sh status          # component / pool / DART / OpenSandbox health
+./scripts/fast-sandbox-env/integration-env.sh pool            # re-apply the pool only
+./scripts/fast-sandbox-env/integration-env.sh sdk-e2e         # Python SDK e2e suite against the live stack
+./scripts/fast-sandbox-env/integration-env.sh idle-e2e        # OSEP-0024 idle-pause/wake suite (needs IDLE_PAUSE=1 up)
+./scripts/fast-sandbox-env/integration-env.sh down            # teardown, host left clean
 ```
 
 ### Idle-pause / wake-on-access profile (OSEP-0024)
 
 `IDLE_PAUSE=1 ./scripts/fast-sandbox-env/integration.sh up` additionally deploys an ephemeral Redis (`manifests/idle-pause/redis.yaml`, before the server — the sweeper connects at startup), enables the server `[automation.idle_pause]` sweeper (5s sweep) and the gateway's `--activity-enabled` + `--wake-enabled`, and runs an `idle-pause / wake-on-access` verify stage: an opted-in sandbox (`lifecycle.idlePolicy`, X=30s) is auto-paused with zero traffic, and the next gateway request wakes it (parked while the restore completes). The `idle-e2e` action then runs the SDK suite (`tests/python/tests/test_fsb_idle_pause_e2e.py`) covering the SDK contract only: create with an `IdlePolicy`, auto-pause, and wake-on-access through the SDK's wake retry contract (the multi-round, `wakeOnAccess=false` and Redis-outage behavior lives in the shell verify stage). Sandboxes without `lifecycle.idlePolicy` are never auto-paused or auto-woken regardless of the profile.
 
+### OverlayBD OCI profile (default on)
+
+`OCI_STACK` defaults to 1: one cluster serves both template paths. The env generates a local CA + TLS certificate and deploys an in-cluster `registry:2` (fsb-vm and overlaybd require HTTPS), bakes the CA into the `fsb-fastlet`, `fsb-firecracker-runtime` and sandboxtemplate-builder images, installs the `fast-sandbox` chart's `runtime.oci` node stack, wires the registry credentials and the server's `template_oci_publish_secret`, and renders the pool fastlet with `FAST_SANDBOX_OCI_ENABLED=true` plus the shared tools/socket//dev mounts. The `verify-overlaybd` action builds an overlaybd template (published to the in-cluster registry) and runs the whole verify matrix against it — the same assertions as `verify-native`, but on the overlaybd path (template-mode create resolves `status.manifestRef`, boot is ublk on-demand, and snapshots publish/restore via `oci://` manifests). Nodes need kernel ublk support (`CONFIG_BLK_DEV_UBLK`; `modprobe ublk_drv` when built as a module). `OCI_STACK=0` restores the native-only environment (`verify-overlaybd` becomes a no-op).
+
 After `up`, point any OpenSandbox SDK at `http://127.0.0.1:18080` with the `OPEN-SANDBOX-API-KEY: fast-sandbox-env` header; sandbox endpoints are signed `f1.*` header routes served by the gateway at `http://127.0.0.1:18081`. The installed CLI works against the same stack, e.g. `OPEN_SANDBOX_DOMAIN=127.0.0.1:18080 OPEN_SANDBOX_API_KEY=fast-sandbox-env osb sandbox list`.
 
-The `up` verify stages are also available as Python SDK e2e tests (template create → gateway ping → networkpolicy convergence, lifecycle ops, pause/resume, snapshot round trip):
+The `verify-native` / `verify-overlaybd` stages are also available as Python SDK e2e tests (template create → gateway ping → networkpolicy convergence, lifecycle ops, pause/resume, snapshot round trip):
 
 ```bash
 ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e   # needs uv on PATH
@@ -58,7 +64,7 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fast-sand
 ## Layout
 
 ```
-integration-env.sh          entrypoint: up / down / status / pool
+integration-env.sh          entrypoint: up / verify-native / verify-overlaybd / down / status / pool
 architecture.svg             how the environment works (topology, pipeline,
                              P2P delivery, egress actions channel)
 manifests/
@@ -76,9 +82,13 @@ Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), ren
 | `server` | lifecycle server: fsb runtime config (rendered `configToml`), NodePort |
 | `ingress-gateway` | fsb provider + FastPath + shared signing key, NodePort |
 
-## Stage order (up)
+## Stage order
 
-preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → SandboxTemplate golden image **built through the server `POST /templates` API** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check) → end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete).
+`up`: preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → SandboxTemplate golden image **built through the server `POST /templates` API** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check).
+
+`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
+
+`verify-overlaybd`: overlaybd SandboxTemplate build (oci:// publication) → the same verify matrix against the overlaybd template.
 
 Every stage logs to `$WORK/logs/`; failures dump component logs to `logs/failure-<task>-<ts>.txt`.
 

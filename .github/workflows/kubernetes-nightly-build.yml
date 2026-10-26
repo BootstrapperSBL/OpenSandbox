@@ -392,6 +392,15 @@ jobs:
       - name: Run integration tests (idle-pause profile)
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh up --auto-clean
 
+      - name: Run native template verify
+        timeout-minutes: 75
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-native
+
+      - name: Run overlaybd template verify
+        # Builds the overlaybd template first; no-op when OCI_STACK=0.
+        timeout-minutes: 90
+        run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
+
       - name: Run base SDK e2e
         timeout-minutes: 30
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
