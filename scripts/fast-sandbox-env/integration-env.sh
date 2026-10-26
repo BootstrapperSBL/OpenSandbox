@@ -1152,7 +1152,11 @@ extendedKeyUsage = serverAuth
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid, issuer
 CNF
-	if ! openssl req -x509 -new -newkey rsa:2048 -nodes -days 2 \
+	# -days 30 (not 2): the verify actions support running against an
+	# environment created earlier, so short-lived material would time-bomb
+	# every TLS handshake there. up regenerates fresh material per run
+	# anyway; the window only has to outlive delayed verify runs.
+	if ! openssl req -x509 -new -newkey rsa:2048 -nodes -days 30 \
 		-keyout "$MITM_CA_DIR/tls.key" -out "$MITM_CA_DIR/tls.crt" \
 		-config "$MITM_CA_DIR/ca.cnf" -extensions v3_ca 2>"$openssl_err"; then
 		die "pinned MITM CA generation failed (openssl $(openssl version 2>&1)): $(tail -3 "$openssl_err" 2>/dev/null | tr '\n' ' ')"
@@ -1178,7 +1182,7 @@ CNF
 	fi
 	if ! openssl x509 -req -in "$MITM_CA_DIR/echo.csr" \
 		-CA "$MITM_CA_DIR/tls.crt" -CAkey "$MITM_CA_DIR/tls.key" -CAcreateserial \
-		-out "$MITM_CA_DIR/echo.crt" -days 2 \
+		-out "$MITM_CA_DIR/echo.crt" -days 30 \
 		-extfile "$MITM_CA_DIR/ca.cnf" -extensions v3_echo 2>>"$openssl_err"; then
 		die "echo certificate signing failed: $(tail -3 "$openssl_err" 2>/dev/null | tr '\n' ' ')"
 	fi
@@ -2776,7 +2780,9 @@ mitm_ca_chain_verify() {
 	local created sandbox_uid ack echo_secret
 	log "verify (mitm-ca): fingerprint pinning (pinned Secret == egress /healthz, plus the manifest lineage on the S3 publication path)"
 	local healthz_fp lineage_fp manifest_ref
-	healthz_fp="$(egress_mitm_ca_fingerprint)"
+	# Guarded so a failed probe lands on the crafted mismatch message (and
+	# its diagnostics) instead of an ERR-trap abort.
+	healthz_fp="$(egress_mitm_ca_fingerprint)" || true
 	[[ "$healthz_fp" == "$MITM_CA_FINGERPRINT" ]] \
 		|| fail "mitm-ca verify: egress /healthz fingerprint is '${healthz_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
 	# The manifest lineage leg is only readable on the S3 publication path:
@@ -2784,7 +2790,7 @@ mitm_ca_chain_verify() {
 	# reach. There the pool-side pinning plus the behavioral chain below
 	# (the guest accepts the MITM certificate only because it chains to the
 	# template-baked CA) carry the assertion.
-	manifest_ref="$(osb_api template get "$template_id" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')"
+	manifest_ref="$(osb_api template get "$template_id" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')" || true
 	if [[ "$manifest_ref" == s3://* ]]; then
 		lineage_fp="$(template_mitm_lineage_fingerprint "$template_id")"
 		[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
@@ -2823,7 +2829,10 @@ mitm_ca_chain_verify() {
 		osb_command_succeeds curl -fsS -m 20 \
 		--resolve "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" \
 		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/echo"
-	if mitm_ca_guest_echo | grep -qi 'x-api-key'; then
+	local pre_vault_out
+	pre_vault_out="$(mitm_ca_guest_echo)" \
+		|| fail "mitm-ca verify: pre-vault guest HTTPS request failed (cannot assert header absence)"
+	if printf '%s' "$pre_vault_out" | grep -qi 'x-api-key'; then
 		fail "mitm-ca verify: x-api-key present before any vault binding existed"
 	fi
 	pass "pre-vault: guest HTTPS passthrough works, no credential injected"
@@ -3353,7 +3362,11 @@ env_summary() {
 	printf '  %-22s %s\n' "fast-sandbox" "pinned $(git -C "$FSB_DIR" rev-parse --short HEAD 2>/dev/null || echo "$FSB_COMMIT") ($FSB_DIR)"
 	printf '  %-22s %s\n' "RustFS endpoint" "$RUSTFS_ENDPOINT"
 	printf '  %-22s %s\n' "pool" "$POOL_NAME (runtime=firecracker, poolMin=$POOL_MIN, egress=$IMG_EGRESS)"
-	printf '  %-22s %s\n' "MITM CA" "$MITM_CA_SECRET (fingerprint ${MITM_CA_FINGERPRINT:0:16}…, echo=https://$MITM_ECHO_DOMAIN via $MITM_ECHO_IP:$MITM_ECHO_PORT)"
+	# The echo endpoint line is conditional: the standalone pool action
+	# loads the fingerprint pin but never re-derives the echo container IP.
+	local mitm_echo_at=""
+	[[ -n "$MITM_ECHO_IP" ]] && mitm_echo_at=", echo=https://$MITM_ECHO_DOMAIN via $MITM_ECHO_IP:$MITM_ECHO_PORT"
+	printf '  %-22s %s\n' "MITM CA" "$MITM_CA_SECRET (fingerprint ${MITM_CA_FINGERPRINT:0:16}…${mitm_echo_at})"
 	printf '  %-22s %s\n' "P2P" "DART daemons=$(printf '%s' "$(runtime_pods)" | wc -w | tr -d ' ') (on-demand pulls: cache -> peer -> origin)"
 	printf '  %-22s %s\n' "template" "${TEMPLATE_ID:-n/a} ($(if [[ -n "$TEMPLATE_ID" ]]; then _template_phase || echo unknown; else echo "not built"; fi))"
 	printf '  %-22s %s\n' "StateRoot fs" "$(findmnt -no FSTYPE "$XFS_MOUNT_POINT" 2>/dev/null || echo 'plain directory (full copy per sandbox)')"

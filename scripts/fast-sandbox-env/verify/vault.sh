@@ -62,9 +62,10 @@
 #   4. Pause/resume: the request keeps passing after checkpoint/restore —
 #      trust (baked CA in the rootfs) and vault travel with the snapshot.
 #
-# The CA/echo material (fingerprint file, echo container) is provisioned by
-# `up` (mitm_ca_up / mitm_echo_up) and re-derived here, so both stages run
-# against a live stack from a prior `up`.
+# The CA/echo material is provisioned by `up` (mitm_ca_up / mitm_echo_up):
+# this file reads the pinned fingerprint from $WORK/mitm-ca/fingerprint and
+# re-derives the echo endpoint's kind-network IP from the live container, so
+# both stages run against a live stack from a prior `up`.
 #
 # NOTE: integration-env.sh (the monolith CI drives today) carries working
 # copies of these stages; keep the two in sync until the env.sh split is
@@ -81,7 +82,6 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
 
 # MITM chain material config (mirrors integration-env.sh; lib.sh does not
 # carry env-side MITM state).
-MITM_CA_SECRET="${MITM_CA_SECRET:-opensandbox-mitm-ca-v1}"
 MITM_CA_DIR="$WORK/mitm-ca"
 MITM_CA_FINGERPRINT_FILE="$MITM_CA_DIR/fingerprint"
 MITM_CA_FINGERPRINT=""
@@ -89,7 +89,6 @@ MITM_ECHO_CONTAINER="${MITM_ECHO_CONTAINER:-fast-sandbox-env-mitm-echo}"
 MITM_ECHO_DOMAIN="${MITM_ECHO_DOMAIN:-echo.test}"
 MITM_ECHO_PORT=443
 MITM_ECHO_IP=""
-MITM_ECHO_NET=""
 
 # --- stage: vault lifecycle (OSEP-0022: egress-held vault over the relay) --------
 
@@ -220,13 +219,6 @@ first_pool_pod() {
 		-o jsonpath='{.items[0].metadata.name}' 2>/dev/null
 }
 
-# mitm_ca_fingerprint <cert.pem> -> lowercase hex SHA-256 over the DER — the
-# exact fingerprint form the egress /healthz and the artifact manifest
-# platform.egressMitmCA expose.
-mitm_ca_fingerprint() {
-	openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | sed 's/^.*=//' | tr -d ':' | tr 'A-Z' 'a-z'
-}
-
 # Cross-invocation state (up and the verify actions are separate processes;
 # same pattern as require_template_id): the fingerprint pin lives in a file,
 # the echo endpoint is re-derived from the live container.
@@ -239,7 +231,6 @@ load_mitm_ca_fingerprint() {
 }
 
 load_mitm_echo_endpoint() {
-	MITM_ECHO_NET="$(kind_network 2>/dev/null || true)"
 	MITM_ECHO_IP="$(docker inspect -f \
 		'{{range $k,$v := .NetworkSettings.Networks}}{{$v.IPAddress}}{{end}}' \
 		"$MITM_ECHO_CONTAINER" 2>/dev/null || true)"
@@ -315,7 +306,9 @@ mitm_ca_chain_verify() {
 	local created sandbox_uid ack echo_secret
 	log "verify (mitm-ca): fingerprint pinning (pinned Secret == egress /healthz, plus the manifest lineage on the S3 publication path)"
 	local healthz_fp lineage_fp manifest_ref
-	healthz_fp="$(egress_mitm_ca_fingerprint)"
+	# Guarded so a failed probe lands on the crafted mismatch message (and
+	# its diagnostics) instead of an ERR-trap abort.
+	healthz_fp="$(egress_mitm_ca_fingerprint)" || true
 	[[ "$healthz_fp" == "$MITM_CA_FINGERPRINT" ]] \
 		|| fail "mitm-ca verify: egress /healthz fingerprint is '${healthz_fp:-empty}', want pinned $MITM_CA_FINGERPRINT"
 	# The manifest lineage leg is only readable on the S3 publication path:
@@ -323,7 +316,7 @@ mitm_ca_chain_verify() {
 	# reach. There the pool-side pinning plus the behavioral chain below
 	# (the guest accepts the MITM certificate only because it chains to the
 	# template-baked CA) carry the assertion.
-	manifest_ref="$(osb_api template get "$template_id" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')"
+	manifest_ref="$(osb_api template get "$template_id" -o json 2>/dev/null | jq -r '.status.manifest_ref // empty')" || true
 	if [[ "$manifest_ref" == s3://* ]]; then
 		lineage_fp="$(template_mitm_lineage_fingerprint "$template_id")"
 		[[ "$lineage_fp" == "$MITM_CA_FINGERPRINT" ]] \
@@ -362,7 +355,10 @@ mitm_ca_chain_verify() {
 		osb_command_succeeds curl -fsS -m 20 \
 		--resolve "$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT:$MITM_ECHO_IP" \
 		"https://$MITM_ECHO_DOMAIN:$MITM_ECHO_PORT/echo"
-	if mitm_ca_guest_echo | grep -qi 'x-api-key'; then
+	local pre_vault_out
+	pre_vault_out="$(mitm_ca_guest_echo)" \
+		|| fail "mitm-ca verify: pre-vault guest HTTPS request failed (cannot assert header absence)"
+	if printf '%s' "$pre_vault_out" | grep -qi 'x-api-key'; then
 		fail "mitm-ca verify: x-api-key present before any vault binding existed"
 	fi
 	pass "pre-vault: guest HTTPS passthrough works, no credential injected"
