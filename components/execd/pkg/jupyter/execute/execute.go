@@ -335,10 +335,28 @@ func (c *Client) handleExecutionStatus(msg *Message, state *streamExecutionState
 	safego.Go(func() { c.finalizeExecution(state, resultChan) })
 }
 
-// failExecution ends an execution that will never complete: it reports
-// errOutput and closes resultChan, or lets a running finalizeExecution close it,
-// since that stops waiting once an error is recorded.
+// failExecution ends an execution that lost its kernel or connection: it
+// reports errOutput and closes resultChan, or lets a running finalizeExecution
+// close it, since that stops waiting once an error is recorded. If the kernel
+// already replied, that outcome stands and the execution is finalized instead.
+// It runs on the receive goroutine, after every earlier message was handled.
 func (c *Client) failExecution(state *streamExecutionState, resultChan chan *ExecutionResult, errOutput ErrorOutput) {
+	state.resultMutex.Lock()
+	replied := state.result.ExecutionCount > 0 || state.result.Error != nil
+	state.resultMutex.Unlock()
+
+	state.executeMutex.Lock()
+	finalizing := state.executeDone
+	state.executeDone = true
+	state.executeMutex.Unlock()
+
+	if replied {
+		if !finalizing {
+			c.finalizeExecution(state, resultChan)
+		}
+		return
+	}
+
 	state.trySend(resultChan, &ExecutionResult{Error: &errOutput, Status: "error"})
 
 	state.resultMutex.Lock()
@@ -346,10 +364,6 @@ func (c *Client) failExecution(state *streamExecutionState, resultChan chan *Exe
 	state.result.Error = &errOutput
 	state.resultMutex.Unlock()
 
-	state.executeMutex.Lock()
-	finalizing := state.executeDone
-	state.executeDone = true
-	state.executeMutex.Unlock()
 	if !finalizing {
 		state.closeResultChan(resultChan)
 	}

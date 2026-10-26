@@ -420,3 +420,64 @@ func TestExecuteCodeStreamDisconnectIsNotReportedAsLostConnection(t *testing.T) 
 	default:
 	}
 }
+
+func sendExecuteReply(conn *websocket.Conn, executionCount int, parent Header) {
+	content, _ := json.Marshal(ExecuteReply{ExecutionCount: executionCount, Status: "ok"})
+	_ = conn.WriteJSON(Message{
+		Header:       Header{MessageID: "reply-msg-id", MessageType: string(MsgExecuteReply)},
+		ParentHeader: parent,
+		Content:      json.RawMessage(content),
+	})
+}
+
+// A connection that closes after the kernel has replied does not turn the
+// completed execution into a failure, whether or not idle arrived first.
+func TestExecuteCodeStreamConnectionClosedAfterReplyIsNotAnError(t *testing.T) {
+	previousPollInterval := execdflag.JupyterIdlePollInterval
+	execdflag.JupyterIdlePollInterval = 200 * time.Millisecond
+	t.Cleanup(func() { execdflag.JupyterIdlePollInterval = previousPollInterval })
+
+	for name, idleFirst := range map[string]bool{"idle then reply": true, "reply without idle": false} {
+		t.Run(name, func(t *testing.T) {
+			server := createTestServer(t, func(conn *websocket.Conn) {
+				var executeRequest Message
+				if err := conn.ReadJSON(&executeRequest); err != nil {
+					return
+				}
+				if idleFirst {
+					sendStatus(conn, StateIdle, executeRequest.Header)
+					// Let finalizeExecution start waiting for the reply.
+					time.Sleep(50 * time.Millisecond)
+				}
+				sendExecuteReply(conn, 1, executeRequest.Header)
+				// Returning closes the connection right after the reply.
+			})
+			defer server.Close()
+
+			client := NewClient("", nil)
+			if err := client.Connect("ws" + strings.TrimPrefix(server.URL, "http") + "/api/kernels/k/channels"); err != nil {
+				t.Fatalf("failed to connect: %v", err)
+			}
+			defer client.Disconnect()
+
+			resultChan := make(chan *ExecutionResult, 10)
+			if err := client.ExecuteCodeStream("1", resultChan); err != nil {
+				t.Fatalf("ExecuteCodeStream: %v", err)
+			}
+
+			results := collectUntilClosed(t, resultChan, 3*time.Second)
+			completed := false
+			for _, result := range results {
+				if result.Error != nil {
+					t.Fatalf("got error result %+v for an execution the kernel completed", result.Error)
+				}
+				if result.ExecutionTime > 0 {
+					completed = true
+				}
+			}
+			if !completed {
+				t.Fatalf("results = %+v, want a completion", results)
+			}
+		})
+	}
+}
