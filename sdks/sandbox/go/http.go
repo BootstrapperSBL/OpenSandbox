@@ -444,16 +444,16 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 // doStreamRequest builds an HTTP request, executes it, and streams SSE events
 // through handler. SSE bootstraps bypass the generic retry loop: the stream may
 // already have delivered partial data or submitted a command, and OSEP-0017
-// requires the bootstrap to stay unwrapped by it. The OSEP-0024 wake contract
-// still applies to the bootstrap: a marked wake-timeout 503 proves the gateway
-// never forwarded the request, so replaying it cannot run anything twice.
-// Without that retry a command against an auto-paused sandbox fails instead of
-// waking it, unlike every non-streaming request. Once streaming begins, errors
-// are not retried.
+// requires the bootstrap to stay unwrapped by it. The OSEP-0024 wake retry
+// still applies, as it does to every other request: the marker proves the
+// gateway parked the bootstrap and never forwarded it, so replaying it cannot
+// run anything twice, and older behavior that failed the call fast left the
+// primary execution path unable to wake an auto-paused sandbox. Once streaming
+// begins, errors are not retried.
 func (c *Client) doStreamRequest(ctx context.Context, method, path string, body any, handler EventHandler) error {
 	var resp *http.Response
 
-	connectErr := c.withWakeRetry(ctx, func() error {
+	connectErr := c.withWakeRetry(ctx, method, func() error {
 		var bodyReader io.Reader
 		if body != nil {
 			buf, err := json.Marshal(body)

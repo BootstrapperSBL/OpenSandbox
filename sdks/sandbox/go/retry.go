@@ -375,8 +375,8 @@ func (c *Client) withRetryWake(ctx context.Context, method string, fn func() err
 // never forwarded it, so replaying it cannot execute anything twice and is safe
 // even for a streaming POST bootstrap. Every other failure, including a bare
 // 503, is returned to the caller unwrapped (OSEP-0017).
-func (c *Client) withWakeRetry(ctx context.Context, fn func() error) error {
-	return c.retryLoop(ctx, http.MethodGet, false, fn)
+func (c *Client) withWakeRetry(ctx context.Context, method string, fn func() error) error {
+	return c.retryLoop(ctx, method, false, fn)
 }
 
 // retryLoop is the shared retry engine. generic controls whether transient

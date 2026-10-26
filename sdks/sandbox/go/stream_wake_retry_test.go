@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -79,4 +80,58 @@ func TestStreamWakeRetry_BudgetExhaustionReturnsTypedError(t *testing.T) {
 	require.ErrorAs(t, err, &wakeErr)
 	require.Equal(t, 3, wakeErr.Attempts, "wake attempts")
 	require.Equal(t, 3, int(attempts.Load()), "stream bootstrap attempts")
+}
+
+// A failure after the stream was established must never re-dispatch it: only the
+// connect attempt is wrapped. The handler aborts after the first event, which is
+// the clearest point at which a replay would execute the command twice.
+func TestStreamWakeRetry_NotRetriedAfterFirstEvent(t *testing.T) {
+	var attempts atomic.Int32
+	stop := errors.New("consumer stopped")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{\"type\":\"stdout\",\"text\":\"first\",\"timestamp\":1}\n\n" +
+			"{\"type\":\"stdout\",\"text\":\"second\",\"timestamp\":2}\n\n"))
+	}))
+	defer srv.Close()
+
+	client := NewExecdClient(srv.URL, "tok", WithRetry(wakeConfig(5, time.Minute)))
+
+	seen := 0
+	err := client.RunCommand(context.Background(), RunCommandRequest{Command: "echo hello"}, func(StreamEvent) error {
+		seen++
+		return stop
+	})
+	require.ErrorIs(t, err, stop, "handler error must surface unchanged")
+	require.Equal(t, 1, seen, "delivered events")
+	require.Equal(t, 1, int(attempts.Load()), "an established stream is never re-dispatched")
+}
+
+// The wake retry stays opt-out: with it disabled a marked 503 reaches the caller
+// immediately, so callers that relied on the previous fail-fast behavior keep it.
+func TestStreamWakeRetry_DisabledReturnsMarked503(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		writeStreamWakeTimeout(w)
+	}))
+	defer srv.Close()
+
+	client := NewExecdClient(srv.URL, "tok", WithRetry(RetryConfig{
+		MaxRetries:          0,
+		WakeRetryEnabled:    WakeRetryDisabled(),
+		WakeMaxAttempts:     5,
+		WakeOverallDeadline: time.Minute,
+	}))
+
+	err := client.RunCommand(context.Background(), RunCommandRequest{Command: "echo hello"}, func(StreamEvent) error {
+		return nil
+	})
+	require.Error(t, err, "opted-out wake retry on a stream")
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	require.True(t, apiErr.WakeExpired, "the marked error must reach the caller")
+	require.Equal(t, 1, int(attempts.Load()), "stream bootstrap attempts")
 }
