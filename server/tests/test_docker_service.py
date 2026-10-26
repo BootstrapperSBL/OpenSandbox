@@ -18,9 +18,9 @@ import os
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
-from docker.errors import APIError, DockerException, NotFound as DockerNotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound as DockerNotFound
 import pytest
 from fastapi import HTTPException, status
 from pydantic import SecretStr, ValidationError
@@ -2848,6 +2848,7 @@ def test_container_to_sandbox_returns_extensions(mock_docker):
                 "opensandbox.io/access-renew-extend-seconds": "1800",
             },
             "Cmd": ["python"],
+            "Image": "python:3.11",
         },
         "Created": "2025-01-01T00:00:00Z",
         "State": {
@@ -2857,7 +2858,6 @@ def test_container_to_sandbox_returns_extensions(mock_docker):
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
 
     sandbox = service._container_to_sandbox(container)
 
@@ -2877,7 +2877,11 @@ def test_container_to_sandbox_keeps_docker_times_with_trimmed_fraction(mock_dock
     service = DockerSandboxService(config=_app_config())
     container = MagicMock()
     container.attrs = {
-        "Config": {"Labels": {SANDBOX_ID_LABEL: "sandbox-frac"}, "Cmd": ["python"]},
+        "Config": {
+            "Labels": {SANDBOX_ID_LABEL: "sandbox-frac"},
+            "Cmd": ["python"],
+            "Image": "python:3.11",
+        },
         "Created": "2025-01-01T00:00:00.12345Z",
         "State": {
             "Status": "exited",
@@ -2886,7 +2890,6 @@ def test_container_to_sandbox_keeps_docker_times_with_trimmed_fraction(mock_dock
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
 
     sandbox = service._container_to_sandbox(container)
 
@@ -3267,6 +3270,7 @@ def test_container_to_sandbox_ignores_blanked_system_labels(mock_docker):
                 "opensandbox.io/extensions.custom": "",
             },
             "Cmd": ["python"],
+            "Image": "python:3.11",
         },
         "Created": "2025-01-01T00:00:00Z",
         "State": {
@@ -3276,7 +3280,6 @@ def test_container_to_sandbox_ignores_blanked_system_labels(mock_docker):
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["python:3.11"], short_id="sha-img")
 
     with patch.object(service._metadata_store, "get_expiration", return_value=None):
         sandbox = service._container_to_sandbox(container)
@@ -3674,7 +3677,6 @@ def test_container_snapshot_restore_reports_snapshot_id_without_image(mock_docke
             "ExitCode": 0,
         },
     }
-    container.image = MagicMock(tags=["opensandbox-snapshots:snap-001"], short_id="sha-image")
 
     sandbox = service._container_to_sandbox(container)
 
@@ -5341,12 +5343,13 @@ def _mock_container(
     extra_labels: dict | None = None,
 ) -> MagicMock:
     """Build a MagicMock container matching what ``_container_to_sandbox``
-    expects to read from ``container.attrs`` and ``container.image``."""
+    expects to read from ``container.attrs``."""
     labels = {SANDBOX_ID_LABEL: sandbox_id, **(extra_labels or {})}
     container = MagicMock()
     container.attrs = {
         "Created": "2024-01-01T00:00:00Z",
         "Config": {
+            "Image": image,
             "Labels": labels,
             "Cmd": entrypoint if entrypoint is not None else ["python", "-V"],
         },
@@ -5360,9 +5363,6 @@ def _mock_container(
         },
     }
     container.status = docker_status
-    container.image.tags = [image]
-    container.image.short_id = f"sha256:{sandbox_id}"
-    container.image.attrs = {}
     return container
 
 
@@ -5835,7 +5835,7 @@ def test_list_sandboxes_uses_low_level_summary_endpoint(mock_docker):
     item = response.items[0]
     assert item.id == "sbx-1"
     assert item.status.state == "Running"
-    # Full fidelity: entrypoint from Config.Cmd, image from image.tags.
+    # Full fidelity: entrypoint from Config.Cmd, image from Config.Image.
     assert item.entrypoint == ["python", "app.py"]
     assert item.image is not None
     assert item.image.uri == "python:3.11"
@@ -5873,6 +5873,30 @@ def test_list_sandboxes_skips_concurrently_deleted_sandbox(mock_docker):
 
     ids = {item.id for item in response.items}
     assert ids == {"sbx-alive"}
+
+
+@patch("opensandbox_server.services.docker.docker_service.docker")
+def test_list_sandboxes_reports_image_of_container_whose_image_was_removed(mock_docker):
+    """An image can be removed (``docker rmi -f``) while a container still
+    uses it. Listing must not look the image up: that raises ImageNotFound
+    and fails the whole request. The image comes from the container config.
+    """
+    mock_client = MagicMock()
+    mock_client.containers.list.return_value = []
+    container = _mock_container("sbx-1", image="python:3.11")
+    type(container).image = PropertyMock(side_effect=ImageNotFound("no such image"))
+    _wire_list_mocks(mock_client, [container])
+    mock_docker.from_env.return_value = mock_client
+
+    service = DockerSandboxService(config=_app_config())
+
+    response = service.list_sandboxes(
+        ListSandboxesRequest(pagination=PaginationRequest(page=1, page_size=50))
+    )
+
+    (item,) = response.items
+    assert item.image is not None
+    assert item.image.uri == "python:3.11"
 
 
 @patch("opensandbox_server.services.docker.docker_service.docker")
