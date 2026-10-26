@@ -365,8 +365,23 @@ func (c *Client) withRetryMethod(ctx context.Context, method string, fn func() e
 }
 
 // withRetryWake applies the generic policy together with the OSEP-0024 wake
-// contract. Streaming transports intentionally call neither layer.
+// contract.
 func (c *Client) withRetryWake(ctx context.Context, method string, fn func() error) error {
+	return c.retryLoop(ctx, method, true, fn)
+}
+
+// withWakeRetry applies only the OSEP-0024 wake contract, never the generic
+// policy. The marked wake-timeout 503 proves the gateway parked the request and
+// never forwarded it, so replaying it cannot execute anything twice and is safe
+// even for a streaming POST bootstrap. Every other failure, including a bare
+// 503, is returned to the caller unwrapped (OSEP-0017).
+func (c *Client) withWakeRetry(ctx context.Context, fn func() error) error {
+	return c.retryLoop(ctx, http.MethodGet, false, fn)
+}
+
+// retryLoop is the shared retry engine. generic controls whether transient
+// failures other than a marked wake timeout are retried according to method.
+func (c *Client) retryLoop(ctx context.Context, method string, generic bool, fn func() error) error {
 	if c.retry == nil || (c.retry.MaxRetries == 0 && !c.retry.wakeEnabled()) {
 		return fn()
 	}
@@ -427,7 +442,7 @@ func (c *Client) withRetryWake(ctx context.Context, method string, fn func() err
 			continue
 		}
 
-		if !isTransientErrorForMethod(lastErr, c.retry, method) {
+		if !generic || !isTransientErrorForMethod(lastErr, c.retry, method) {
 			return lastErr
 		}
 		if retriesUsed >= c.retry.MaxRetries {
