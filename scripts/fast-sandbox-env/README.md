@@ -6,6 +6,16 @@ All Kubernetes resources ship from the OpenSandbox Helm charts (`manifests/chart
 
 The `verify-native` / `verify-overlaybd` actions drive the server through the opensandbox CLI (`osb`, installed fresh from PyPI into the workspace by `up` unless `OSB_BIN` is set): create a sandbox from the golden-image template, reach the in-sandbox execd `/ping` through the signed gateway route, and delete it again. Raw HTTP calls remain only where the CLI has no equivalent (networkpolicy replace, metadata merge-patch, snapshot re-entry fence). The environment is all-or-nothing: running fast-sandbox without the OpenSandbox layers is not a supported shape of this script.
 
+### MITM CA chain (OSEP-0022, always on)
+
+The environment exercises the full MITM trust-anchor chain against the real components — no simulation:
+
+1. **CA material** — a self-signed CA (fresh per run) is provisioned as the versioned Secret `opensandbox-mitm-ca-v1` in the dataplane namespace, per the ops-runbook shape collapsed into one namespace: keypair entries (`tls.crt` + `tls.key`) for the egress seed mount, certificate-only entry (`ca.crt`) for the template bake. The stored certificate is fingerprint-checked against the generated one (content, not name).
+2. **Template bake** — the rendered server `config.toml` sets `kubernetes.template_mitm_ca_secret`, so the server fills `spec.egressMitmCertificate` on the template create and the builder installs the certificate into the guest trust store, stamping `platform.egressMitmCA.certSha256` into the published artifact manifest. The template stage asserts the CR field and the lineage fingerprint.
+3. **Pool pinning** — the pool's egress container mounts the Secret read-only as its CA seed; the MITM addon starts with the pinned CA (fail-closed, never generates) and exposes its fingerprint on `/healthz`. The pool stage asserts the fingerprint equals the pinned one.
+4. **Injection e2e** — a dedicated verify stage creates a sandbox with a policy allowing the CA-signed TLS echo endpoint (a container on the kind network reflecting request headers), first proves the credential-free passthrough (no `X-Api-Key`), then binds a vault credential to the SNI (`X-Api-Key` via the relay) and asserts the guest's own `curl --resolve … https://echo.test` response reflects the injected header — TLS verified against the template-baked CA on every leg, no `-k` anywhere. A pause/resume round trip then repeats the request: trust and vault travel with the snapshot.
+5. **Pinning assertion** — template manifest `platform.egressMitmCA` fingerprint == egress `/healthz` fingerprint == the pinned Secret's fingerprint, asserted three-way.
+
 Requires a bare-metal Linux host with KVM (`/dev/kvm`), Docker, Go ≥ 1.25, cgroup v2, and `sudo` for the XFS StateRoot loop mount and sysctl bump. The CLI install requires `uv` (it manages its own ≥ 3.10 interpreter), or set `OSB_BIN` to a preinstalled `osb` binary. Full operational notes (topology, latency characteristics, production caveats): `fast-sandbox/docs/guides/firecracker-integration-env.md`.
 
 ## Usage
@@ -56,7 +66,7 @@ SDK ──header──> ingress gateway (source-built, --provider-type=fast-sand
 
 ## Defaults
 
-- **Pool with egress**: `firecracker-egress-pool` (firecracker runtime, `poolMin=2`) carries the OpenSandbox egress container in every fastlet Pod netns — fast-sandbox profile, `dns+nft` mode — wired through the Sandbox Actions channel (`infraComponents` host-process entry + `actionHandlers` egress@18080 with the runtime-ready / data-plane-ready hooks).
+- **Pool with egress**: `firecracker-egress-pool` (firecracker runtime, `poolMin=2`) carries the OpenSandbox egress container in every fastlet Pod netns — fast-sandbox profile, `dns+nft` mode, MITM addon pinned to the CA seed mount — wired through the Sandbox Actions channel (`infraComponents` host-process entry + `actionHandlers` egress@18080 with the runtime-ready / data-plane-ready hooks).
 - **P2P by default**: two kind nodes, each running the runtime-agent with a node-local DART daemon (peer discovery through the headless `dart` Service); the pool spreads one fastlet per node via podAntiAffinity. Each node binds its **own** state-root subdirectory (`/var/lib/fast-sandbox/control-plane`, `/var/lib/fast-sandbox/worker`) at the same container path, so one node's committed image cache never satisfies another node's pull — artifact delivery flows `cache -> peer -> origin` with the origin fetched ~once per 4MiB block cluster-wide on every node's first create. `KIND_SINGLE=1` falls back to one node (cache-only).
 - **On-demand loading**: the pool has no `warmImages`; the verify sandbox's create pulls the golden snapshot set through DART. `WARM_IMAGES=1` preheats instead.
 - **fast-sandbox @ pinned commit**: env-owned clone at `$WORK/fast-sandbox`, cloned on first `up` and checked out at the pinned commit afterwards; relocate it with `FSB_DIR`. The source itself has no override — bump the commit in `manifests/third-party/fast-sandbox.commit`.
@@ -70,7 +80,8 @@ architecture.svg             how the environment works (topology, pipeline,
 manifests/
   cluster/kind-cluster.yaml    two-node kind cluster, KVM/tun/shm mounts,
                                per-node state-root subdirectories
-  pool/firecracker-egress-pool.yaml  SandboxPool: egress attached + P2P spread
+  pool/firecracker-egress-pool.yaml  SandboxPool: egress attached (MITM CA
+                               seed mount) + P2P spread
 ```
 
 Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), rendered with `helm template` from the workdir's values (image tags, artifact-store endpoint, FastPath endpoint, signing key, NodePorts) and applied with plain `kubectl apply` — the cluster keeps no helm state:
@@ -84,9 +95,9 @@ Everything else comes from the OpenSandbox Helm charts (`manifests/charts`), ren
 
 ## Stage order
 
-`up`: preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → SandboxTemplate golden image **built through the server `POST /templates` API** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check).
+`up`: preflight → sysctl → fast-sandbox checkout (pinned commit) → build images (6 fast-sandbox images via `manifests/release/build-fast-sandbox.sh` + egress + server + ingress) → XFS StateRoot → kind cluster + node labels (host ports 18080/18081) → RustFS → charts rendered + applied: base + fast-sandbox (CRDs, RBAC, control plane, installer, agent) → credentials → **MITM CA material (Secret + echo leaf cert)** → installer/agent roster asserted → charts rendered + applied: server + ingress gateway → **TLS echo endpoint (kind-network container)** → SandboxTemplate golden image **built through the server `POST /templates` API, CA baked** → SandboxPool (fastlet Ready, egress Ready, pool conditions, actions protocol check, **pinned CA fingerprint**).
 
-`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
+`verify-native`: end-to-end verify (templateId create → signed gateway route → execd `/ping` → delete) → pause/resume round-trip (POST pause → poll `Paused` + route released → POST resume → poll `Running` → fresh-route `/ping` → delete) → vault lifecycle → **MITM CA chain verify (pinning three-way, passthrough negative control, SNI credential injection, post-resume injection)** → idle-pause/wake (IDLE_PAUSE profile) → snapshot round trip.
 
 `verify-overlaybd`: overlaybd SandboxTemplate build (oci:// publication) → the same verify matrix against the overlaybd template.
 
