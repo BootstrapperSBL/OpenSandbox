@@ -217,6 +217,65 @@ test("the request signal is carried across redirected hops", async () => {
   assert.equal(signals[1].aborted, true);
 });
 
+test("Request-level fetch options survive the rebuild of every guarded hop", async () => {
+  const inits = [];
+  const baseFetch = async (input, init) => {
+    inits.push(init);
+    if (inits.length === 1) {
+      return new Response(null, { status: 307, headers: { location: "http://other.test/final" } });
+    }
+    return new Response("ok", { status: 200 });
+  };
+  const safeFetch = createRedirectSafeFetch("http://a.test", baseFetch);
+
+  const request = new Request("http://a.test/start", {
+    method: "POST",
+    body: "payload",
+    headers: { "OPEN-SANDBOX-API-KEY": "tenant-secret" },
+    credentials: "include",
+    cache: "no-store",
+    referrerPolicy: "no-referrer",
+  });
+
+  const res = await safeFetch(request);
+  assert.equal(res.status, 200);
+  assert.equal(inits.length, 2);
+  for (const init of inits) {
+    // Options that only live on the Request input must be copied onto the
+    // rebuilt (url, init) hop instead of falling back to platform defaults.
+    assert.equal(init.credentials, "include");
+    assert.equal(init.cache, "no-store");
+    assert.equal(init.referrerPolicy, "no-referrer");
+    // ...while the loop keeps ownership of the redirect mode.
+    assert.equal(init.redirect, "manual");
+  }
+});
+
+test("the overall redirect deadline bounds the first URL-input hop", async () => {
+  const signals = [];
+  const baseFetch = async (input, init) => {
+    signals.push(init?.signal);
+    await new Promise((resolve) => {
+      init?.signal?.addEventListener("abort", resolve, { once: true });
+      setTimeout(resolve, 1000);
+    });
+    if (init?.signal?.aborted) throw init.signal.reason;
+    return new Response("late", { status: 200 });
+  };
+  const safeFetch = createRedirectSafeFetch("http://a.test", baseFetch, {
+    overallTimeoutMs: 20,
+  });
+
+  await assert.rejects(
+    safeFetch("http://a.test/start", { headers: { "OPEN-SANDBOX-API-KEY": "tenant-secret" } }),
+    /Redirect chain timed out/,
+  );
+  // A string/URL input used to take the header-less first hop without any
+  // signal, so the overall deadline only started at the first redirect.
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].aborted, true);
+});
+
 test("303 and POST 301/302 convert to GET and drop entity headers", async () => {
   const calls = [];
   const baseFetch = async (input, init) => {

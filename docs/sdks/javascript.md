@@ -528,6 +528,11 @@ combination of scheme, host, and port, so changing any of those values is
 cross-origin. Other custom headers are not stripped automatically. Requests that do
 not carry any protected header keep the runtime's default redirect behavior.
 
+When a guarded request is redirected, the request timeout applies as a single budget
+for the whole chain rather than per hop: the deadline starts with the first dispatch,
+and the caller's abort signal (plus any fetch options set on the `Request`) is carried
+across every hop.
+
 File uploads never follow redirects, because a streamed or in-memory multipart body
 cannot always be replayed. A redirect response from an upload is surfaced as a
 `SandboxApiException` with the original status code on Node.js; in browsers the

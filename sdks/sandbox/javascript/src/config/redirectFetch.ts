@@ -170,6 +170,25 @@ function combineSignals(
 }
 
 /**
+ * The fetch options a `Request` input carries that `init` does not. Rebuilding a
+ * hop as `(url, init)` would otherwise reset them to their platform defaults —
+ * notably `credentials`, so a credentialed request would silently become
+ * same-origin only. `redirect` is intentionally absent: the manual loop owns it
+ * per hop.
+ */
+function requestLevelInit(request: Request): RequestInit {
+  return {
+    credentials: request.credentials,
+    mode: request.mode,
+    cache: request.cache,
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
+    integrity: request.integrity,
+    keepalive: request.keepalive,
+  };
+}
+
+/**
  * Wrap `baseFetch` so protected OpenSandbox headers are stripped before
  * following a redirect whose target origin differs from `baseUrl`'s origin.
  */
@@ -214,7 +233,15 @@ export function createRedirectSafeFetch(
 
     // Other init fields (e.g. the undici `dispatcher`) are carried onto every
     // hop; per-hop fields are overridden below.
-    const baseInit: RequestInit = { ...(init ?? {}) };
+    //
+    // A `Request` input keeps most of its fetch options off `init`. Every hop is
+    // dispatched as `(url, init)`, so those options are copied in explicitly or
+    // the rebuilt request silently falls back to the platform defaults. The
+    // caller's `init` still wins wherever it sets the same field.
+    const baseInit: RequestInit = {
+      ...(request ? requestLevelInit(request) : {}),
+      ...(init ?? {}),
+    };
 
     let currentUrl: string;
     let method: string;
@@ -279,7 +306,7 @@ export function createRedirectSafeFetch(
             signal: hopSignal,
             redirect: "manual",
           }
-        : { ...baseInit, redirect: "manual" };
+        : { ...baseInit, signal: hopSignal, redirect: "manual" };
       if (nextBody == null) {
         // `duplex` is body-coupled; some runtimes reject it on a body-less hop.
         delete (hopInit as Record<string, unknown>).duplex;
