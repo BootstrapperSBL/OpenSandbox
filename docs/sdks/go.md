@@ -503,11 +503,11 @@ config.Retry = &opensandbox.RetryConfig{
 }
 ```
 
-SSE bootstraps do not use the generic retry loop, even when a write status code is opted in.
+SSE bootstraps do not use the generic retry loop, even when a write status code is opted in. The OSEP-0024 wake retry below still covers the request that starts the stream.
 
 ### Wake retry
 
-A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the client recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the client returns a `*SandboxWakeTimeoutError` (carrying `Attempts` and `Waited`) while the server-side resume continues in the background. Bare `503` responses follow the existing retry rules untouched. Wake retry is active whenever a `WithRetry` config is set (`WakeRetryEnabled` defaults to enabled even for hand-built configs; pass `WakeRetryDisabled()` to opt out); streaming connections bypass wake retry — a waking sandbox fails fast with the marked 503 instead of parking the connect — matching the other official SDKs, and established streams are never re-executed.
+A request to a paused sandbox may arrive while its restore is still in progress. The gateway answers `503` with the `OpenSandbox-Wake: expired` marker; the client recognizes it and resends the original request after the `Retry-After` delay (safe for any method — the marker proves the request was never forwarded). The wake budget defaults to 5 attempts / 60 seconds across all wake cycles; when it is exhausted the client returns a `*SandboxWakeTimeoutError` (carrying `Attempts` and `Waited`) while the server-side resume continues in the background. Bare `503` responses follow the existing retry rules untouched. Wake retry is active whenever a `WithRetry` config is set (`WakeRetryEnabled` defaults to enabled even for hand-built configs; pass `WakeRetryDisabled()` to opt out). It also covers the request that starts an SSE stream, so a command or code execution against an auto-paused sandbox wakes it like any other request; once a stream is established, its events are never re-executed.
 
 ## Fsb Template Management
 
