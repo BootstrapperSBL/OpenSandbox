@@ -317,6 +317,8 @@ result = await sandbox.commands.run(["printf", "%s\n", "$HOME", "hello world"])
 
 Native argv execution requires an updated execd. See [command execution modes](/architecture/data-plane/execd#command-execution) for executable lookup and platform behavior.
 
+`RunCommandOpts.timeout` and the `timeout` of `commands.run_in_session` take a `timedelta` and are sent in whole milliseconds, rounded up: 500 microseconds is sent as 1 ms and 1.5 ms as 2 ms. An omitted timeout is left out of the request and `timedelta(0)` is sent as 0; ordinary commands then run without a deadline, and bash-session commands use their 24-hour default.
+
 #### Background commands
 
 Start a bounded command, read incremental logs, and check its exit status. Command timeout and sandbox TTL are separate settings.
