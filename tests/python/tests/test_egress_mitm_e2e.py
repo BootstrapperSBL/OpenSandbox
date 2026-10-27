@@ -159,7 +159,7 @@ def test_allow_443_deny_all_with_vault_keeps_https_working(
         _assert_https_via_mitm(
             sandbox,
             (
-                "https://cloudflare-dns.com/dns-query?name=example.com&type=A"
+                "'https://cloudflare-dns.com/dns-query?name=example.com&type=A'"
                 " --resolve cloudflare-dns.com:443:1.1.1.1"
                 " --header 'accept: application/dns-json'"
             ),
