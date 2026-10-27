@@ -21,27 +21,32 @@
 
 : "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_CONTAINER:=opensandbox-e2e-egress-mitm-target}"
 : "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_IMAGE:=python:3.11-alpine}"
-: "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_PORT:=8080}"
 : "${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_KEY:=opensandbox.e2e}"
 : "${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_VALUE:=egress-mitm}"
+
+# The listener port is deliberately fixed at 8080: it must match the tests'
+# PROBE_PORT (tests/python/tests/test_egress_mitm_e2e.py) — a non-80/443 port
+# that is neither MITM-intercepted nor whitelisted by the reachable.ports.cap
+# floor used there. Not env-overridable so the two can never drift.
 
 setup_egress_mitm_e2e_target() {
   local label="${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_KEY}=${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_VALUE}"
 
   docker pull "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_IMAGE}"
   docker rm -f "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_CONTAINER}" >/dev/null 2>&1 || true
+  docker ps -aq --filter "label=${label}" | xargs -r docker rm -f || true
 
   docker run -d \
     --name "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_CONTAINER}" \
     --label "${label}" \
     "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_IMAGE}" \
-    python -m http.server "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_PORT}" --bind 0.0.0.0 >/dev/null
+    python -m http.server 8080 --bind 0.0.0.0 >/dev/null
 
   local target_ready="false"
   for _ in $(seq 1 30); do
     if docker exec "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_CONTAINER}" python - <<PY >/dev/null 2>&1
 import urllib.request
-urllib.request.urlopen("http://127.0.0.1:${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_PORT}/", timeout=1).read()
+urllib.request.urlopen("http://127.0.0.1:8080/", timeout=1).read()
 PY
     then
       target_ready="true"
@@ -71,5 +76,7 @@ PY
 }
 
 cleanup_egress_mitm_e2e_target() {
+  local label="${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_KEY}=${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_VALUE}"
   docker rm -f "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_CONTAINER}" >/dev/null 2>&1 || true
+  docker ps -aq --filter "label=${label}" | xargs -r docker rm -f || true
 }
