@@ -13,28 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Egress x transparent-MITM interaction E2E (docker runtime, dns+nft).
+"""Egress x transparent-MITM E2E (docker runtime, dns+nft).
 
-Regressions for the class of bugs where the transparent MITM REDIRECT (the
-destination is rewritten to the mitmproxy listener port before the nft egress
-chain runs) is judged as if the workload had dialed the listener itself, so
-every intercepted HTTPS flow is silently blackholed even when the policy
-allows the original destination port:
+The MITM REDIRECT rewrites intercepted dports to the mitmproxy listener
+before the nft chain runs; without an exemption the rewritten port hits the
+port floor or the default-deny tail and blackholes allowed HTTPS.
 
-- Scenario A: operator port floor (``reachable.ports.cap`` with only 80/443)
-  plus Credential Vault (transparent MITM) with a default-allow policy —
-  HTTPS must still work, and non-whitelisted ports must stay blocked
-  (issue #2423).
-- Scenario B: no floor, plus an allow-443/deny-all user policy with
-  Credential Vault enabled — HTTPS must still work through the default-deny
-  tail instead of dying on the rewritten port.
+- Scenario A: reachable.ports.cap = 80/443 + vault + default-allow — HTTPS
+  works and non-whitelisted ports stay blocked (issue #2423).
+- Scenario B: no floor + allow-443/deny-all + vault — HTTPS works.
 
-The floor file is injected into the sandbox's egress sidecar via
-``docker exec`` (docker runtime only) and takes effect through the sidecar's
-periodic always-rules reload (~1 minute), which the test polls for. The tests
-are env-gated on ``OPENSANDBOX_EGRESS_MITM_E2E_TARGET_IP``, set by
-``scripts/egress-mitm-e2e-target.sh`` (wired into ``scripts/python-e2e.sh``);
-without it they skip.
+The floor file is docker-exec'd into the sidecar and picked up by the
+~1-minute always-rules reload the tests poll for. Skips without
+OPENSANDBOX_EGRESS_MITM_E2E_TARGET_IP (set by scripts/egress-mitm-e2e-target.sh).
 """
 
 from __future__ import annotations
@@ -67,11 +58,9 @@ E2E_LABEL_KEY = os.getenv(
 E2E_LABEL_VALUE = os.getenv(
     "OPENSANDBOX_EGRESS_MITM_E2E_LABEL_VALUE", "egress-mitm"
 )
-# The probe target listens here; the port is deliberately NOT 80/443 so it is
-# neither MITM-intercepted nor whitelisted by the port floor.
+# Not 80/443: neither MITM-intercepted nor whitelisted by the floor.
 PROBE_PORT = 8080
-# The sidecar reloads operator rule files at most once per minute; poll a bit
-# beyond that before concluding the floor never took effect.
+# Always-rules reload runs at most once per minute.
 FLOOR_RELOAD_TIMEOUT_S = 150
 
 
@@ -88,13 +77,10 @@ def mitm_target_ip() -> str:
 def test_port_floor_with_vault_keeps_https_working(
     mitm_target_ip: str,
 ) -> None:
-    """Issue #2423: reachable.ports.cap (80/443) + vault must not blackhole HTTPS.
+    """Issue #2423: the cap whitelist (80/443) must not blackhole MITM'd HTTPS.
 
-    The floor complement is derived from whitelisted ports, but the MITM
-    REDIRECT rewrites an intercepted SYN's destination port to the mitmproxy
-    listener (e.g. 18081) before the nft chain evaluates it — which lands in
-    the complement. Pre-fix, every intercepted HTTPS flow timed out even
-    though 443 is whitelisted and the policy is default-allow.
+    The REDIRECT-rewritten dport lands in the floor complement, so pre-fix
+    every intercepted flow timed out under a default-allow policy.
     """
     cfg, sandbox = _create_sandbox(
         network_policy=NetworkPolicy(defaultAction="allow"),
@@ -102,21 +88,17 @@ def test_port_floor_with_vault_keeps_https_working(
     try:
         _write_reachable_ports_cap(sandbox.id, ["80", "443"])
 
-        # Phase 1 — precondition: the probe target is reachable before the
-        # floor lands (it listens, the policy is default-allow).
+        # Precondition: probe target reachable before the floor lands.
         assert _wait_until_tcp(
             sandbox, mitm_target_ip, PROBE_PORT, expect_connected=True, timeout_s=60
         ), f"probe target {mitm_target_ip}:{PROBE_PORT} unreachable even before the floor"
 
-        # Phase 2 — the injected cap file takes effect via the sidecar's
-        # periodic always-rules reload (~1 minute): the non-whitelisted port
-        # must flip to blocked.
+        # Floor takes effect via the ~1-minute always-rules reload.
         assert _wait_until_tcp(
             sandbox, mitm_target_ip, PROBE_PORT, expect_connected=False
         ), (
-            "reachable.ports.cap floor did not take effect: a non-whitelisted "
-            f"port ({PROBE_PORT}) stayed reachable under a default-allow policy; "
-            "the sidecar either never reloaded the injected cap file or the floor is not enforced"
+            "floor never took effect: "
+            f"non-whitelisted port ({PROBE_PORT}) stayed reachable (cap file not reloaded?)"
         )
 
         _assert_https_via_mitm(sandbox, "https://example.com", "Example Domain")
@@ -128,13 +110,10 @@ def test_port_floor_with_vault_keeps_https_working(
 def test_allow_443_deny_all_with_vault_keeps_https_working(
     mitm_target_ip: str,
 ) -> None:
-    """allow-443/deny-all + transparent MITM must let HTTPS out.
+    """allow-443/deny-all + MITM must let HTTPS out; other ports stay blocked.
 
-    Pre-fix, the MITM REDIRECT rewrote the SYN's dport 443 to the listener
-    port, which matches no allow rule, so the final default-deny drop
-    blackholed every intercepted flow even though the user explicitly allowed
-    443. Enforcement must also stay intact: a port the policy does not allow
-    stays blocked.
+    Pre-fix the rewritten dport matched no allow rule and hit the final
+    default-deny drop.
     """
     cfg, sandbox = _create_sandbox(
         network_policy=NetworkPolicy(
@@ -143,15 +122,12 @@ def test_allow_443_deny_all_with_vault_keeps_https_working(
         ),
     )
     try:
-        # Gate: the MITM path is live at all. Pre-fix this connect timed out
-        # because the rewritten dport hit the default-deny drop before
-        # mitmproxy ever saw the flow.
+        # Gate: MITM path live (pre-fix this timed out on the rewritten dport).
         assert _wait_until_tcp(
             sandbox, "1.1.1.1", 443, expect_connected=True, timeout_s=60
         ), "TCP/443 was blackholed by the MITM redirect under allow-443/deny-all"
 
-        # The probe target listens on PROBE_PORT, so the block below proves
-        # the deny-all default really bites (not just "nothing there").
+        # Target listens on PROBE_PORT, so the block proves deny-all bites.
         assert _wait_until_tcp(
             sandbox, mitm_target_ip, PROBE_PORT, expect_connected=False, timeout_s=45
         ), "deny-all policy did not block a non-allowed port"
@@ -198,11 +174,7 @@ def _close_sandbox(cfg: object, sandbox: SandboxSync) -> None:
 
 
 def _write_reachable_ports_cap(sandbox_id: str, ports: list[str]) -> None:
-    """Inject the operator port floor into this sandbox's egress sidecar.
-
-    The sidecar re-reads /var/egress rules periodically (~1 minute) and
-    re-applies the nft static policy, so the floor takes effect without a
-    restart.
+    """Write the floor file into the sidecar; picked up by the ~1-minute reload.
     """
     body = "\\n".join(ports) + "\\n"
     _sidecar_exec(
@@ -243,11 +215,7 @@ def _wait_until_tcp(
     expect_connected: bool,
     timeout_s: int = FLOOR_RELOAD_TIMEOUT_S,
 ) -> bool:
-    """Poll the TCP probe until it matches the expectation, or give up.
-
-    Covers sidecar startup ordering (nft apply, MITM readiness) and the
-    always-rules reload latency without fixed sleeps.
-    """
+    """Poll until the probe matches the expectation or the budget expires."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if _tcp_connects(sandbox, host, port) == expect_connected:
@@ -257,10 +225,10 @@ def _wait_until_tcp(
 
 
 def _assert_https_via_mitm(sandbox: SandboxSync, url_and_args: str, expect: str) -> None:
-    """Assert a real HTTPS request succeeds through the MITM path, with retries.
+    """Retry a curl until the expected marker shows up; TLS verification stays on.
 
-    TLS verification stays ON: the sandbox trusts the mitm CA installed by the
-    execd bootstrap, and mitmproxy verifies the upstream against public roots.
+    The sandbox trusts the mitm CA installed by the execd bootstrap, and
+    mitmproxy verifies the upstream against public roots.
     """
     last = ""
     for _ in range(3):

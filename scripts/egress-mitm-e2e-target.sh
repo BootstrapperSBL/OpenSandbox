@@ -14,20 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Plain-HTTP listener on a non-80/443 port used by the egress-MITM E2E tests
-# (tests/python/tests/test_egress_mitm_e2e.py) as a connectivity probe target:
-# it must LISTEN on its port so "blocked by policy/floor" (connect times out)
-# stays distinguishable from "nothing there" (instant refusal).
+# HTTP probe target for the egress-MITM E2E tests: it must LISTEN, so
+# "blocked by policy/floor" stays distinguishable from "nothing there".
 
 : "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_CONTAINER:=opensandbox-e2e-egress-mitm-target}"
 : "${OPENSANDBOX_EGRESS_MITM_E2E_TARGET_IMAGE:=python:3.11-alpine}"
 : "${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_KEY:=opensandbox.e2e}"
 : "${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_VALUE:=egress-mitm}"
 
-# The listener port is deliberately fixed at 8080: it must match the tests'
-# PROBE_PORT (tests/python/tests/test_egress_mitm_e2e.py) — a non-80/443 port
-# that is neither MITM-intercepted nor whitelisted by the reachable.ports.cap
-# floor used there. Not env-overridable so the two can never drift.
+# Fixed at 8080 to match the tests' PROBE_PORT; not overridable, so they
+# cannot drift.
 
 setup_egress_mitm_e2e_target() {
   local label="${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_KEY}=${OPENSANDBOX_EGRESS_MITM_E2E_LABEL_VALUE}"

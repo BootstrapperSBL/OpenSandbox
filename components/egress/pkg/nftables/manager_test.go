@@ -823,21 +823,17 @@ func TestApplyStatic_PortFloorRangesDenyBeforeAllows(t *testing.T) {
 		"the platform floor must be evaluated before any user port allow")
 }
 
-// Issue #2423: the nat OUTPUT REDIRECT (transparent MITM) rewrites intercepted
-// dports to the listener port BEFORE this chain runs (oif still on the egress
-// interface), so the rewritten dport must be accepted ahead of the port floor
-// complement, user port-scoped rules, and the final default-deny drop — or
-// every intercepted flow is silently blackholed even when the original port
-// (e.g. 443) is allowed by both the cap and the user policy.
+// Issue #2423: the MITM REDIRECT rewrites the intercepted dport to the
+// listener port before this chain runs, so the exemption must precede the
+// floor drop, user port rules, and the final default-deny drop.
 func TestApplyStatic_MitmRedirectExemptedBeforePortRules(t *testing.T) {
 	var rendered string
 	m := NewManagerWithRunnerAndOptions(func(_ context.Context, script string) ([]byte, error) {
 		rendered = script
 		return nil, nil
 	}, Options{MitmRedirectPort: 18081})
-	// Default-deny user policy that only opens 443, with the platform port
-	// floor (whitelisting 80/443) as an always-deny overlay: neither covers
-	// the rewritten dport 18081.
+	// Default-deny policy allowing only 443, plus the port floor: neither
+	// covers the rewritten dport 18081.
 	p, err := policy.ParsePolicy(`{"defaultAction":"deny","egress":[{"action":"allow","ports":[443]}]}`)
 	require.NoError(t, err)
 	p = policy.MergeAlwaysOverlay(p, []policy.EgressRule{

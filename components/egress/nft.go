@@ -114,9 +114,8 @@ func parseNftOptions(upstream *mitmproxy.UpstreamProxySpec) (nftables.Options, e
 		BlockDoT:              true,
 		QuiesceOnApplyFailure: constants.IsTruthy(os.Getenv(constants.EnvExperimentalRevisionRuntime)),
 	}
-	// Transparent MITM rewrites intercepted dports to its listener port before
-	// the egress chain runs; the chain must exempt that rewritten tuple ahead
-	// of port-scoped rules. Same derivation as startMitmproxyTransparentIfEnabled.
+	// Transparent MITM: exempt the REDIRECT target dport ahead of port-scoped
+	// rules (issue #2423). Same port derivation as startMitmproxyTransparentIfEnabled.
 	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxyTransparent)) {
 		opts.MitmRedirectPort = constants.EnvIntOrDefault(constants.EnvMitmproxyPort, constants.DefaultMitmproxyPort)
 	}

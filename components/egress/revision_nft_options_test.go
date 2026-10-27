@@ -57,9 +57,7 @@ func TestNftOptionsRevisionQuiescence(t *testing.T) {
 	}
 }
 
-// The egress chain exempts the MITM redirect target ahead of port-scoped
-// rules (issue #2423); the port must be derived from the same env the
-// transparent launcher uses, and only when transparent MITM is enabled.
+// The exemption port must follow the transparent-MITM env, and only when enabled.
 func TestNftOptionsMitmRedirectPortFollowsTransparentMode(t *testing.T) {
 	opts, err := parseNftOptions(nil)
 	require.NoError(t, err)
