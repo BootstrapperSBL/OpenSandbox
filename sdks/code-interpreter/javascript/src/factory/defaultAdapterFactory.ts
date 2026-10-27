@@ -19,6 +19,10 @@ import {
 import type { AdapterFactory, CreateCodesStackOptions } from "./adapterFactory.js";
 import { CodesAdapter } from "../adapters/codesAdapter.js";
 import type { Codes } from "../services/codes.js";
+import {
+  createRedirectSafeExecdFetch,
+  createRedirectSafeExecdSseFetch,
+} from "../transport.js";
 
 export class DefaultAdapterFactory implements AdapterFactory {
   createCodes(opts: CreateCodesStackOptions): Codes {
@@ -30,17 +34,21 @@ export class DefaultAdapterFactory implements AdapterFactory {
       opts.sandbox.connectionConfig.useServerProxy,
       opts.sandbox.connectionConfig.apiKey,
     );
+    // Strip protected OpenSandbox headers before following a cross-origin
+    // redirect, matching the sandbox SDK (issue #2170).
+    const execdFetch = createRedirectSafeExecdFetch(opts.sandbox, opts.execdBaseUrl);
+    const execdSseFetch = createRedirectSafeExecdSseFetch(opts.sandbox, opts.execdBaseUrl);
     const client = createExecdClient({
       baseUrl: opts.execdBaseUrl,
       headers,
-      fetch: opts.sandbox.connectionConfig.fetch,
+      fetch: execdFetch,
     });
 
     return new CodesAdapter(client, {
       baseUrl: opts.execdBaseUrl,
       headers,
       // Streaming calls (SSE) use a dedicated fetch, aligned with Kotlin/Python SDKs.
-      fetch: opts.sandbox.connectionConfig.sseFetch,
+      fetch: execdSseFetch,
     });
   }
 }

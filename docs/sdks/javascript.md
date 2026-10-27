@@ -516,6 +516,35 @@ const config2 = new ConnectionConfig({
 });
 ```
 
+#### Redirects and protected headers
+
+The SDK strips OpenSandbox credentials before following a cross-origin redirect.
+Same-origin redirects preserve request headers, while cross-origin redirects remove
+every header whose name starts with `OPEN-SANDBOX-` or `OPENSANDBOX-`
+(case-insensitive), such as `OPEN-SANDBOX-API-KEY` and `OPENSANDBOX-EGRESS-AUTH`. In
+addition, the standard credential headers `Authorization`, `Cookie`, and
+`Proxy-Authorization` are removed, matching native `fetch`. An origin is the
+combination of scheme, host, and port, so changing any of those values is
+cross-origin. Other custom headers are not stripped automatically. Requests that do
+not carry any protected header keep the runtime's default redirect behavior.
+
+When a guarded request is redirected, the request timeout applies as a single budget
+for the whole chain rather than per hop: the deadline starts with the first dispatch,
+and the caller's abort signal (plus any fetch options set on the `Request`) is carried
+across every hop.
+
+File uploads never follow redirects, because a streamed or in-memory multipart body
+cannot always be replayed. A redirect response from an upload is surfaced as a
+`SandboxApiException` with the original status code on Node.js; in browsers the
+opaque redirect reports status `0`.
+
+::: warning Browser limitation
+Browsers do not expose the target of a `redirect: "manual"` response, so the SDK
+cannot inspect it before following. For a request that carries protected headers, the
+SDK fails closed (throws a `SandboxApiException`) instead of risking a cross-origin
+credential replay. Node.js is unaffected.
+:::
+
 The JavaScript Code Interpreter SDK inherits the sandbox's connection
 configuration. With `useServerProxy: true`, context requests and streamed code
 execution include the configured API key in `OPEN-SANDBOX-API-KEY` for server
