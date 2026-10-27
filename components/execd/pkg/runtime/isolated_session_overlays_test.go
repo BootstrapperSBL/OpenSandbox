@@ -237,6 +237,15 @@ func TestCreateIsolatedSession_TmpBindHostedShapes(t *testing.T) {
 			if session == nil {
 				t.Fatal("created session was not published")
 			}
+			if !tc.wantHosted {
+				// Non-hosted sessions keep the historical no-allocation
+				// path and stay independent of the upper quota.
+				if session.upperID != "" {
+					t.Fatalf("non-hosted session allocated upper entry %q", session.upperID)
+				}
+			} else if session.upperID == "" {
+				t.Fatal("hosted session must own its upper-root subtree")
+			}
 			if tc.wantHosted && session.tmpDir == "" {
 				t.Fatal("strict session without /tmp overlay must host /tmp")
 			}

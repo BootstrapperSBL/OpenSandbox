@@ -492,18 +492,26 @@ func (r *IsolatedRunner) allocateSessionUppers(session *isolatedSession) error {
 		pairs   []isolation.UpperDirPair
 		err     error
 	)
-	if persistCount == 0 {
+	switch {
+	case persistCount == 0 && !sessionTmpBindHosted(session):
+		// No pairs and no hosted /tmp: keep the historical no-allocation
+		// path so these sessions stay independent of the upper quota.
+		return nil
+	case persistCount == 0:
 		upperID, err = r.upperMgr.AllocateSessionDir()
-	} else {
+		if err == nil {
+			session.tmpDir = r.upperMgr.TmpDir(upperID)
+		}
+	default:
 		upperID, pairs, err = r.upperMgr.AllocateN(persistCount)
+		if err == nil && sessionTmpBindHosted(session) {
+			session.tmpDir = r.upperMgr.TmpDir(upperID)
+		}
 	}
 	if err != nil {
 		return fmt.Errorf("allocate upper: %w", err)
 	}
 	session.upperID = upperID
-	if sessionTmpBindHosted(session) {
-		session.tmpDir = r.upperMgr.TmpDir(upperID)
-	}
 	next := 0
 	for i := range session.overlays {
 		ov := &session.overlays[i]
