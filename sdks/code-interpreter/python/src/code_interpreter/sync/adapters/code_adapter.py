@@ -309,6 +309,7 @@ class CodesAdapterSync(CodesSync):
 
             url = self._get_execd_url(self.RUN_CODE_PATH)
             execution = Execution(id=None, execution_count=None, result=[], error=None)
+            execution._is_code_execution = True
             dispatcher = ExecutionEventDispatcherSync(execution, handlers)
 
             with self._sse_client.stream("POST", url, json=api_request) as response:
