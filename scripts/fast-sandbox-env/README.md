@@ -37,7 +37,7 @@ The `verify-native` / `verify-overlaybd` stages are also available as Python SDK
 ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e   # needs uv on PATH
 ```
 
-or, manually: `cd tests/python && OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/template-id")" make test-fsb` (requires `OPENSANDBOX_TEST_FSB_TEMPLATE_ID`; the script stores the id in `$WORK/template-id`).
+or, manually: `cd tests/python && OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$(cat "$WORK/overlaybd-template-id")" make test-fsb` (requires `OPENSANDBOX_TEST_FSB_TEMPLATE_ID`; `sdk-e2e` and `idle-e2e` run against the overlaybd template stored in `$WORK/overlaybd-template-id` when `OCI_STACK=1`, falling back to the native template in `$WORK/template-id` under `OCI_STACK=0`).
 
 ## Wiring
 

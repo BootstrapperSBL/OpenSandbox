@@ -2657,18 +2657,22 @@ sdk_e2e() {
 	command -v uv >/dev/null 2>&1 \
 		|| die "uv is required on PATH (https://docs.astral.sh/uv/ — curl -LsSf https://astral.sh/uv/install.sh | sh)"
 	local -a template_ids=() template_origins=()
-	local template_id
-	template_id="$(cat "$WORK/template-id" 2>/dev/null || true)"
-	[[ -n "$template_id" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
-	template_ids+=("$template_id")
-	template_origins+=("fast-sandbox-env")
 	if [[ "$OCI_STACK" == 1 ]]; then
+		# Overlaybd only: the suite exercises the SDK contract on the on-demand
+		# path (the server resolves the OCI template's status.manifestRef on
+		# template-mode creates). OCI_STACK=0 falls back to the native template.
 		local oci_template_id
 		oci_template_id="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
-		# The suite runs once per template: the overlaybd pass exercises the
-		# SDK contract on the on-demand path (the server resolves the OCI
-		# template's status.manifestRef on template-mode creates).
-		[[ -n "$oci_template_id" ]] && template_ids+=("$oci_template_id") template_origins+=("fast-sandbox-env-oci")
+		[[ -n "$oci_template_id" ]] \
+			|| die "no overlaybd template id at $WORK/overlaybd-template-id (run verify-overlaybd first; template_up_overlaybd writes it)"
+		template_ids+=("$oci_template_id")
+		template_origins+=("fast-sandbox-env-oci")
+	else
+		local template_id
+		template_id="$(cat "$WORK/template-id" 2>/dev/null || true)"
+		[[ -n "$template_id" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
+		template_ids+=("$template_id")
+		template_origins+=("fast-sandbox-env")
 	fi
 	export OPENSANDBOX_TEST_DOMAIN="127.0.0.1:$SERVER_HOST_PORT"
 	export OPENSANDBOX_TEST_PROTOCOL="http"
@@ -2697,8 +2701,15 @@ idle_e2e() {
 	command -v uv >/dev/null 2>&1 \
 		|| die "uv is required on PATH (https://docs.astral.sh/uv/ — curl -LsSf https://astral.sh/uv/install.sh | sh)"
 	local template_id
-	template_id="$(cat "$WORK/template-id" 2>/dev/null || true)"
-	[[ -n "$template_id" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
+	if [[ "$OCI_STACK" == 1 ]]; then
+		# Overlaybd only (the on-demand path); OCI_STACK=0 falls back to native.
+		template_id="$(cat "$WORK/overlaybd-template-id" 2>/dev/null || true)"
+		[[ -n "$template_id" ]] \
+			|| die "no overlaybd template id at $WORK/overlaybd-template-id (run verify-overlaybd first; template_up_overlaybd writes it)"
+	else
+		template_id="$(cat "$WORK/template-id" 2>/dev/null || true)"
+		[[ -n "$template_id" ]] || die "no template id at $WORK/template-id (run up first; template_up stores it there)"
+	fi
 	export OPENSANDBOX_TEST_FSB_TEMPLATE_ID="$template_id"
 	export OPENSANDBOX_TEST_DOMAIN="127.0.0.1:$SERVER_HOST_PORT"
 	export OPENSANDBOX_TEST_PROTOCOL="http"
@@ -2857,8 +2868,9 @@ down() {
 	# A stale profile marker would let idle-e2e run against a stack whose
 	# Redis/sweeper are gone.
 	rm -f "$WORK/idle-pause"
-	# Same stale-marker risk: sdk-e2e reads $WORK/overlaybd-template-id, and
-	# its producer (template_up_overlaybd) only runs in verify-overlaybd.
+	# Same stale-marker risk: sdk-e2e and idle-e2e read
+	# $WORK/overlaybd-template-id, and their producer (template_up_overlaybd)
+	# only runs in verify-overlaybd.
 	rm -f "$WORK/overlaybd-template-id"
 	# RustFS data is owned by UID/GID 10001; leftovers pollute the host and
 	# later docker build contexts.

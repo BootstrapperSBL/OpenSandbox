@@ -89,7 +89,7 @@ jobs:
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh verify-overlaybd
 
       - name: Run base SDK e2e
-        # Runs once per template (native + overlaybd).
+        # Runs on the overlaybd template (native only under OCI_STACK=0).
         timeout-minutes: 60
         run: sudo -E env "PATH=$PATH" ./scripts/fast-sandbox-env/integration-env.sh sdk-e2e
 
