@@ -177,10 +177,8 @@ func TestTmpFiles_MountOnTmpServedByFilesAPI(t *testing.T) {
 	assert.Equal(t, "mount-tmp\n", string(data))
 }
 
-// TestTmpFiles_SymlinkEscapeConfined: /tmp is attacker-controlled, so a
-// symlink planted by the workload must not redirect a files-API write (or
-// read) outside the session's backing dir. The confined view rejects the
-// traversal where the trusted bind view would have followed it.
+// TestTmpFiles_SymlinkEscapeConfined: a workload-planted symlink must not
+// redirect files-API reads or writes outside the session's backing dir.
 func TestTmpFiles_SymlinkEscapeConfined(t *testing.T) {
 	r, upperRoot := newStrictRunner(t)
 	id := strictSession(t, r)
@@ -211,9 +209,8 @@ func TestTmpFiles_SymlinkEscapeConfined(t *testing.T) {
 	assert.Equal(t, "local\n", string(data))
 }
 
-// TestTmpFiles_MountRootRemovalRejected: deleting /tmp itself would unlink
-// the host backing dir under the live bind, so the files API rejects it
-// while child removal keeps working.
+// TestTmpFiles_MountRootRemovalRejected: removing /tmp itself would unlink
+// the backing dir under the live bind; child removal keeps working.
 func TestTmpFiles_MountRootRemovalRejected(t *testing.T) {
 	r, _ := newStrictRunner(t)
 	id := strictSession(t, r)
@@ -232,9 +229,8 @@ func TestTmpFiles_MountRootRemovalRejected(t *testing.T) {
 	require.NoError(t, mv.Remove("/tmp/keep.txt"), "child removal must keep working")
 }
 
-// TestTmpFiles_UIDSwitchedSessionCanWrite: the backing dir is world-writable
-// + sticky, restoring the --tmpfs /tmp semantics for setpriv sessions that
-// drop to a non-root uid.
+// TestTmpFiles_UIDSwitchedSessionCanWrite: the 01777 backing dir restores
+// the --tmpfs /tmp semantics for sessions dropping to a non-root uid.
 func TestTmpFiles_UIDSwitchedSessionCanWrite(t *testing.T) {
 	r, _ := newStrictRunner(t)
 

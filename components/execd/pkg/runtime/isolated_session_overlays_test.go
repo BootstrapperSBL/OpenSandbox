@@ -511,10 +511,8 @@ func TestNewMergedView_MultiOverlayRouting(t *testing.T) {
 }
 
 // TestCreateIsolatedSession_ExtraWritableOnTmpRejected: an extra_writable
-// path at or under /tmp shadows the hosted private /tmp inside the
-// namespace (bwrap applies extra binds after the /tmp bind) while the files
-// view would keep serving the backing dir, so create must reject the
-// overlap for hosted sessions only.
+// under /tmp shadows the hosted /tmp in the namespace while the files view
+// keeps serving the backing dir, so hosted sessions must reject the overlap.
 func TestCreateIsolatedSession_ExtraWritableOnTmpRejected(t *testing.T) {
 	allowTmp := func(r *IsolatedRunner) {
 		r.allowedWritable = []string{"/tmp"}

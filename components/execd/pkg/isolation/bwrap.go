@@ -61,9 +61,8 @@ func buildArgvWithLifecycle(
 	// 2. Root filesystem (read-only).
 	argv = append(argv, "--ro-bind", "/", "/")
 
-	// 3. /tmp — the session-private host-backed bind when the runner
-	// provisioned a backing dir, else the profile default. Skipped if an
-	// overlay mounts over /tmp (its mount would override).
+	// 3. /tmp — the session-private host bind when TmpDir is set, else the
+	// profile segment. Skipped when an overlay covers /tmp.
 	if !OverlaysCoverPath(opts.Overlays, "/tmp") {
 		if opts.TmpDir != "" {
 			argv = append(argv, "--bind", opts.TmpDir, "/tmp")
@@ -81,13 +80,10 @@ func buildArgvWithLifecycle(
 	}
 	argv = append(argv, ovArgv...)
 
-	// Hide upper roots to prevent cross-session access. Overlay pairs live
-	// under <upper_root>/<session_id>/upper and the hosted /tmp backing dir
-	// under <upper_root>/<session_id>/tmp, so Dir(Dir(child)) derives the
-	// operator-configured upper root for both; dedupe keeps arbitrary
-	// caller-supplied directories safe too. Without the hiding tmpfs, the
-	// unconditional ro-bind of / below would expose every other session's
-	// /tmp backing dir and overlay uppers inside this namespace.
+	// Hide upper roots: Dir(Dir(upper|tmpDir)) derives the operator's upper
+	// root for both overlay pairs and the /tmp backing dir. Without this,
+	// the ro-bind of / below would expose other sessions' host state
+	// in-namespace. Dedupe keeps arbitrary caller-supplied dirs safe.
 	hideRoots := distinctUpperRoots(opts.Overlays)
 	if opts.TmpDir != "" {
 		root := filepath.Dir(filepath.Dir(opts.TmpDir))
@@ -258,9 +254,8 @@ func validateWrapOptions(opts WrapOptions) error {
 		if !filepath.IsAbs(opts.TmpDir) {
 			return fmt.Errorf("isolation: tmp dir %q must be an absolute path", opts.TmpDir)
 		}
-		// The hiding tmpfs derives the upper root as Dir(Dir(TmpDir)); a
-		// shallower path would derive "/" and brick the namespace, the
-		// same rule validateUpperDirs enforces for overlay upperdirs.
+		// The hide root is Dir(Dir(TmpDir)); shallower paths would derive
+		// "/" and brick the namespace (same rule as validateUpperDirs).
 		if pathDepth(opts.TmpDir) < 3 {
 			return fmt.Errorf(
 				"isolation: tmp dir %q must live under an upper root (<root>/<session>/tmp)",
@@ -286,8 +281,7 @@ func validateOverlaySpecs(overlays []OverlaySpec, extraHideRoot string) error {
 	// The upper-root hiding tmpfs is emitted after the overlay segments, so
 	// an overlay destination under a derived upper root would be silently
 	// shadowed — a dead mount whose writes never surface. Fail fast instead.
-	// extraHideRoot is the /tmp backing dir's derived root, hidden the same
-	// way for sessions without persistent overlay uppers.
+	// extraHideRoot is the /tmp backing dir's derived root, hidden likewise.
 	hideRoots := distinctUpperRoots(overlays)
 	if extraHideRoot != "" {
 		hideRoots = append(hideRoots, extraHideRoot)
@@ -377,10 +371,8 @@ func validateBinds(binds []BindMount) error {
 		if b.Dest != "" && !filepath.IsAbs(b.Dest) {
 			return fmt.Errorf("isolation: bind.dest %q must be an absolute path", b.Dest)
 		}
-		// A dest of / is applied after every earlier mount (tmp segment,
-		// overlays, extra writable) and shadows the whole namespace root,
-		// while longest-prefix consumers (the files view) would keep
-		// serving the deeper mounts. Reject instead of diverging.
+		// Dest / shadows every earlier mount in the namespace while the
+		// files view keeps serving them — reject the divergence.
 		if filepath.Clean(b.Dest) == "/" {
 			return fmt.Errorf(`isolation: bind.dest "/" would shadow the namespace root`)
 		}

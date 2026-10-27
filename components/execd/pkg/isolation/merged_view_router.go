@@ -226,11 +226,8 @@ func (m *MultiMergedView) RemoveAll(path string) error {
 	return rt.fs.RemoveAll(p)
 }
 
-// rejectMountRootRemoval mirrors namespace mountpoint semantics: rm cannot
-// unlink a mount point. Rewritten-root routes (caller binds, the hosted
-// /tmp) would otherwise let a files-API removal unlink the host backing
-// directory while the live mount keeps serving the unlinked inode, after
-// which a recreated directory and the namespace would silently diverge.
+// rejectMountRootRemoval mirrors mountpoint semantics: a bind-style mount
+// root (caller bind, hosted /tmp) must not be unlinked under a live mount.
 // Overlay views keep their historical behavior.
 func rejectMountRootRemoval(rt *overlayRoute, path string) error {
 	if rt.root != "" && rt.root != rt.prefix && filepath.Clean(path) == rt.prefix {

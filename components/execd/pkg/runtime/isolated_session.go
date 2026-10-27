@@ -131,10 +131,9 @@ type isolatedSession struct {
 	doneCh               chan struct{} // closed after process wait and lifecycle drain
 	lifecycleMonitorDone chan struct{} // closed after drain-failure monitor exits
 	upperID              string        // key in UpperManager, used for Release/Remove
-	// tmpDir is the host directory backing the namespace /tmp bind (strict
-	// profile, no overlay covering /tmp). Empty keeps the profile's /tmp
-	// segment; when set, the files view serves /tmp from it. Immutable
-	// after allocation.
+	// tmpDir is the host dir backing the namespace /tmp bind (strict
+	// profile); empty when /tmp is not hosted. Served by the files view.
+	// Immutable after allocation.
 	tmpDir    string
 	overlays  []sessionOverlay
 	createdAt time.Time
@@ -198,9 +197,8 @@ func (s *isolatedSession) start() error {
 	wrapOpts := isolation.WrapOptions{
 		ExtraWritable: s.opts.ExtraWritable,
 		Binds:         s.opts.Binds,
-		// Empty for balanced sessions and sessions whose overlays cover
-		// /tmp: allocation only sets tmpDir for the hosted-private-/tmp
-		// shape, and bwrap falls back to the profile segment on empty.
+		// Empty when /tmp is not hosted; bwrap falls back to the profile
+		// segment.
 		TmpDir:   s.tmpDir,
 		ShareNet: true,
 	}

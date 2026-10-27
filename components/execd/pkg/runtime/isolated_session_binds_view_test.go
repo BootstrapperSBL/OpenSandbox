@@ -591,10 +591,9 @@ func TestNewMergedView_BindOnTmpShadowsTmpBind(t *testing.T) {
 	}
 }
 
-// TestNewMergedView_TmpMountRootRemovalRejected: the hosted /tmp view is a
-// bind-style mount; removing the mount root itself would unlink the host
-// backing dir while the namespace keeps the mount, so the router rejects it
-// while child removal keeps working.
+// TestNewMergedView_TmpMountRootRemovalRejected: removing the /tmp mount
+// root would unlink the host backing dir under the live mount; the router
+// rejects it while child removal keeps working.
 func TestNewMergedView_TmpMountRootRemovalRejected(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {

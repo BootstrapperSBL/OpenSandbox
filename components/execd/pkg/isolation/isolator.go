@@ -155,11 +155,9 @@ type WrapOptions struct {
 	Overlays      []OverlaySpec
 	ExtraWritable []string
 	Binds         []BindMount
-	// TmpDir is an absolute host directory bound to the namespace /tmp,
-	// replacing the profile's /tmp segment. It is the session-private /tmp
-	// backing directory under the session's upper-root subtree, so the
-	// files API can serve the same content run sees. Empty keeps the
-	// profile default (strict: private tmpfs, balanced: shared bind).
+	// TmpDir is the session-private /tmp backing dir (absolute host path),
+	// bound to the namespace /tmp in place of the profile's segment. Empty
+	// keeps the profile default.
 	TmpDir         string
 	ShareNet       bool
 	EnvPassthrough EnvSpec

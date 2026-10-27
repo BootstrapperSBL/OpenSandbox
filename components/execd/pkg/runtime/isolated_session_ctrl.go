@@ -460,8 +460,8 @@ func sessionTmpBindHosted(session *isolatedSession) bool {
 	return optsTmpBindHosted(session.opts, session.overlays)
 }
 
-// optsTmpBindHosted is the options-level form of sessionTmpBindHosted,
-// usable during create validation before the session exists.
+// optsTmpBindHosted is the options-level form of sessionTmpBindHosted for
+// create-time validation, before the session exists.
 func optsTmpBindHosted(opts *IsolatedSessionOptions, overlays []sessionOverlay) bool {
 	switch isolation.Profile(opts.Profile) {
 	case isolation.ProfileStrict, "":
@@ -476,10 +476,9 @@ func optsTmpBindHosted(opts *IsolatedSessionOptions, overlays []sessionOverlay) 
 }
 
 // allocateSessionUppers assigns host upper/work pairs to a session's
-// persistent overlays. Ephemeral overlays use the bwrap tmpfs upper and need
-// no allocation, but every session still gets an upper-root subtree: it
-// holds the /tmp backing directory and the durable cleanup record that makes
-// teardown crash-safe.
+// persistent overlays. Ephemeral overlays need no pairs, but every session
+// still gets an upper-root subtree: it holds the /tmp backing dir and the
+// durable cleanup record that makes teardown crash-safe.
 func (r *IsolatedRunner) allocateSessionUppers(session *isolatedSession) error {
 	persistCount := 0
 	for _, ov := range session.overlays {
@@ -1081,15 +1080,11 @@ func newMergedView(s *isolatedSession) vfs.FS {
 		}
 	}
 
-	// The strict profile's private /tmp is the session's host-backed bind
-	// under its upper-root subtree; serve it so files and run share one
-	// /tmp view. Appending it last is safe: no overlay shares the /tmp
-	// destination (guarded at allocation), deeper overlay prefixes win by
-	// length, and binds registered earlier keep the equal-prefix tie
-	// against a caller bind on /tmp — mirroring bwrap's argv shadow order.
-	// The view is root-confined (os.Root): /tmp is attacker-controlled, so
-	// a symlink planted by the workload must not redirect a files-API write
-	// outside the session's backing dir the way the trusted-bind view would.
+	// The hosted /tmp view is appended last, which is safe: no overlay
+	// shares the /tmp destination, deeper prefixes win by length, and binds
+	// registered earlier keep the equal-prefix tie — mirroring bwrap's argv
+	// shadow order. The view is root-confined (os.Root): /tmp is attacker-
+	// controlled, so planted symlinks must not redirect files-API writes.
 	if s.tmpDir != "" {
 		views = append(views, isolation.OverlayView{
 			Path: "/tmp",
@@ -1307,13 +1302,11 @@ func validateNormalizedCreate(opts *IsolatedSessionOptions) error {
 	if err := validateBindMountStack(opts.Overlays, opts.ExtraWritable, opts.Binds); err != nil {
 		return err
 	}
-	// A hosted private /tmp is mounted before extra_writable binds, so an
-	// extra_writable path at or under /tmp shadows it inside the namespace —
-	// but extra_writable mounts are not registered as files views, so the
-	// files API would still serve the backing dir. Reject the overlap.
-	// validateExtraWritable has already rewritten the paths to their
-	// symlink-resolved form, so /tmp's resolved prefix is matched too
-	// (darwin's /tmp -> /private/tmp).
+	// A hosted /tmp is mounted before extra_writable binds, which are not
+	// files views, so an extra_writable at or under /tmp would make run and
+	// files see different directories. validateExtraWritable has already
+	// rewritten paths to symlink-resolved form, so /tmp's resolved prefix
+	// is matched too (darwin's /tmp -> /private/tmp).
 	if optsTmpBindHosted(opts, overlays) {
 		tmpPrefixes := []string{"/tmp"}
 		if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil && resolved != "/tmp" {

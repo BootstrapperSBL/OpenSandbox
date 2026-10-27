@@ -27,20 +27,14 @@ import (
 )
 
 // ConfinedView serves an attacker-controlled session directory (the hosted
-// private /tmp) through os.Root: every operation is resolved beneath the
-// view root, and symlinks may never escape it (absolute or root-crossing
-// link targets are rejected). Unlike BindView — whose source is an
-// operator-allowlisted trusted directory and which therefore follows
-// symlinks exactly as the namespace does — the /tmp backing dir is written
-// by the workload, so a symlink planted there (for example
-// /tmp/p -> /etc/passwd) must not turn a files-API write into a host write
-// outside the session's own subtree. Divergence note: os.Root also rejects
-// ABSOLUTE link targets that stay inside the root, where the namespace
-// would follow them; workloads' relative links behave identically in both
-// views.
+// private /tmp) through os.Root: operations stay beneath the root and
+// symlink escapes are rejected — including absolute link targets, which the
+// namespace would follow. BindView's source is operator-allowlisted and
+// trusted to mirror the namespace; this directory is written by the
+// workload, so a planted symlink (e.g. /tmp/p -> /etc/passwd) must not
+// redirect a files-API write onto the host.
 //
-// The kernel-backed confinement requires openat2 (Linux 5.6+); on older
-// kernels os.OpenRoot fails and the files API surfaces that error.
+// Requires openat2 (Linux 5.6+); os.OpenRoot fails on older kernels.
 //
 // Compile-time check: ConfinedView satisfies vfs.FS.
 var _ vfs.FS = (*ConfinedView)(nil)
@@ -58,10 +52,8 @@ func NewConfinedView(root string, uid, gid uint32) *ConfinedView {
 	return &ConfinedView{Root: root, Uid: uid, Gid: gid}
 }
 
-// rel converts a namespace-or-host path into a root-relative name. The
-// router forwards absolute host paths (the OverlayView root rewrite), but
-// namespace-space paths are accepted too so direct construction behaves
-// like BindView's dual-prefix resolution.
+// rel converts a namespace-or-host path to a root-relative name; the router
+// forwards host paths after its OverlayView root rewrite.
 func (c *ConfinedView) rel(path string) (string, error) {
 	cleaned := filepath.Clean(path)
 	switch {
@@ -272,10 +264,9 @@ func (c *ConfinedView) Open(path string) (*os.File, error) {
 	return root.Open(name)
 }
 
-// Search walks the confined tree (symlink escape attempts surface as walk
-// errors and are skipped) and returns paths relative to the root, matching
-// BindView.Search's convention; the router rebases rewritten-route results
-// onto the namespace mount path.
+// Search walks the confined tree (escaping symlinks surface as walk errors
+// and are skipped) and returns root-relative paths; the router rebases
+// rewritten-route results onto the namespace mount path.
 func (c *ConfinedView) Search(rootPath, pattern string) ([]string, error) {
 	base, err := c.rel(rootPath)
 	if err != nil {

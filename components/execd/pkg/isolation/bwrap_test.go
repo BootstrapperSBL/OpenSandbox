@@ -951,9 +951,8 @@ func indexOf(items []string, s string) int {
 
 func TestBuildArgv_TmpDirHiding(t *testing.T) {
 	t.Run("pairless_session_hides_derived_upper_root", func(t *testing.T) {
-		// A session whose /tmp is host-backed but that holds no persistent
-		// overlay uppers must still hide the derived upper root: without
-		// the tmpfs, the ro-bind of / exposes every session's backing dir.
+		// Pair-less sessions host /tmp without overlay uppers; the derived
+		// root must still be hidden or ro-bind / leaks other sessions' dirs.
 		opts := basicWrapOpts()
 		opts.Overlays = []OverlaySpec{{Path: "/workspace", Mode: WorkspaceRW}}
 		opts.TmpDir = "/var/lib/execd/isolation/abc/tmp"

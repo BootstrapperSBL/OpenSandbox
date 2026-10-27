@@ -30,9 +30,7 @@ import (
 
 const cleanupRegistryName = ".execd-cleanup"
 
-// tmpDirName is the per-session directory backing the namespace /tmp bind
-// (strict profile). It lives inside the session subtree, so session
-// teardown removes it with everything else.
+// tmpDirName is the per-session directory backing the namespace /tmp bind.
 const tmpDirName = "tmp"
 
 // UpperManager manages upper directories for overlay workspaces.
@@ -162,11 +160,9 @@ func (m *UpperManager) TmpDir(sessionID string) string {
 	return filepath.Join(m.root, sessionID, tmpDirName)
 }
 
-// allocateTmpDir creates the session's /tmp backing directory with real
-// /tmp semantics: world-writable + sticky, so uid-switched setpriv sessions
-// can create entries after the workload gate drops credentials (the old
-// --tmpfs /tmp was kernel-mounted world-writable too). Chmod is explicit
-// because a restrictive umask would strip the write bits from MkdirAll.
+// allocateTmpDir creates the /tmp backing dir 01777 so uid-switched
+// setpriv sessions keep the old --tmpfs write semantics; the explicit
+// Chmod survives a restrictive umask.
 func allocateTmpDir(sessionDir string) error {
 	tmpDir := filepath.Join(sessionDir, tmpDirName)
 	if err := os.MkdirAll(tmpDir, 0o777); err != nil {
@@ -357,8 +353,7 @@ func (m *UpperManager) Usage() (int64, error) {
 // usageLocked calculates usage without acquiring the mutex. Caller must hold m.mu.
 // Missing released upper directories are tolerated as cleanup residue. A missing
 // in-use upper makes the measurement invalid instead of reporting false zero.
-// Each entry's /tmp backing dir counts toward usage too, so the maxBytes
-// admission gate bounds /tmp growth like overlay uppers.
+// The /tmp backing dir counts toward usage so maxBytes bounds its growth.
 func (m *UpperManager) usageLocked() (int64, error) {
 	var total int64
 	for _, e := range m.entries {
