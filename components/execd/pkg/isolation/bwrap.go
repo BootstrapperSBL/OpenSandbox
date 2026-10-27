@@ -80,25 +80,9 @@ func buildArgvWithLifecycle(
 	}
 	argv = append(argv, ovArgv...)
 
-	// Hide upper roots: Dir(Dir(upper|tmpDir)) derives the operator's upper
-	// root for both overlay pairs and the /tmp backing dir. Without this,
-	// the ro-bind of / below would expose other sessions' host state
-	// in-namespace. Dedupe keeps arbitrary caller-supplied dirs safe.
-	hideRoots := distinctUpperRoots(opts.Overlays)
-	if opts.TmpDir != "" {
-		root := filepath.Dir(filepath.Dir(opts.TmpDir))
-		known := false
-		for _, r := range hideRoots {
-			if r == root {
-				known = true
-				break
-			}
-		}
-		if !known {
-			hideRoots = append(hideRoots, root)
-		}
-	}
-	for _, upperRoot := range hideRoots {
+	// Hide upper roots so the ro-bind of / below cannot expose other
+	// sessions' host state in-namespace.
+	for _, upperRoot := range upperHideRoots(opts.Overlays, opts.TmpDir) {
 		argv = append(argv, "--tmpfs", upperRoot)
 	}
 
@@ -411,6 +395,23 @@ func sortOverlaysShallowFirst(overlays []OverlaySpec) []OverlaySpec {
 		return pathDepth(ordered[i].Path) < pathDepth(ordered[j].Path)
 	})
 	return ordered
+}
+
+// upperHideRoots returns the roots to hide in-namespace: one per overlay
+// upper root plus the /tmp backing dir's derived root, deduped. Dir(Dir(
+// upper|tmpDir)) yields the operator-configured upper root for both.
+func upperHideRoots(overlays []OverlaySpec, tmpDir string) []string {
+	roots := distinctUpperRoots(overlays)
+	if tmpDir == "" {
+		return roots
+	}
+	root := filepath.Dir(filepath.Dir(tmpDir))
+	for _, r := range roots {
+		if r == root {
+			return roots
+		}
+	}
+	return append(roots, root)
 }
 
 // distinctUpperRoots returns one hidden root per distinct upper root

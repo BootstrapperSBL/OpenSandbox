@@ -203,7 +203,7 @@ func TestTmpFiles_SymlinkEscapeConfined(t *testing.T) {
 	assert.Equal(t, "host-secret", string(got), "the host file must be untouched")
 
 	// In-root symlinks keep working, matching the namespace.
-	runInSession(t, r, id, "echo local > /tmp/target.txt && ln -s target.txt /tmp/link", nil)
+	runInSession(t, r, id, "echo local > /tmp/target.txt && ln -s target.txt /tmp/link.txt", nil)
 	data, err := mv.ReadFile("/tmp/link.txt")
 	require.NoError(t, err)
 	assert.Equal(t, "local\n", string(data))

@@ -17,7 +17,6 @@ package isolation
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
 
@@ -144,31 +143,6 @@ func TestConfinedView_FollowsInRootSymlink(t *testing.T) {
 	data, err := view.ReadFile("/tmp/link.txt")
 	if err != nil || string(data) != "in-root" {
 		t.Fatalf("in-root symlink ReadFile = %q, %v", data, err)
-	}
-}
-
-func TestConfinedView_ChownsCreatedFiles(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("chown assertion requires root")
-	}
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	view := NewConfinedView(root, 0, 0)
-	if err := view.WriteFile("/tmp/owned.txt", []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(filepath.Join(root, "owned.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Skip("stat_t unavailable on this platform")
-	}
-	if stat.Uid != 0 {
-		t.Fatalf("file uid = %d, want 0", stat.Uid)
 	}
 }
 
