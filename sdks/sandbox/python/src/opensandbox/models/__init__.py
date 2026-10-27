@@ -19,7 +19,7 @@ OpenSandbox data models.
 Core Pydantic models for sandbox operations.
 """
 
-from opensandbox.models.diagnostics import DiagnosticContent
+from opensandbox.models.diagnostics import DiagnosticContent, DiagnosticContext
 from opensandbox.models.execd import (
     CommandLogs,
     CommandStatus,
@@ -81,6 +81,7 @@ from opensandbox.models.sandboxes import (
     PaginationInfo,
     PeriodicLifecycleHook,
     PlatformSpec,
+    RenewalPolicy,
     SandboxAllocation,
     SandboxCreateResponse,
     SandboxEndpoint,
@@ -98,6 +99,7 @@ from opensandbox.models.sandboxes import (
 __all__ = [
     # Execution models
     "DiagnosticContent",
+    "DiagnosticContext",
     "Execution",
     "ExecutionLogs",
     "OutputMessage",
@@ -142,6 +144,7 @@ __all__ = [
     "SandboxLifecycle",
     "IdlePolicy",
     "ActivityProbe",
+    "RenewalPolicy",
     "Credential",
     "CredentialMatch",
     "CustomHeaderEntry",

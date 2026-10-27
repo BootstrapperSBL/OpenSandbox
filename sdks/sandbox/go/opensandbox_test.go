@@ -609,6 +609,49 @@ func TestGetPolicy(t *testing.T) {
 	}
 }
 
+// TestNetworkRule_PortScopedJSONRoundTrip guards the port-only wire shape:
+// marshaling a rule without a target must omit the key entirely (not send
+// ""), and decoding the sidecar's response shape ("target":"", since Go's
+// sidecar marshals target without omitempty) must not lose Ports.
+func TestNetworkRule_PortScopedJSONRoundTrip(t *testing.T) {
+	data, err := json.Marshal(NetworkRule{Action: "deny", Ports: []int{25}})
+	require.NoError(t, err)
+	require.Equal(t, `{"action":"deny","ports":[25]}`, string(data), "target must be omitted, not sent as an empty string")
+
+	var decoded NetworkRule
+	require.NoError(t, json.Unmarshal([]byte(`{"action":"deny","target":"","ports":[25]}`), &decoded))
+	require.Equal(t, "", decoded.Target)
+	require.Equal(t, []int{25}, decoded.Ports)
+
+	// An IP/CIDR target combined with ports must also round-trip.
+	data, err = json.Marshal(NetworkRule{Action: "allow", Target: "10.0.0.5", Ports: []int{22, 80}})
+	require.NoError(t, err)
+	require.Equal(t, `{"action":"allow","target":"10.0.0.5","ports":[22,80]}`, string(data))
+}
+
+func TestGetPolicy_PortOnlyRule(t *testing.T) {
+	want := PolicyStatusResponse{
+		Status: "active",
+		Policy: &NetworkPolicy{
+			DefaultAction: "deny",
+			Egress: []NetworkRule{
+				{Action: "deny", Target: "", Ports: []int{25}},
+			},
+		},
+	}
+
+	_, client := newEgressServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, http.StatusOK, want)
+	})
+
+	got, err := client.GetPolicy(context.Background())
+	require.NoErrorf(t, err, "GetPolicy")
+	require.NotNil(t, got.Policy)
+	require.Len(t, got.Policy.Egress, 1)
+	require.Equal(t, "", got.Policy.Egress[0].Target, "a port-only rule reads back with an empty target")
+	require.Equal(t, []int{25}, got.Policy.Egress[0].Ports)
+}
+
 func TestPatchPolicy(t *testing.T) {
 	want := PolicyStatusResponse{
 		Status:          "ok",
@@ -2449,6 +2492,96 @@ func TestExecution_ErrorEvent(t *testing.T) {
 	}
 	if len(exec.Error.Traceback) != 1 {
 		assert.Fail(t, fmt.Sprintf("Traceback len = %d, want 1", len(exec.Error.Traceback)))
+	}
+}
+
+func TestExecution_ErrorEventExitCode(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	tests := []struct {
+		name          string
+		data          string
+		wantErrorCode *int
+		wantExitCode  *int
+	}{
+		{
+			name:          "exit_code is authoritative",
+			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"3","traceback":["exit status 3"],"exit_code":3}}`,
+			wantErrorCode: intPtr(3),
+			wantExitCode:  intPtr(3),
+		},
+		{
+			name:          "signal kill reports -1",
+			data:          `{"type":"error","error":{"ename":"CommandExecError","evalue":"-1","traceback":["signal: terminated"],"exit_code":-1}}`,
+			wantErrorCode: intPtr(-1),
+			wantExitCode:  intPtr(-1),
+		},
+		{
+			name: "start failure has no exit code",
+			data: `{"type":"error","error":{"ename":"CommandExecError","evalue":"fork/exec /bin/sh: argument list too long"}}`,
+		},
+		{
+			name:         "older server falls back to evalue",
+			data:         `{"type":"error","error":{"ename":"CommandExecError","evalue":"7"}}`,
+			wantExitCode: intPtr(7),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &Execution{}
+			var handled *ExecutionError
+			handlers := &ExecutionHandlers{
+				OnError: func(e ExecutionError) error { handled = &e; return nil },
+			}
+			require.NoError(t, processStreamEvent(exec, StreamEvent{Event: "error", Data: tc.data}, handlers))
+
+			require.NotNil(t, exec.Error)
+			require.NotNil(t, handled)
+			require.Equal(t, tc.wantErrorCode, exec.Error.ExitCode)
+			require.Equal(t, tc.wantErrorCode, handled.ExitCode)
+			require.Equal(t, tc.wantExitCode, exec.ExitCode)
+			require.True(t, exec.Complete == nil, "error event must not mark the execution complete")
+		})
+	}
+}
+
+func TestExecution_CompleteEventExitCode(t *testing.T) {
+	intPtr := func(v int) *int { return &v }
+	tests := []struct {
+		name              string
+		data              string
+		wantCompleteCode  *int
+		wantExecutionCode *int
+	}{
+		{
+			name:              "wire exit_code is surfaced on complete and execution",
+			data:              `{"type":"execution_complete","timestamp":10,"execution_time":5,"exit_code":0}`,
+			wantCompleteCode:  intPtr(0),
+			wantExecutionCode: intPtr(0),
+		},
+		{
+			name:              "older server without exit_code still infers zero",
+			data:              `{"type":"execution_complete","timestamp":10,"execution_time":5}`,
+			wantCompleteCode:  nil,
+			wantExecutionCode: intPtr(0),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			exec := &Execution{}
+			var handled *ExecutionComplete
+			handlers := &ExecutionHandlers{
+				OnComplete: func(c ExecutionComplete) error { handled = &c; return nil },
+			}
+			require.NoError(t, processStreamEvent(exec, StreamEvent{Event: "execution_complete", Data: tc.data}, handlers))
+
+			require.NotNil(t, exec.Complete)
+			require.NotNil(t, handled)
+			require.Equal(t, tc.wantCompleteCode, exec.Complete.ExitCode)
+			require.Equal(t, tc.wantCompleteCode, handled.ExitCode)
+			require.Equal(t, tc.wantExecutionCode, exec.ExitCode)
+		})
 	}
 }
 

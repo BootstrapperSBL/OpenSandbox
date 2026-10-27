@@ -14,6 +14,7 @@
 
 import {DEFAULT_USER_AGENT} from "../core/constants.js";
 import {ensureClientIpReady, withClientIp} from "./clientIp.js";
+import {createWakeRetryFetch, type WakeRetryOptions} from "./wakeRetry.js";
 
 export type ConnectionProtocol = "http" | "https";
 
@@ -90,6 +91,25 @@ export interface ConnectionConfigOptions {
    * Off by default.
    */
   enableTracing?: boolean;
+  /**
+   * Auto-retry gateway wake-timeout responses (OSEP-0024): a 503 carrying the
+   * `OpenSandbox-Wake: expired` marker proves the request was never
+   * forwarded, so the original request is resent for any method after
+   * waiting per `Retry-After` — provided the body is replayable. On by
+   * default; bare 503 responses are never affected.
+   */
+  wakeRetryEnabled?: boolean;
+  /**
+   * Maximum wake-timeout responses consumed before the wake retry gives up
+   * and throws {@link SandboxWakeTimeoutException}. Default: 5.
+   */
+  wakeMaxAttempts?: number;
+  /**
+   * Wall-clock cap in seconds spanning all wake cycles of one logical
+   * request (waits, retries, and request time). Set to `null` to remove the
+   * time bound (the attempt count still applies). Default: 60.
+   */
+  wakeOverallDeadlineSeconds?: number | null;
 }
 
 function isNodeRuntime(): boolean {
@@ -286,13 +306,11 @@ function createTimedFetch(opts: {
           )
         : undefined;
 
-    const onAbort = () =>
-      ac.abort((requestSignal as any)?.reason ?? new Error("Aborted"));
-    if (requestSignal) {
-      if (requestSignal.aborted) onAbort();
-      else
-        requestSignal.addEventListener("abort", onAbort, { once: true } as any);
-    }
+    // Caller cancellation covers the response body too; only the SDK's
+    // response-header deadline is cleared when fetch resolves.
+    const signal = requestSignal
+      ? AbortSignal.any([requestSignal, ac.signal])
+      : ac.signal;
 
     // Best-effort: attach the SDK host's own IP so the server can see the
     // client's self-reported address. Applied per request (never overriding a
@@ -315,7 +333,7 @@ function createTimedFetch(opts: {
     }
     const mergedInit: RequestInit = {
       ...(effectiveInit ?? {}),
-      signal: ac.signal,
+      signal,
     };
 
     if (debug) {
@@ -350,8 +368,6 @@ function createTimedFetch(opts: {
       return res;
     } finally {
       if (t) clearTimeout(t);
-      if (requestSignal)
-        requestSignal.removeEventListener("abort", onAbort as any);
     }
   };
 }
@@ -376,6 +392,7 @@ export class ConnectionConfig {
   readonly endpointCacheDisabled: boolean;
   readonly disableMetrics: boolean;
   readonly enableTracing: boolean;
+  readonly wakeRetry: WakeRetryOptions;
   private _closeTransport: () => Promise<void>;
   private _closePromise: Promise<void> | null = null;
   private _transportInitialized = false;
@@ -413,9 +430,28 @@ export class ConnectionConfig {
     this.disableMetrics = !!opts.disableMetrics;
     this.enableTracing = !!opts.enableTracing;
 
+    const wakeEnabled = opts.wakeRetryEnabled ?? true;
+    const wakeMaxAttempts = opts.wakeMaxAttempts ?? 5;
+    if (!Number.isInteger(wakeMaxAttempts) || wakeMaxAttempts < 1) {
+      throw new Error(`wakeMaxAttempts must be an integer >= 1, got ${String(opts.wakeMaxAttempts)}`);
+    }
+    const wakeDeadline = opts.wakeOverallDeadlineSeconds === undefined
+      ? 60
+      : opts.wakeOverallDeadlineSeconds;
+    if (wakeDeadline !== null && (!Number.isFinite(wakeDeadline) || wakeDeadline <= 0)) {
+      throw new Error(
+        `wakeOverallDeadlineSeconds must be a positive number or null, got ${String(opts.wakeOverallDeadlineSeconds)}`
+      );
+    }
+    this.wakeRetry = {
+      enabled: wakeEnabled,
+      maxAttempts: wakeMaxAttempts,
+      overallDeadlineSeconds: wakeDeadline,
+    };
+
     const headers: Record<string, string> = { ...(opts.headers ?? {}) };
     // Attach API key via header unless the user already provided one.
-    if (this.apiKey && !headers["OPEN-SANDBOX-API-KEY"]) {
+    if (this.apiKey && !Object.keys(headers).some((name) => name.toLowerCase() === "open-sandbox-api-key")) {
       headers["OPEN-SANDBOX-API-KEY"] = this.apiKey;
     }
     // Best-effort user-agent (Node only).
@@ -484,20 +520,31 @@ export class ConnectionConfig {
           ? requestTimeoutMs
           : 0,
     });
-    this._fetch = createTimedFetch({
+    const timedFetch = createTimedFetch({
       baseFetch,
       timeoutSeconds: this.requestTimeoutSeconds,
       debug: this.debug,
       defaultHeaders: this.headers,
       label: "http",
     });
-    this._sseFetch = createTimedFetch({
+    const timedSseFetch = createTimedFetch({
       baseFetch,
       timeoutSeconds: 0,
       debug: this.debug,
       defaultHeaders: this.headers,
       label: "sse",
     });
+    // The wake retry wraps the timed fetches so every attempt gets a fresh
+    // response-header timeout while the wake budget spans attempts. The SSE
+    // transport is wrapped too — commands.run() against a paused sandbox must
+    // wake it like any other request; an established stream is never
+    // re-dispatched because only the marked 503 connect replays. The upload
+    // transport stays unwrapped: upload bodies are streams and cannot be
+    // replayed.
+    const wrapWake = (f: typeof fetch): typeof fetch =>
+      this.wakeRetry.enabled ? createWakeRetryFetch({ baseFetch: f, wakeRetry: this.wakeRetry }) : f;
+    this._fetch = wrapWake(timedFetch);
+    this._sseFetch = wrapWake(timedSseFetch);
     this._uploadFetch = createTimedFetch({
       baseFetch: baseUploadFetch,
       timeoutSeconds: 0,
@@ -557,6 +604,9 @@ export class ConnectionConfig {
       endpointCacheDisabled: this.endpointCacheDisabled,
       disableMetrics: this.disableMetrics,
       enableTracing: this.enableTracing,
+      wakeRetryEnabled: this.wakeRetry.enabled,
+      wakeMaxAttempts: this.wakeRetry.maxAttempts,
+      wakeOverallDeadlineSeconds: this.wakeRetry.overallDeadlineSeconds,
       ...overrides,
     });
   }

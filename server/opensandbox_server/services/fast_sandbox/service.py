@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Optional
@@ -62,6 +63,7 @@ from opensandbox_server.middleware.request_id import get_request_id
 from opensandbox_server.services.activity_recorder import ActivityRecorder
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     unsupported_scope_error,
 )
@@ -90,11 +92,10 @@ from opensandbox_server.services.fast_sandbox.cr_reader import (
 )
 from opensandbox_server.services.fast_sandbox.cr_mapping import sandbox_from_cr
 from opensandbox_server.services.fast_sandbox.network_policy import (
-    delete_policy_rules,
-    merge_policy_rules,
     normalized_policy,
-    policy_status,
 )
+from opensandbox_server.services.fast_sandbox import policy_relay
+from opensandbox_server.services.fast_sandbox import vault as vault_relay
 from opensandbox_server.services.templates.template_service import FastSandboxTemplateService
 from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as pb2
 from opensandbox_server.services.fast_sandbox.status_mapping import map_reason, map_state
@@ -107,6 +108,15 @@ from opensandbox_server.services.validators import (
 )
 
 _SUPPORTED_EVENT_SCOPES = ("runtime", "all")
+
+# Fixed shard count for the per-process vault PATCH locks (bounded memory;
+# see FastSandboxService.__init__).
+_VAULT_LOCK_SHARDS = 64
+
+# Same-shard-count locks for the policy PATCH/rule-delete composition
+# (relay GET -> merge -> relay PUT); the revision precondition inside the
+# merged PUT is the cross-replica backstop.
+_POLICY_LOCK_SHARDS = 64
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +145,23 @@ class FastSandboxService(SandboxService, ExtensionService):
         self._cr_reader = SandboxCRReader(self._k8s, k8s_client)
         self._template_service = template_service
         self._activity_recorder: Optional[ActivityRecorder] = None
+        # Fixed-size shard locks serialize the server-side vault PATCH
+        # (relay GET -> merge -> relay PUT) within this process. A fixed map
+        # keeps memory bounded: fsb sandboxes mostly expire through FastPath
+        # instead of going through delete_sandbox, so per-sandbox entries
+        # would leak for the process lifetime. Shard collisions only widen
+        # the serialization scope; the revision precondition inside the
+        # merged PUT stays the cross-replica backstop either way.
+        self._vault_locks = [Lock() for _ in range(_VAULT_LOCK_SHARDS)]
+        self._policy_locks = [Lock() for _ in range(_POLICY_LOCK_SHARDS)]
+
+    def vault_lock(self, sandbox_id: str) -> Lock:
+        """Return the process-local PATCH shard lock for one sandbox."""
+        return self._vault_locks[hash(sandbox_id) % _VAULT_LOCK_SHARDS]
+
+    def policy_lock(self, sandbox_id: str) -> Lock:
+        """Return the process-local policy PATCH shard lock for one sandbox."""
+        return self._policy_locks[hash(sandbox_id) % _POLICY_LOCK_SHARDS]
 
     @property
     def cr_reader(self) -> SandboxCRReader:
@@ -184,7 +211,7 @@ class FastSandboxService(SandboxService, ExtensionService):
                         ),
                     )
                 ),
-                activity_ttl_seconds=self._app_config.idle_pause.activity_ttl_seconds,
+                activity_ttl_seconds=self._app_config.automation.idle_pause.activity_ttl_seconds,
             )
         except ValueError as exc:
             raise HTTPException(
@@ -242,7 +269,7 @@ class FastSandboxService(SandboxService, ExtensionService):
         if self._template_service is None:
             self._template_service = FastSandboxTemplateService(self._app_config)
             # Keep template rows converged even without /templates traffic
-            # (template-mode create resolves against the synced row).
+            # (template-mode create resolves against the watch-converged row).
             self._template_service.start_background_sync()
         return self._template_service
 
@@ -406,12 +433,16 @@ class FastSandboxService(SandboxService, ExtensionService):
 
         namespace = create_request.namespace
         sandbox_id = create_request.request_id
+        sync_started = time.perf_counter()
+        rpc_ms = -1
 
         try:
+            rpc_started = time.perf_counter()
             response = self._fastpath.create_sandbox(
                 create_request,
                 wait_timeout_millis=int(self._k8s.fastpath_wait_ready_seconds * 1000),
             )
+            rpc_ms = int((time.perf_counter() - rpc_started) * 1000)
         except (FastPathInvalidArgument, FastPathConflict, FastPathNotFound) as exc:
             raise self._fastpath_http_error(exc) from exc
         except FastPathError as exc:
@@ -427,6 +458,12 @@ class FastSandboxService(SandboxService, ExtensionService):
             info = response.sandbox
         finally:
             self._cr_reader.invalidate(namespace)
+            logger.info(
+                "fsb create served: sandbox=%s total=%dms fastpath_rpc=%dms",
+                sandbox_id,
+                int((time.perf_counter() - sync_started) * 1000),
+                rpc_ms,
+            )
 
         # Durable intent exists (accepted or recovery-confirmed): restart the
         # idle clock from this transition (OSEP-0024).
@@ -601,6 +638,15 @@ class FastSandboxService(SandboxService, ExtensionService):
 
     # -- diagnostics -------------------------------------------------------
 
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        sandbox = self.get_sandbox(sandbox_id)
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            state=sandbox.status.state,
+            backend_type="fast-sandbox",
+            backend_identifiers={},
+        )
+
     def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         raise self._unsupported("sandbox logs", status.HTTP_501_NOT_IMPLEMENTED)
 
@@ -668,71 +714,54 @@ class FastSandboxService(SandboxService, ExtensionService):
             content=content,
         )
 
+    # -- credential vault (relay; OSEP-0022) -------------------------------
+
+    def create_credential_vault(self, sandbox_id: str, request) -> dict:
+        """Relay POST create-only; the relay response is the sync ack."""
+        return vault_relay.relay_create(self, sandbox_id, request)
+
+    def get_credential_vault(self, sandbox_id: str) -> dict:
+        """Sanitized vault state — values never leave the server."""
+        return vault_relay.relay_get(self, sandbox_id)
+
+    def patch_credential_vault(self, sandbox_id: str, request) -> dict:
+        """Server-side merge commit: relay GET → merge → relay PUT."""
+        return vault_relay.relay_patch(self, sandbox_id, request)
+
+    def delete_credential_vault(self, sandbox_id: str) -> None:
+        """Relay DELETE; the policy is kept."""
+        vault_relay.relay_delete(self, sandbox_id)
+
+    def list_credential_vault_credentials(self, sandbox_id: str) -> dict:
+        return vault_relay.relay_list_credentials(self, sandbox_id)
+
+    def get_credential_vault_credential(self, sandbox_id: str, name: str) -> dict:
+        return vault_relay.relay_get_credential(self, sandbox_id, name)
+
+    def list_credential_vault_bindings(self, sandbox_id: str) -> dict:
+        return vault_relay.relay_list_bindings(self, sandbox_id)
+
+    def get_credential_vault_binding(self, sandbox_id: str, name: str) -> dict:
+        return vault_relay.relay_get_binding(self, sandbox_id, name)
+
     # -- endpoints ---------------------------------------------------------
 
     def get_network_policy(self, sandbox_id: str) -> dict:
-        current = self._cr_reader.get(self._resolve_namespace(), sandbox_id)
-        binding = next(
-            (b for b in current["spec"].get("actionBindings", []) if b["handler"] == "egress"), None
-        )
-        try:
-            raw = binding.get("input") if binding else None
-            if isinstance(raw, str) and not raw.strip():
-                raw = None
-            policy = json.loads(raw) if raw is not None else None
-            if policy is not None:
-                policy = normalized_policy(NetworkPolicy.model_validate(policy))
-        except (ValueError, TypeError, HTTPException) as exc:
-            raise HTTPException(503, detail="Invalid persisted egress binding.") from exc
-        return policy_status(policy)
+        """The recorded policy reflects exactly what the egress enforces."""
+        return policy_relay.relay_get(self, sandbox_id)
 
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
-        return self._commit_network_policy(sandbox_id, normalized_policy(policy))
+        self._reject_network_policy_with_upstream_proxy()
+        return policy_relay.relay_put(self, sandbox_id, normalized_policy(policy))
 
     def patch_network_policy(self, sandbox_id: str, rules: list[NetworkRule]) -> dict:
-        """Merge rules into the persisted egress binding (sidecar PATCH semantics)."""
-        current = self.get_network_policy(sandbox_id)
-        merged = merge_policy_rules(current["policy"], rules)
-        return self._commit_network_policy(sandbox_id, normalized_policy(NetworkPolicy.model_validate(merged)))
+        """Merge rules into the recorded policy (sidecar PATCH semantics)."""
+        self._reject_network_policy_with_upstream_proxy()
+        return policy_relay.relay_patch(self, sandbox_id, rules)
 
     def delete_network_policy_rules(self, sandbox_id: str, targets: list[str]) -> dict:
-        """Remove rules by target from the persisted egress binding (idempotent)."""
-        current = self.get_network_policy(sandbox_id)
-        kept = delete_policy_rules(current["policy"], targets)
-        return self._commit_network_policy(
-            sandbox_id,
-            normalized_policy(NetworkPolicy.model_validate(kept)),
-            guard_upstream_proxy=False,
-        )
-
-    def _commit_network_policy(
-        self, sandbox_id: str, normalized: dict, *, guard_upstream_proxy: bool = True
-    ) -> dict:
-        if guard_upstream_proxy:
-            self._reject_network_policy_with_upstream_proxy()
-        current = self._cr_reader.get(self._resolve_namespace(), sandbox_id)
-        metadata = current["metadata"]
-        bindings = [dict(b) for b in current["spec"].get("actionBindings", [])]
-        replacement = {"handler": "egress", "input": json.dumps(normalized)}
-        for index, binding in enumerate(bindings):
-            if binding["handler"] == "egress":
-                bindings[index] = replacement
-                break
-        else:
-            bindings.append(replacement)
-        try:
-            self._fastpath.replace_action_bindings(
-                metadata["namespace"],
-                sandbox_id,
-                bindings,
-                expected_uid=metadata["uid"],
-                expected_generation=metadata["generation"],
-            )
-        except FastPathError as exc:
-            raise self._fastpath_http_error(exc) from exc
-        finally:
-            self._cr_reader.invalidate(metadata["namespace"])
-        return policy_status(normalized)
+        """Remove rules by target from the recorded policy (idempotent)."""
+        return policy_relay.relay_delete_rules(self, sandbox_id, targets)
 
     def get_endpoint(
         self,

@@ -26,6 +26,8 @@ import { IsolatedSessionsAdapter } from "../adapters/isolatedSessionsAdapter.js"
 import { MetricsAdapter } from "../adapters/metricsAdapter.js";
 import { NetworkPolicyAdapter } from "../adapters/networkPolicyAdapter.js";
 import { SandboxesAdapter } from "../adapters/sandboxesAdapter.js";
+import { DiagnosticsAdapter } from "../adapters/diagnosticsAdapter.js";
+import { createDiagnosticClient } from "../openapi/diagnosticClient.js";
 
 import type {
   AdapterFactory,
@@ -111,7 +113,13 @@ export class DefaultAdapterFactory implements AdapterFactory {
       maxSize: opts.connectionConfig.endpointCacheSize,
       disabled: opts.connectionConfig.endpointCacheDisabled,
     });
-    return { sandboxes };
+    const diagnostics = new DiagnosticsAdapter(createDiagnosticClient({
+      baseUrl: opts.lifecycleBaseUrl,
+      apiKey: opts.connectionConfig.apiKey,
+      headers: opts.connectionConfig.headers,
+      fetch: opts.connectionConfig.fetch,
+    }));
+    return { sandboxes, diagnostics };
   }
 
   createExecdStack(opts: CreateExecdStackOptions): ExecdStack {
@@ -208,8 +216,10 @@ export class DefaultAdapterFactory implements AdapterFactory {
       opts.connectionConfig,
       opts.lifecycleBaseUrl,
     );
+    const networkPolicy = new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId);
     return {
-      egress: new NetworkPolicyAdapter(lifecycleClient, opts.sandboxId),
+      egress: networkPolicy,
+      credentialVault: networkPolicy,
     };
   }
 }

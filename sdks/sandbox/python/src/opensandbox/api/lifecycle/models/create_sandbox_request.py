@@ -74,8 +74,12 @@ class CreateSandboxRequest:
                 Mutually exclusive with `image` and `snapshotId`; in template mode
                 the workload shape is fixed by the template's golden image, so
                 `entrypoint`, `env`, `resourceLimits`, `resourceRequests`,
-                `volumes`, `platform`, `credentialProxy`, `secureAccess` and
+                `volumes`, `platform`, `secureAccess` and
                 lifecycle hooks are rejected (400), and `timeout` is required.
+                `credentialProxy` is accepted and ignored: the vault is not
+                carried at create time — it is configured after creation through
+                the server-routed Credential Vault API
+                (`/sandboxes/{sandboxId}/credential-vault`).
                 `lifecycle.idlePolicy` is allowed: it is control-plane state,
                 not workload shape.
                 The template must belong to the requester's tenant and be
@@ -128,9 +132,9 @@ class CreateSandboxRequest:
                 fields without changing the semantics of existing fields.
 
                 `preStart` and `periodic` are hooks executed inside the sandbox by
-                execd. `idlePolicy` is control-plane policy (OSEP-0024): it tells the
-                server how to treat the sandbox's state machine and never reaches the
-                guest.
+                execd. `idlePolicy` (OSEP-0024) and `renewalPolicy` (OSEP-0009) are
+                control-plane policies: they tell the server how to treat the
+                sandbox's state machine and never reach the guest.
             entrypoint (list[str] | Unset): The command to execute as the sandbox's entry process.
 
                 Required when `image` is provided.
@@ -185,10 +189,17 @@ class CreateSandboxRequest:
                 - **Pass-through**: SDKs and middleware must treat this object as opaque and pass it through transparently.
 
                 **Well-known keys**:
-                - `access.renew.extend.seconds` (optional): Decimal integer string from **300** to **86400** (5 minutes to 24
-                hours inclusive). Opts the sandbox into OSEP-0009 renew-on-access and sets per-renewal extension seconds. Omit
-                to disable. Invalid values are rejected at creation with HTTP 400 (validated on the lifecycle create endpoint
-                via `validate_extensions` in server `src/extensions/validation.py`).
+                - `access.renew.extend.seconds` (**deprecated**): Decimal integer
+                  string from **300** to **86400** (5 minutes to 24 hours
+                  inclusive). Opts the sandbox into OSEP-0009 renew-on-access and
+                  sets per-renewal extension seconds. Omit to disable. Invalid
+                  values are rejected at creation with HTTP 400 (validated on the
+                  lifecycle create endpoint via `validate_extensions` in server
+                  `src/extensions/validation.py`). Superseded by
+                  `lifecycle.renewalPolicy.extendSeconds`: prefer the structured
+                  field in new code. The extensions key remains supported
+                  throughout 1.x and is removed in 2.0; when both are set, their
+                  parsed values must match or creation fails with HTTP 400.
     """
 
     image: ImageSpec | Unset = UNSET

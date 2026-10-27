@@ -76,6 +76,10 @@ def _decode_sse_event_data(data: str) -> EventNode | None:
 
 def _infer_exit_code(execution: Execution) -> int | None:
     if execution.error is not None:
+        # Prefer the authoritative error.exit_code; fall back to parsing evalue
+        # for servers that predate it.
+        if execution.error.exit_code is not None:
+            return execution.error.exit_code
         try:
             return int(execution.error.value)
         except (TypeError, ValueError):

@@ -119,9 +119,12 @@ def sync_detailed(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):
@@ -158,9 +161,12 @@ def sync(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):
@@ -192,9 +198,12 @@ async def asyncio_detailed(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):
@@ -229,9 +238,12 @@ async def asyncio(
     """Replace the complete sandbox network policy
 
      Replaces defaultAction and all rules, rather than merging them. Fsb
-    commits the egress binding through FastPath, preserving unrelated bindings
-    with UID/generation conflict protection. Success does not imply handler
-    convergence. Other backends proxy the sandbox-side egress service.
+    relays the replacement to the egress-held policy record through the
+    FastPath handler relay — the ack means the egress applied it (and, with
+    policy persistence, that it is durable). The create-time binding input
+    is the bootstrap only; runtime changes never rewrite it, and a paused
+    (sealed) sandbox rejects mutations until resume. Other backends proxy
+    the sandbox-side egress service.
 
     Args:
         sandbox_id (str):

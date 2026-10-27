@@ -14,6 +14,8 @@
 
 """Well-known CreateSandboxRequest.extensions keys and workload storage keys."""
 
+# Deprecated: superseded by lifecycle.renewalPolicy (OSEP-0009); the request
+# entry ends in 2.0, the metadata key stays. See #2289.
 ACCESS_RENEW_EXTEND_SECONDS_KEY = "access.renew.extend.seconds"
 ACCESS_RENEW_EXTEND_SECONDS_METADATA_KEY = "opensandbox.io/access-renew-extend-seconds"
 

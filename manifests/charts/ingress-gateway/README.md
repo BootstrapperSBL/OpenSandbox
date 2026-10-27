@@ -1,6 +1,6 @@
 # ingress-gateway
 
-![Version: 1.1.1](https://img.shields.io/badge/Version-1.1.1-informational?style=flat-square) ![AppVersion: 1.1.1](https://img.shields.io/badge/AppVersion-1.1.1-informational?style=flat-square)
+![Version: 1.2.0-rc.2](https://img.shields.io/badge/Version-1.2.0--rc.2-informational?style=flat-square) ![AppVersion: 1.2.0-rc.2](https://img.shields.io/badge/AppVersion-1.2.0--rc.2-informational?style=flat-square)
 
 Helm chart for deploying the OpenSandbox ingress gateway (components/ingress)
 
@@ -26,6 +26,10 @@ Kubernetes: `>=1.21.1-0`
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | fullnameOverride | string | `"opensandbox-ingress-gateway"` | Resource names and app.kubernetes.io/name are fixed to this value, independent of release name (keeps names stable across releases). |
+| gateway.activity.enabled | bool | `false` | Enable activity recording. |
+| gateway.activity.minInterval | string | `"5s"` | Min interval between activity writes for the same sandbox. |
+| gateway.activity.redisDsn | string | `"redis://127.0.0.1:6379/0"` | Redis DSN; must match the server's [automation.idle_pause] redis.dsn. |
+| gateway.activity.ttlSeconds | int | `1800` | TTL for activity keys; keep equal to the server's activity_ttl_seconds. |
 | gateway.affinity | object | `{}` | Affinity for the gateway pod. |
 | gateway.containerSecurityContext | object | `{}` | Container-level security context for the gateway container. |
 | gateway.dataplaneNamespace | string | `"opensandbox"` | Namespace where the gateway dataplane workloads run. |

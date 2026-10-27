@@ -24,6 +24,7 @@
  */
 
 export { createLifecycleClient } from "./openapi/lifecycleClient.js";
+export { createDiagnosticClient } from "./openapi/diagnosticClient.js";
 export type { LifecycleClient } from "./openapi/lifecycleClient.js";
 export { createExecdClient } from "./openapi/execdClient.js";
 export type { ExecdClient } from "./openapi/execdClient.js";
@@ -70,3 +71,17 @@ export {
   _restartDetectionForTest,
   _resetClientIpCacheForTest,
 } from "./config/clientIp.js";
+
+// Wake retry contract (OSEP-0024) helpers (advanced/testing).
+export {
+  createWakeRetryFetch,
+  parseRetryAfterMs,
+  resolveWakeRetryAfterMs,
+  isWakeTimeoutResponse,
+  WAKE_MARKER_HEADER,
+  WAKE_MARKER_VALUE,
+  WAKE_DEFAULT_RETRY_AFTER_MS,
+  RETRY_AFTER_CAP_MS,
+} from "./config/wakeRetry.js";
+export { validateIdlePolicy } from "./internal/idlePolicy.js";
+export { validateRenewalPolicy } from "./internal/renewalPolicy.js";
