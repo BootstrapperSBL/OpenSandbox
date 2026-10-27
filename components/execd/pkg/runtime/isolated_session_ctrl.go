@@ -457,13 +457,19 @@ func (r *IsolatedRunner) CreateIsolatedSession(opts *IsolatedSessionOptions) (st
 // (the default) with no overlay covering /tmp. Only that shape hosts /tmp
 // on the host side, so only it can be served by the files view.
 func sessionTmpBindHosted(session *isolatedSession) bool {
-	switch isolation.Profile(session.opts.Profile) {
+	return optsTmpBindHosted(session.opts, session.overlays)
+}
+
+// optsTmpBindHosted is the options-level form of sessionTmpBindHosted,
+// usable during create validation before the session exists.
+func optsTmpBindHosted(opts *IsolatedSessionOptions, overlays []sessionOverlay) bool {
+	switch isolation.Profile(opts.Profile) {
 	case isolation.ProfileStrict, "":
 	default:
 		return false
 	}
-	specs := make([]isolation.OverlaySpec, 0, len(session.overlays))
-	for _, ov := range session.overlays {
+	specs := make([]isolation.OverlaySpec, 0, len(overlays))
+	for _, ov := range overlays {
 		specs = append(specs, isolation.OverlaySpec{Path: ov.path, Mode: ov.mode})
 	}
 	return !isolation.OverlaysCoverPath(specs, "/tmp")
@@ -1081,11 +1087,14 @@ func newMergedView(s *isolatedSession) vfs.FS {
 	// destination (guarded at allocation), deeper overlay prefixes win by
 	// length, and binds registered earlier keep the equal-prefix tie
 	// against a caller bind on /tmp — mirroring bwrap's argv shadow order.
+	// The view is root-confined (os.Root): /tmp is attacker-controlled, so
+	// a symlink planted by the workload must not redirect a files-API write
+	// outside the session's backing dir the way the trusted-bind view would.
 	if s.tmpDir != "" {
 		views = append(views, isolation.OverlayView{
 			Path: "/tmp",
 			Root: s.tmpDir,
-			FS:   isolation.NewBindView(s.tmpDir, false, uid, gid),
+			FS:   isolation.NewConfinedView(s.tmpDir, uid, gid),
 		})
 	}
 
@@ -1290,11 +1299,39 @@ func validateNormalizedCreate(opts *IsolatedSessionOptions) error {
 	if len(opts.Overlays) == 0 {
 		return fmt.Errorf("at least one overlay is required")
 	}
+	overlays := resolveSessionOverlays(opts)
 	// Keep the files view and the namespace in agreement: a bind whose
 	// destination shadows (or is shadowed by) another caller mount would be
 	// served by different host directories through session.run and
 	// session.files, so reject the overlap up front.
-	return validateBindMountStack(opts.Overlays, opts.ExtraWritable, opts.Binds)
+	if err := validateBindMountStack(opts.Overlays, opts.ExtraWritable, opts.Binds); err != nil {
+		return err
+	}
+	// A hosted private /tmp is mounted before extra_writable binds, so an
+	// extra_writable path at or under /tmp shadows it inside the namespace —
+	// but extra_writable mounts are not registered as files views, so the
+	// files API would still serve the backing dir. Reject the overlap.
+	// validateExtraWritable has already rewritten the paths to their
+	// symlink-resolved form, so /tmp's resolved prefix is matched too
+	// (darwin's /tmp -> /private/tmp).
+	if optsTmpBindHosted(opts, overlays) {
+		tmpPrefixes := []string{"/tmp"}
+		if resolved, err := filepath.EvalSymlinks("/tmp"); err == nil && resolved != "/tmp" {
+			tmpPrefixes = append(tmpPrefixes, resolved)
+		}
+		for _, p := range opts.ExtraWritable {
+			cleaned := filepath.Clean(p)
+			for _, prefix := range tmpPrefixes {
+				if cleaned == prefix || strings.HasPrefix(cleaned, prefix+"/") {
+					return fmt.Errorf(
+						"extra_writable %q shadows the session's private /tmp mount; use binds to serve it through the files API too",
+						p,
+					)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // validateBindMountStack rejects bind destinations whose mount-stack

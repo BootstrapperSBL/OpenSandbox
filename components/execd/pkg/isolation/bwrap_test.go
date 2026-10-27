@@ -948,3 +948,57 @@ func indexOf(items []string, s string) int {
 	}
 	return -1
 }
+
+func TestBuildArgv_TmpDirHiding(t *testing.T) {
+	t.Run("pairless_session_hides_derived_upper_root", func(t *testing.T) {
+		// A session whose /tmp is host-backed but that holds no persistent
+		// overlay uppers must still hide the derived upper root: without
+		// the tmpfs, the ro-bind of / exposes every session's backing dir.
+		opts := basicWrapOpts()
+		opts.Overlays = []OverlaySpec{{Path: "/workspace", Mode: WorkspaceRW}}
+		opts.TmpDir = "/var/lib/execd/isolation/abc/tmp"
+		argv, err := buildArgv(opts, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		s := strings.Join(argv, " ")
+		if !strings.Contains(s, "--tmpfs /var/lib/execd/isolation") {
+			t.Errorf("missing upper-root hiding tmpfs for the /tmp backing dir:\n  %s", s)
+		}
+	})
+
+	t.Run("overlay_derived_and_tmp_derived_roots_dedupe", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.Overlays = []OverlaySpec{{
+			Path:     "/workspace",
+			Mode:     WorkspaceOverlay,
+			UpperDir: "/var/lib/execd/isolation/abc/upper",
+		}}
+		opts.TmpDir = "/var/lib/execd/isolation/abc/tmp"
+		argv, err := buildArgv(opts, "")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got := strings.Count(strings.Join(argv, " "), "--tmpfs /var/lib/execd/isolation"); got != 1 {
+			t.Errorf("hiding tmpfs count = %d, want 1 (deduped)", got)
+		}
+	})
+
+	t.Run("shallow_tmp_dir_rejected", func(t *testing.T) {
+		opts := basicWrapOpts()
+		opts.TmpDir = "/x/tmp"
+		_, err := buildArgv(opts, "")
+		if err == nil || !strings.Contains(err.Error(), "upper root") {
+			t.Fatalf("error = %v, want shallow upper-root rejection", err)
+		}
+	})
+}
+
+func TestBuildArgv_BindDestRootRejected(t *testing.T) {
+	opts := basicWrapOpts()
+	opts.Binds = []BindMount{{Source: "/data", Dest: "/"}}
+	_, err := buildArgv(opts, "")
+	if err == nil || !strings.Contains(err.Error(), "shadow the namespace root") {
+		t.Fatalf("error = %v, want namespace-root shadow rejection", err)
+	}
+}

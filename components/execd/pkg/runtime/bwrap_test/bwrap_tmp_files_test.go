@@ -176,3 +176,84 @@ func TestTmpFiles_MountOnTmpServedByFilesAPI(t *testing.T) {
 	require.NoError(t, err, "files API must serve a mount covering /tmp")
 	assert.Equal(t, "mount-tmp\n", string(data))
 }
+
+// TestTmpFiles_SymlinkEscapeConfined: /tmp is attacker-controlled, so a
+// symlink planted by the workload must not redirect a files-API write (or
+// read) outside the session's backing dir. The confined view rejects the
+// traversal where the trusted bind view would have followed it.
+func TestTmpFiles_SymlinkEscapeConfined(t *testing.T) {
+	r, upperRoot := newStrictRunner(t)
+	id := strictSession(t, r)
+	backing := tmpBackingDir(t, upperRoot)
+
+	outside := filepath.Join(filepath.Dir(backing), "escape-canary.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("host-secret"), 0o644))
+	t.Cleanup(func() { _ = os.Remove(outside) })
+
+	runInSession(t, r, id, "ln -s "+outside+" /tmp/escape", nil)
+
+	mv, err := r.GetMergedView(id)
+	require.NoError(t, err)
+
+	if _, err := mv.ReadFile("/tmp/escape"); err == nil {
+		t.Fatal("ReadFile through the escaping symlink must be rejected")
+	}
+	require.Error(t, mv.WriteFile("/tmp/escape", []byte("evil"), 0o644),
+		"WriteFile through the escaping symlink must be rejected")
+	got, err := os.ReadFile(outside)
+	require.NoError(t, err)
+	assert.Equal(t, "host-secret", string(got), "the host file must be untouched")
+
+	// In-root symlinks keep working, matching the namespace.
+	runInSession(t, r, id, "echo local > /tmp/target.txt && ln -s target.txt /tmp/link", nil)
+	data, err := mv.ReadFile("/tmp/link.txt")
+	require.NoError(t, err)
+	assert.Equal(t, "local\n", string(data))
+}
+
+// TestTmpFiles_MountRootRemovalRejected: deleting /tmp itself would unlink
+// the host backing dir under the live bind, so the files API rejects it
+// while child removal keeps working.
+func TestTmpFiles_MountRootRemovalRejected(t *testing.T) {
+	r, _ := newStrictRunner(t)
+	id := strictSession(t, r)
+
+	runInSession(t, r, id, "echo keep > /tmp/keep.txt", nil)
+
+	mv, err := r.GetMergedView(id)
+	require.NoError(t, err)
+	require.Error(t, mv.RemoveAll("/tmp"), "RemoveAll /tmp must be rejected")
+	require.Error(t, mv.Remove("/tmp"), "Remove /tmp must be rejected")
+
+	data, err := mv.ReadFile("/tmp/keep.txt")
+	require.NoError(t, err, "the backing dir must survive removal attempts")
+	assert.Equal(t, "keep\n", string(data))
+
+	require.NoError(t, mv.Remove("/tmp/keep.txt"), "child removal must keep working")
+}
+
+// TestTmpFiles_UIDSwitchedSessionCanWrite: the backing dir is world-writable
+// + sticky, restoring the --tmpfs /tmp semantics for setpriv sessions that
+// drop to a non-root uid.
+func TestTmpFiles_UIDSwitchedSessionCanWrite(t *testing.T) {
+	r, _ := newStrictRunner(t)
+
+	uid := uint32(1000)
+	gid := uint32(1000)
+	id, err := r.CreateIsolatedSession(&runtime.IsolatedSessionOptions{
+		WorkspacePath: t.TempDir(),
+		WorkspaceMode: "rw",
+		Uid:           &uid,
+		Gid:           &gid,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.DeleteIsolatedSession(id) })
+
+	runInSession(t, r, id, "id -u && echo uid-data > /tmp/uid.txt", nil)
+
+	mv, err := r.GetMergedView(id)
+	require.NoError(t, err)
+	data, err := mv.ReadFile("/tmp/uid.txt")
+	require.NoError(t, err, "the uid-switched session must be able to write /tmp")
+	assert.Equal(t, "uid-data\n", string(data))
+}

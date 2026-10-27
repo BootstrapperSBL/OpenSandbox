@@ -326,7 +326,7 @@ The `profile` field currently controls only how `/tmp` is exposed inside the nam
 
 | Profile | `/tmp` |
 |---|---|
-| `strict` (default) | Session-private tmpfs (`--tmpfs /tmp`) |
+| `strict` (default) | Session-private, host-backed bind (`--bind <upper_root>/<session>/tmp /tmp`) |
 | `balanced` | Shared with the sandbox (`--bind /tmp /tmp`) |
 
 In the `strict` profile the private `/tmp` is backed by a host directory under the session's `upper_root` subtree, bind-mounted into the namespace, so `session.files` and `session.run` see the same `/tmp` content in both directions. The directory is created empty at session start, lives only as long as the session, and is removed with the rest of the session state on `DELETE` / idle collection. A `binds` entry or overlay sharing the `/tmp` destination still shadows it, exactly as inside the namespace. The `balanced` profile shares the sandbox's own `/tmp`, which stays outside the files API's mount view.

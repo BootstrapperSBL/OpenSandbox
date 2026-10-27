@@ -590,3 +590,45 @@ func TestNewMergedView_BindOnTmpShadowsTmpBind(t *testing.T) {
 		t.Fatalf("ReadFile /tmp/marker.txt = %q, %v; want the caller bind to shadow the session /tmp bind", data, err)
 	}
 }
+
+// TestNewMergedView_TmpMountRootRemovalRejected: the hosted /tmp view is a
+// bind-style mount; removing the mount root itself would unlink the host
+// backing dir while the namespace keeps the mount, so the router rejects it
+// while child removal keeps working.
+func TestNewMergedView_TmpMountRootRemovalRejected(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsLower := filepath.Join(base, "ws")
+	tmpHost := filepath.Join(base, "session-dir", "tmp")
+	for _, dir := range []string{wsLower, tmpHost} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(tmpHost, "f.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newBindsViewSession(t,
+		[]IsolatedOverlayOptions{{Path: wsLower, Mode: "rw"}},
+		nil,
+		nil,
+	)
+	s.tmpDir = tmpHost
+	view := newMergedView(s)
+
+	if err := view.Remove("/tmp"); err == nil || !strings.Contains(err.Error(), "mount root") {
+		t.Fatalf("Remove /tmp = %v, want mount-root rejection", err)
+	}
+	if err := view.RemoveAll("/tmp"); err == nil || !strings.Contains(err.Error(), "mount root") {
+		t.Fatalf("RemoveAll /tmp = %v, want mount-root rejection", err)
+	}
+	if _, err := os.Stat(tmpHost); err != nil {
+		t.Fatalf("backing dir must survive removal attempts: %v", err)
+	}
+	if err := view.Remove("/tmp/f.txt"); err != nil {
+		t.Fatalf("child removal = %v, want nil", err)
+	}
+}

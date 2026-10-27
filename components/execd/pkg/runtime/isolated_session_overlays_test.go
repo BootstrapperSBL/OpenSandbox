@@ -509,3 +509,67 @@ func TestNewMergedView_MultiOverlayRouting(t *testing.T) {
 		t.Fatalf("relative write did not resolve against the primary overlay: %v", err)
 	}
 }
+
+// TestCreateIsolatedSession_ExtraWritableOnTmpRejected: an extra_writable
+// path at or under /tmp shadows the hosted private /tmp inside the
+// namespace (bwrap applies extra binds after the /tmp bind) while the files
+// view would keep serving the backing dir, so create must reject the
+// overlap for hosted sessions only.
+func TestCreateIsolatedSession_ExtraWritableOnTmpRejected(t *testing.T) {
+	allowTmp := func(r *IsolatedRunner) {
+		r.allowedWritable = []string{"/tmp"}
+	}
+	// extra_writable validation requires an existing host path.
+	requireTmpCache := func(t *testing.T) {
+		t.Helper()
+		if err := os.MkdirAll("/tmp/extra-writable-test-cache", 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll("/tmp/extra-writable-test-cache") })
+	}
+
+	t.Run("hosted_strict_rejects_tmp_extra_writable", func(t *testing.T) {
+		requireTmpCache(t)
+		runner := newTestRunner(t)
+		allowTmp(runner)
+		_, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+			Overlays:      []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			ExtraWritable: []string{"/tmp/extra-writable-test-cache"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "shadows the session's private /tmp") {
+			t.Fatalf("error = %v, want private /tmp shadow rejection", err)
+		}
+	})
+
+	t.Run("balanced_allows_tmp_extra_writable", func(t *testing.T) {
+		requireTmpCache(t)
+		runner := newTestRunner(t)
+		allowTmp(runner)
+		id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+			Profile:       string(isolation.ProfileBalanced),
+			Overlays:      []IsolatedOverlayOptions{{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"}},
+			ExtraWritable: []string{"/tmp/extra-writable-test-cache"},
+		})
+		if err != nil {
+			t.Fatalf("balanced sessions share the sandbox /tmp and need no hosted dir: %v", err)
+		}
+		_ = runner.DeleteIsolatedSession(id)
+	})
+
+	t.Run("overlay_covering_tmp_allows_extra_writable", func(t *testing.T) {
+		requireTmpCache(t)
+		runner := newTestRunner(t)
+		allowTmp(runner)
+		id, err := runner.CreateIsolatedSession(&IsolatedSessionOptions{
+			Overlays: []IsolatedOverlayOptions{
+				{Path: filepath.Join(t.TempDir(), "ws"), Mode: "rw"},
+				{Path: "/tmp", Mode: "rw"},
+			},
+			ExtraWritable: []string{"/tmp/extra-writable-test-cache"},
+		})
+		if err != nil {
+			t.Fatalf("an overlay on /tmp replaces the hosted bind, so no divergence: %v", err)
+		}
+		_ = runner.DeleteIsolatedSession(id)
+	})
+}

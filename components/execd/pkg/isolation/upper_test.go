@@ -795,3 +795,59 @@ func TestAllocateN_CreatesTmpDir(t *testing.T) {
 		}
 	}
 }
+
+func TestAllocateTmpDirWorldWritableSticky(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	for _, tc := range []struct {
+		name  string
+		alloc func() (string, error)
+	}{
+		{"allocate_session_dir", func() (string, error) { return mgr.AllocateSessionDir() }},
+		{"allocate_n", func() (string, error) {
+			id, _, err := mgr.AllocateN(1)
+			return id, err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id, err := tc.alloc()
+			if err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(mgr.TmpDir(id))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if perm := info.Mode().Perm(); perm != 0o777 {
+				t.Fatalf("tmp dir perm = %#o, want 777", perm)
+			}
+			if info.Mode()&os.ModeSticky == 0 {
+				t.Fatal("tmp dir must be sticky")
+			}
+		})
+	}
+}
+
+func TestUsageCountsTmpDir(t *testing.T) {
+	mgr := newTestUpperManager(t)
+
+	id, err := mgr.AllocateSessionDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := mgr.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(mgr.TmpDir(id), "payload.bin")
+	if err := os.WriteFile(payload, make([]byte, 1024), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := mgr.Usage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after-before < 1024 {
+		t.Fatalf("usage grew by %d bytes, want >= 1024 (tmp dir must count)", after-before)
+	}
+}

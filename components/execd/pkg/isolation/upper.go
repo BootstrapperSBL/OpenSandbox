@@ -162,6 +162,22 @@ func (m *UpperManager) TmpDir(sessionID string) string {
 	return filepath.Join(m.root, sessionID, tmpDirName)
 }
 
+// allocateTmpDir creates the session's /tmp backing directory with real
+// /tmp semantics: world-writable + sticky, so uid-switched setpriv sessions
+// can create entries after the workload gate drops credentials (the old
+// --tmpfs /tmp was kernel-mounted world-writable too). Chmod is explicit
+// because a restrictive umask would strip the write bits from MkdirAll.
+func allocateTmpDir(sessionDir string) error {
+	tmpDir := filepath.Join(sessionDir, tmpDirName)
+	if err := os.MkdirAll(tmpDir, 0o777); err != nil {
+		return fmt.Errorf("upper: mkdir %s: %w", tmpDir, err)
+	}
+	if err := os.Chmod(tmpDir, 0o777|os.ModeSticky); err != nil {
+		return fmt.Errorf("upper: chmod %s: %w", tmpDir, err)
+	}
+	return nil
+}
+
 // AllocateSessionDir creates a session directory without overlay pairs, for
 // sessions whose mounts need no host uppers. The directory still carries a
 // durable cleanup record and holds the session's /tmp backing directory, so
@@ -187,11 +203,14 @@ func (m *UpperManager) AllocateSessionDir() (sessionID string, err error) {
 		return "", err
 	}
 	sessionDir := filepath.Join(m.root, id)
-	if err := os.MkdirAll(filepath.Join(sessionDir, tmpDirName), 0o755); err != nil {
+	if err := allocateTmpDir(sessionDir); err != nil {
 		if rollbackErr := m.rollbackAllocationLocked(id, sessionDir, nil); rollbackErr != nil {
-			return "", errors.Join(err, rollbackErr)
+			return "", errors.Join(
+				fmt.Errorf("upper: allocate session dir %s: %w", sessionDir, err),
+				rollbackErr,
+			)
 		}
-		return "", fmt.Errorf("upper: mkdir session dir %s: %w", sessionDir, err)
+		return "", fmt.Errorf("upper: allocate session dir %s: %w", sessionDir, err)
 	}
 	m.entries[id] = &UpperEntry{InUse: true, dir: sessionDir}
 	return id, nil
@@ -234,8 +253,8 @@ func (m *UpperManager) AllocateN(n int) (sessionID string, pairs []UpperDirPair,
 		}
 		return "", nil, cause
 	}
-	if err := os.MkdirAll(filepath.Join(sessionDir, tmpDirName), 0o755); err != nil {
-		return failAllocation(fmt.Errorf("upper: mkdir %s: %w", filepath.Join(sessionDir, tmpDirName), err))
+	if err := allocateTmpDir(sessionDir); err != nil {
+		return failAllocation(err)
 	}
 	for i := range n {
 		upperName, workName := "upper", "work"
@@ -338,11 +357,23 @@ func (m *UpperManager) Usage() (int64, error) {
 // usageLocked calculates usage without acquiring the mutex. Caller must hold m.mu.
 // Missing released upper directories are tolerated as cleanup residue. A missing
 // in-use upper makes the measurement invalid instead of reporting false zero.
+// Each entry's /tmp backing dir counts toward usage too, so the maxBytes
+// admission gate bounds /tmp growth like overlay uppers.
 func (m *UpperManager) usageLocked() (int64, error) {
 	var total int64
 	for _, e := range m.entries {
 		for _, p := range e.Pairs {
 			size, err := dirSize(p.UpperDir)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) && !e.InUse {
+					continue
+				}
+				return 0, err
+			}
+			total += size
+		}
+		if dir := e.sessionDir(); dir != "" {
+			size, err := dirSize(filepath.Join(dir, tmpDirName))
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) && !e.InUse {
 					continue
