@@ -64,6 +64,15 @@ type Options struct {
 	// IP-only and unscoped by UID, so putting the proxy there would let
 	// sandbox workloads CONNECT it directly and bounce to denied destinations.
 	UpstreamProxy *UpstreamProxyEndpoint
+	// MitmRedirectPort, when > 0, is the transparent-MITM listener port the
+	// nat OUTPUT REDIRECT rewrites intercepted dports (80/443 + extras) to.
+	// The redirect runs at a lower priority than this filter chain and leaves
+	// oif on the original egress interface, so the rewritten dport would
+	// otherwise be judged as if the workload had dialed the listener itself:
+	// the port floor complement, user port-scoped rules, and the final
+	// default-deny drop would blackhole every intercepted flow. 0 (transparent
+	// MITM disabled) emits nothing.
+	MitmRedirectPort int
 }
 
 type Manager struct {
@@ -294,6 +303,16 @@ func buildRuleset(p *policy.NetworkPolicy, opts Options) (string, error) {
 	// The ip6 OUTPUT REDIRECTs (DNS → :15353, MITM → :18081) land on ::1 with the original egress
 	// interface still selected, so oifname "lo" does not match them: ::1 is the v6 loopback rule.
 	fmt.Fprintf(&b, "add rule inet %s %s ip6 daddr ::1 accept\n", tableName, chainName)
+	// The v4 MITM redirect lands on 127.0.0.1 with the original egress interface still
+	// selected, so oifname "lo" does not match either; exempt the redirect target ahead
+	// of every port-scoped rule (mirrors the dnsproxy rules above). Redirected flows
+	// are still policed through mitmproxy's own re-originated connections, which are
+	// not exempt. Direct workload dials of the listener already pass via oifname "lo"
+	// (the route to 127.0.0.1 is lo), so this adds no new reachability; v6 is covered
+	// by the ::1 rule above.
+	if opts.MitmRedirectPort > 0 {
+		fmt.Fprintf(&b, "add rule inet %s %s ip daddr 127.0.0.1 tcp dport %d accept\n", tableName, chainName, opts.MitmRedirectPort)
+	}
 	if ep := opts.UpstreamProxy; ep != nil {
 		b.WriteString(buildUpstreamProxyStatic(tableName, ep))
 	}
