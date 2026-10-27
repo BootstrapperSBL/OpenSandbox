@@ -76,7 +76,7 @@ func TestGatewayDNSRedirectKernelPrivateNS(t *testing.T) {
 
 	assertGatewayDNSTableMissing(t, ctx)
 	t.Cleanup(func() {
-		if err := ReplaceGatewayDNSRedirects(nil, 15353); err != nil {
+		if err := ReplaceGatewayDNSRedirects(context.Background(), nil, 15353); err != nil {
 			t.Errorf("remove gateway DNS test table during cleanup: %v", err)
 		}
 	})
@@ -89,26 +89,26 @@ func TestGatewayDNSRedirectKernelPrivateNS(t *testing.T) {
 
 	// The first real install begins with no table and exercises the production
 	// missing-table retry, not just rule parsing in a fake runner.
-	require.NoError(t, ReplaceGatewayDNSRedirects([]netip.Addr{gw1}, 15353))
+	require.NoError(t, ReplaceGatewayDNSRedirects(context.Background(), []netip.Addr{gw1}, 15353))
 	assertGatewayDNSKernelRules(t, ctx, []netip.Addr{gw1})
 
 	wantShared := []netip.Addr{gw1, gw1PrefixNeighbor, ipv6, gw1PrefixNeighbor, mappedGW1}
-	require.NoError(t, ReplaceGatewayDNSRedirects(wantShared, 15353))
+	require.NoError(t, ReplaceGatewayDNSRedirects(context.Background(), wantShared, 15353))
 	assertGatewayDNSKernelRules(t, ctx, wantShared)
 
 	remaining := []netip.Addr{gw1PrefixNeighbor, ipv6}
-	require.NoError(t, ReplaceGatewayDNSRedirects(remaining, 15353))
+	require.NoError(t, ReplaceGatewayDNSRedirects(context.Background(), remaining, 15353))
 	assertGatewayDNSKernelRules(t, ctx, remaining)
 
 	rebound := []netip.Addr{gw1PrefixNeighbor, gw3, ipv6}
-	require.NoError(t, ReplaceGatewayDNSRedirects(rebound, 15353))
+	require.NoError(t, ReplaceGatewayDNSRedirects(context.Background(), rebound, 15353))
 	assertGatewayDNSKernelRules(t, ctx, rebound)
-	require.NoError(t, ReplaceGatewayDNSRedirects(rebound, 15353), "replay of the same complete set")
+	require.NoError(t, ReplaceGatewayDNSRedirects(context.Background(), rebound, 15353), "replay of the same complete set")
 	assertGatewayDNSKernelRules(t, ctx, rebound)
 
-	require.NoError(t, ReplaceGatewayDNSRedirects(nil, 15353))
+	require.NoError(t, ReplaceGatewayDNSRedirects(context.Background(), nil, 15353))
 	assertGatewayDNSTableMissing(t, ctx)
-	require.NoError(t, ReplaceGatewayDNSRedirects(nil, 15353), "empty desired set is idempotent when the table is absent")
+	require.NoError(t, ReplaceGatewayDNSRedirects(context.Background(), nil, 15353), "empty desired set is idempotent when the table is absent")
 	assertGatewayDNSTableMissing(t, ctx)
 }
 

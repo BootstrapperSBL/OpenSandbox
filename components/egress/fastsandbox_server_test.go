@@ -25,6 +25,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,7 +66,7 @@ func newFakeGatewayDNSRedirectApplier() *fakeGatewayDNSRedirectApplier {
 	return &fakeGatewayDNSRedirectApplier{gateways: make(map[netip.Addr]struct{})}
 }
 
-func (f *fakeGatewayDNSRedirectApplier) apply(gateways []netip.Addr, _ int) error {
+func (f *fakeGatewayDNSRedirectApplier) apply(_ context.Context, gateways []netip.Addr, _ int) error {
 	f.calls++
 	fail := f.calls == f.failAt
 	if fail && !f.applyThenFail {
@@ -140,7 +141,7 @@ func fastSandboxTestServer(t *testing.T) (*fastSandboxPolicyServer, *subject.Mem
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	// no-op the gateway DNS redirect (no iptables/nft in unit tests)
-	srv.dnsRedirectApply = func([]netip.Addr, int) error { return nil }
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 	// Policy persistence is REQUIRED in the fast-sandbox profile — every
 	// test server carries a store, mirroring the production posture (no
 	// memory-only mode). The file seam defaults to a cross-platform fake
@@ -1137,7 +1138,7 @@ func TestFastSandboxServerAlwaysRulesReachNft(t *testing.T) {
 	nft := &fakeNft{}
 	srv := newFastSandboxPolicyServer(context.Background(), reg, nft)
 	wireTestPolicyPersistence(t, srv)
-	srv.dnsRedirectApply = func([]netip.Addr, int) error { return nil }
+	srv.dnsRedirectApply = func(context.Context, []netip.Addr, int) error { return nil }
 
 	// activation through the action protocol; the binding policy reaches nft
 	// merged with the always overlay
@@ -1228,19 +1229,41 @@ func TestFastSandboxServerGatewayRedirectRefcounted(t *testing.T) {
 	assert.Empty(t, dns.snapshot(), "the final release removes the DNS table contents")
 }
 
+func TestFastSandboxServerGatewayRedirectUsesLifecycleDeadline(t *testing.T) {
+	srv, _, _ := fastSandboxTestServer(t)
+	var contexts []context.Context
+	srv.dnsRedirectApply = func(ctx context.Context, _ []netip.Addr, _ int) error {
+		contexts = append(contexts, ctx)
+		return nil
+	}
+	subj := subject.FromSandboxUID("dns-context")
+	att := mitmAtt(t, "10.0.0.5", "10.10.0.1")
+
+	require.NoError(t, srv.OnRegistered(subj, att))
+	require.NoError(t, srv.OnUnloaded(subj, att))
+	require.Len(t, contexts, 2)
+	for i, maxTimeout := range []time.Duration{policyApplyTimeout, 30 * time.Second} {
+		deadline, ok := contexts[i].Deadline()
+		require.True(t, ok, "lifecycle operation %d must have a deadline", i)
+		remaining := time.Until(deadline)
+		assert.Positive(t, remaining, "lifecycle context should still be within its deadline")
+		assert.LessOrEqual(t, remaining, maxTimeout, "lifecycle context must preserve its existing timeout")
+	}
+}
+
 func TestFastSandboxServerReleaseCleansUncommittedInstallAfterLostResult(t *testing.T) {
 	srv, _, _ := fastSandboxTestServer(t)
 	dns := newFakeGatewayDNSRedirectApplier()
 	srv.dnsRedirectApply = dns.apply
 	subj, gw := subject.FromSandboxUID("uncommitted"), netip.MustParseAddr("10.10.0.1")
 	dns.failOnCall(1, errors.New("result lost"), true)
-	require.Error(t, srv.installGatewayDNSRedirect(subj, gw))
+	require.Error(t, srv.installGatewayDNSRedirect(context.Background(), subj, gw))
 	srv.gwMu.Lock()
 	assert.Empty(t, srv.gatewayDNSRefs)
 	srv.gwMu.Unlock()
 	assert.Equal(t, map[netip.Addr]struct{}{gw: {}}, dns.snapshot())
 
-	require.NoError(t, srv.releaseGatewayDNSRedirect(subj))
+	require.NoError(t, srv.releaseGatewayDNSRedirect(context.Background(), subj))
 	assert.Empty(t, dns.snapshot(), "release reconciles even though install ownership was not committed")
 }
 

@@ -36,14 +36,14 @@ const gatewayDNSNftTable = "opensandbox_gateway_dns"
 // shared table. Empty gateways means remove the table; addresses are
 // normalized and deduplicated before rendering so mapped IPv4 values cannot
 // create a second spelling of the same gateway.
-func gatewayDNSRedirectScript(gateways []netip.Addr, port int) (string, error) {
+func gatewayDNSRedirectScript(gateways []netip.Addr, port int) (string, int, error) {
 	if port <= 0 {
-		return "", fmt.Errorf("gateway DNS redirect: invalid port %d", port)
+		return "", 0, fmt.Errorf("gateway DNS redirect: invalid port %d", port)
 	}
 	unique := make(map[netip.Addr]struct{}, len(gateways))
 	for _, gateway := range gateways {
 		if !gateway.IsValid() {
-			return "", fmt.Errorf("gateway DNS redirect: invalid gateway %s", gateway)
+			return "", 0, fmt.Errorf("gateway DNS redirect: invalid gateway %s", gateway)
 		}
 		unique[gateway.Unmap()] = struct{}{}
 	}
@@ -56,7 +56,7 @@ func gatewayDNSRedirectScript(gateways []netip.Addr, port int) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "delete table inet %s\n", gatewayDNSNftTable)
 	if len(normalized) == 0 {
-		return b.String(), nil
+		return b.String(), len(normalized), nil
 	}
 	fmt.Fprintf(&b, "add table inet %s\n", gatewayDNSNftTable)
 	fmt.Fprintf(&b, "add chain inet %s gw { type nat hook prerouting priority dstnat; }\n", gatewayDNSNftTable)
@@ -68,24 +68,27 @@ func gatewayDNSRedirectScript(gateways []netip.Addr, port int) (string, error) {
 		fmt.Fprintf(&b, "add rule inet %s gw %s daddr %s udp dport 53 redirect to :%d\n", gatewayDNSNftTable, family, addr, port)
 		fmt.Fprintf(&b, "add rule inet %s gw %s daddr %s tcp dport 53 redirect to :%d\n", gatewayDNSNftTable, family, addr, port)
 	}
-	return b.String(), nil
+	return b.String(), len(normalized), nil
 }
 
 // ReplaceGatewayDNSRedirects atomically replaces the shared prerouting
 // redirect table with exactly the supplied gateway set. Callers own the
 // subject-to-gateway map and must retain it for a retry when this returns an
 // error; an ambiguous command result does not prove the old table is live.
-func ReplaceGatewayDNSRedirects(gateways []netip.Addr, port int) error {
-	return replaceGatewayDNSRedirects(defaultRedirectRunner(), gateways, port)
+func ReplaceGatewayDNSRedirects(ctx context.Context, gateways []netip.Addr, port int) error {
+	return replaceGatewayDNSRedirects(ctx, defaultRedirectRunner(), gateways, port)
 }
 
-func replaceGatewayDNSRedirects(r redirectRunner, gateways []netip.Addr, port int) error {
-	script, err := gatewayDNSRedirectScript(gateways, port)
+func replaceGatewayDNSRedirects(ctx context.Context, r redirectRunner, gateways []netip.Addr, port int) error {
+	script, uniqueGatewayCount, err := gatewayDNSRedirectScript(gateways, port)
 	if err != nil {
 		return err
 	}
-	out, err := r.runNft(context.Background(), script)
+	out, err := r.runNft(ctx, script)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("gateway DNS redirect replace: %w (output: %s)", ctxErr, strings.TrimSpace(string(out)))
+		}
 		if !isNftMissingTableErrorFor(out, err, gatewayDNSNftTable) {
 			return fmt.Errorf("gateway DNS redirect replace: %w (output: %s)", err, strings.TrimSpace(string(out)))
 		}
@@ -93,11 +96,14 @@ func replaceGatewayDNSRedirects(r redirectRunner, gateways []netip.Addr, port in
 			return nil
 		}
 		retryScript := removeNftDeleteTableLineFor(script, gatewayDNSNftTable)
-		retryOut, retryErr := r.runNft(context.Background(), retryScript)
+		retryOut, retryErr := r.runNft(ctx, retryScript)
 		if retryErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("gateway DNS redirect replace retry: %w (output: %s)", ctxErr, strings.TrimSpace(string(retryOut)))
+			}
 			return fmt.Errorf("gateway DNS redirect replace retry: %w (output: %s)", retryErr, strings.TrimSpace(string(retryOut)))
 		}
 	}
-	log.Infof("gateway DNS redirects replaced (%d gateway input(s) -> :%d)", len(gateways), port)
+	log.Infof("gateway DNS redirects replaced (%d unique gateway(s) -> :%d)", uniqueGatewayCount, port)
 	return nil
 }

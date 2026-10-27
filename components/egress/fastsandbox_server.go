@@ -117,7 +117,7 @@ type fastSandboxPolicyServer struct {
 	// ownership for a later lifecycle retry. gwMu serializes map/table updates.
 	gwMu             sync.Mutex
 	gatewayDNSRefs   map[subject.Subject]netip.Addr
-	dnsRedirectApply func(gateways []netip.Addr, port int) error
+	dnsRedirectApply func(ctx context.Context, gateways []netip.Addr, port int) error
 
 	// mitmMu guards the per-subject interception entries; the Pod-netns table
 	// is rebuilt wholesale from this map on every change (see
@@ -200,12 +200,12 @@ const policyApplyTimeout = 10 * time.Second
 // reconcile, including duplicate delivery: a prior command may have applied
 // but returned an ambiguous error. Fails closed: a subject whose DNS cannot
 // reach the proxy must not register as usable.
-func (s *fastSandboxPolicyServer) installGatewayDNSRedirect(subj subject.Subject, gateway netip.Addr) error {
+func (s *fastSandboxPolicyServer) installGatewayDNSRedirect(ctx context.Context, subj subject.Subject, gateway netip.Addr) error {
 	s.gwMu.Lock()
 	defer s.gwMu.Unlock()
 	next := cloneGatewayDNSRefs(s.gatewayDNSRefs)
 	next[subj] = gateway.Unmap()
-	if err := s.reconcileGatewayDNSRedirectsLocked(next); err != nil {
+	if err := s.reconcileGatewayDNSRedirectsLocked(ctx, next); err != nil {
 		return fmt.Errorf("gateway DNS redirect install: %w", err)
 	}
 	s.gatewayDNSRefs = next
@@ -216,12 +216,12 @@ func (s *fastSandboxPolicyServer) installGatewayDNSRedirect(subj subject.Subject
 // set even when the subject is absent. A previous apply may have succeeded
 // while its result was lost, leaving no committed map entry to drive cleanup.
 // On failure, retain the old map for a retry.
-func (s *fastSandboxPolicyServer) releaseGatewayDNSRedirect(subj subject.Subject) error {
+func (s *fastSandboxPolicyServer) releaseGatewayDNSRedirect(ctx context.Context, subj subject.Subject) error {
 	s.gwMu.Lock()
 	defer s.gwMu.Unlock()
 	next := cloneGatewayDNSRefs(s.gatewayDNSRefs)
 	delete(next, subj)
-	if err := s.reconcileGatewayDNSRedirectsLocked(next); err != nil {
+	if err := s.reconcileGatewayDNSRedirectsLocked(ctx, next); err != nil {
 		return fmt.Errorf("gateway DNS redirect release: %w", err)
 	}
 	s.gatewayDNSRefs = next
@@ -231,7 +231,7 @@ func (s *fastSandboxPolicyServer) releaseGatewayDNSRedirect(subj subject.Subject
 // reconcileGatewayDNSRedirectsLocked derives a normalized gateway set from
 // the staged subject map. Callers hold gwMu; the applier atomically replaces
 // the table and treats an empty set as removal of the table.
-func (s *fastSandboxPolicyServer) reconcileGatewayDNSRedirectsLocked(refs map[subject.Subject]netip.Addr) error {
+func (s *fastSandboxPolicyServer) reconcileGatewayDNSRedirectsLocked(ctx context.Context, refs map[subject.Subject]netip.Addr) error {
 	if s.dnsRedirectApply == nil {
 		return nil
 	}
@@ -243,7 +243,7 @@ func (s *fastSandboxPolicyServer) reconcileGatewayDNSRedirectsLocked(refs map[su
 	for gateway := range set {
 		gateways = append(gateways, gateway)
 	}
-	return s.dnsRedirectApply(gateways, fastSandboxDNSProxyPort)
+	return s.dnsRedirectApply(ctx, gateways, fastSandboxDNSProxyPort)
 }
 
 func cloneGatewayDNSRefs(refs map[subject.Subject]netip.Addr) map[subject.Subject]netip.Addr {
@@ -482,7 +482,7 @@ func (s *fastSandboxPolicyServer) OnRegistered(subj subject.Subject, att actionh
 		return err
 	}
 	dnsStarted := time.Now()
-	if err := s.installGatewayDNSRedirect(subj, att.Gateway); err != nil {
+	if err := s.installGatewayDNSRedirect(nftCtx, subj, att.Gateway); err != nil {
 		// Fail closed: sandbox DNS addressed to gateway:53 must reach the
 		// proxy; without the redirect the sandbox would fall back to a
 		// resolver the policy cannot see.
@@ -496,7 +496,7 @@ func (s *fastSandboxPolicyServer) OnRegistered(subj subject.Subject, att actionh
 		// traffic the MITM layer is responsible for). Roll back the gateway
 		// DNS redirect installed above — the caller retries OnRegistered,
 		// and an unreleased mapping would keep the gateway redirect forever.
-		if rollbackErr := s.releaseGatewayDNSRedirect(subj); rollbackErr != nil {
+		if rollbackErr := s.releaseGatewayDNSRedirect(nftCtx, subj); rollbackErr != nil {
 			return fmt.Errorf("mitm redirect: %w (DNS rollback failed: %v)", err, rollbackErr)
 		}
 		return err
@@ -564,7 +564,7 @@ func (s *fastSandboxPolicyServer) unloadEnforcement(subj subject.Subject) error 
 	if err := s.nft.Remove(nftCtx, subj); err != nil {
 		return err
 	}
-	if err := s.releaseGatewayDNSRedirect(subj); err != nil {
+	if err := s.releaseGatewayDNSRedirect(nftCtx, subj); err != nil {
 		return err
 	}
 	s.removeMitmRedirect(subj)
