@@ -615,6 +615,8 @@ Both `Sandbox` and `SandboxManager` own a scoped HTTP agent when running on Node
 
 ## Browser Notes
 
+Uploads copy each consumed byte chunk before requesting the next one, so producers can reuse a `Uint8Array` or Node.js `Buffer` between chunks. A `ReadableStream` producer must still keep a chunk unchanged while it is queued and has not yet been consumed.
+
 ::: warning
 - The SDK can run in browsers, but **streaming file uploads are Node-only**.
 - If you pass `ReadableStream` or `AsyncIterable` for `writeFiles`, the browser will fall back to **buffering in memory** before upload.

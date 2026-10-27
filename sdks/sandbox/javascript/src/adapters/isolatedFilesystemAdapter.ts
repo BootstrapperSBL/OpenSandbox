@@ -75,12 +75,12 @@ async function collectBytes(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value) { chunks.push(value); total += value.length; }
+        if (value) { chunks.push(Uint8Array.from(value)); total += value.length; }
       }
     } finally { reader.releaseLock(); }
   } else {
     for await (const chunk of source) {
-      chunks.push(chunk);
+      chunks.push(Uint8Array.from(chunk));
       total += chunk.length;
     }
   }
