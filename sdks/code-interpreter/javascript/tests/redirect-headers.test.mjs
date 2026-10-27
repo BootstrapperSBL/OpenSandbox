@@ -41,6 +41,9 @@ test("code-interpreter requests strip protected headers on cross-origin redirect
   const sandbox = {
     connectionConfig: {
       headers: { "x-global": "global" },
+      // Server-proxied mode is the deployment where the tenant API key rides
+      // along; direct execd requests never carry it.
+      useServerProxy: true,
       fetch: fetchImpl,
       sseFetch: fetchImpl,
     },
@@ -90,6 +93,7 @@ test("streaming run() strips protected headers on cross-origin redirects", async
   const sandbox = {
     connectionConfig: {
       headers: {},
+      useServerProxy: true,
       fetch: fetchImpl,
       sseFetch: fetchImpl,
     },
@@ -134,6 +138,7 @@ test("same-origin redirects preserve the credential", async () => {
   const sandbox = {
     connectionConfig: {
       headers: {},
+      useServerProxy: true,
       fetch: fetchImpl,
       sseFetch: fetchImpl,
     },
