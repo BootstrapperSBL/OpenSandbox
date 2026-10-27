@@ -1,11 +1,11 @@
 // Copyright 2026 The OpenSandbox Authors
-// 
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// 
+//
 //     http://www.apache.org/licenses/LICENSE-2.0
-// 
+//
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -30,19 +30,21 @@ export interface paths {
         };
         /**
          * Read sandbox network policy
-         * @description For Fsb, reads persisted egress Action Binding intent in the tenant's
-         *     Sandbox CR, not live enforcement state. An absent binding defaults to
-         *     deny-first when an egress handler is configured; this is not proof of
-         *     enforcement on a pool without that handler. Other backends proxy the
-         *     sandbox-side egress service. Requires lifecycle API authentication.
+         * @description Fsb reads the egress-held policy record — the response reflects
+         *     exactly what the egress enforces, not the create-time binding input.
+         *     Other backends proxy the sandbox-side egress service. Requires
+         *     lifecycle API authentication.
          */
         get: operations["getSandboxNetworkPolicy"];
         /**
          * Replace the complete sandbox network policy
          * @description Replaces defaultAction and all rules, rather than merging them. Fsb
-         *     commits the egress binding through FastPath, preserving unrelated bindings
-         *     with UID/generation conflict protection. Success does not imply handler
-         *     convergence. Other backends proxy the sandbox-side egress service.
+         *     relays the replacement to the egress-held policy record through the
+         *     FastPath handler relay — the ack means the egress applied it (and, with
+         *     policy persistence, that it is durable). The create-time binding input
+         *     is the bootstrap only; runtime changes never rewrite it, and a paused
+         *     (sealed) sandbox rejects mutations until resume. Other backends proxy
+         *     the sandbox-side egress service.
          */
         put: operations["replaceSandboxNetworkPolicy"];
         post?: never;
@@ -63,9 +65,10 @@ export interface paths {
          *     take priority over existing rules with the same target and replace
          *     them in place; within one patch payload, the first rule for a target
          *     wins; existing rules for other targets and the current defaultAction
-         *     are preserved. Fsb commits the merged binding through FastPath with
-         *     UID/generation conflict protection. Other backends proxy the
-         *     sandbox-side egress service.
+         *     are preserved. Fsb composes the merge server-side (relay GET → merge
+         *     → relay PUT carrying the read revision) — a concurrent writer wins
+         *     and the stale merge is a 409. Other backends proxy the sandbox-side
+         *     egress service.
          */
         patch: operations["patchSandboxNetworkPolicy"];
         trace?: never;
@@ -1716,6 +1719,11 @@ export interface components {
              * @description Optional outbound network policy for the sandbox.
              *     Shape matches the sidecar `/policy` endpoint. If omitted or empty,
              *     the sidecar starts in allow-all mode until updated.
+             *     For Fsb, an omitted policy still registers an egress binding,
+             *     seeded with a no-op default-allow record (the sandbox behaves
+             *     like a policy-less one until changed): runtime changes go
+             *     through the networkpolicy endpoints (handler relay), which
+             *     require that registration.
              *     Not supported together with `extensions.poolRef`; pooled pods are
              *     pre-created, so the server rejects this combination instead of
              *     silently ignoring the requested policy.
@@ -2484,6 +2492,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalServerError"];
             /** @description Policy state is temporarily unavailable. */
             503: {

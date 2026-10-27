@@ -126,9 +126,10 @@ def sync_detailed(
     take priority over existing rules with the same target and replace
     them in place; within one patch payload, the first rule for a target
     wins; existing rules for other targets and the current defaultAction
-    are preserved. Fsb commits the merged binding through FastPath with
-    UID/generation conflict protection. Other backends proxy the
-    sandbox-side egress service.
+    are preserved. Fsb composes the merge server-side (relay GET → merge
+    → relay PUT carrying the read revision) — a concurrent writer wins
+    and the stale merge is a 409. Other backends proxy the sandbox-side
+    egress service.
 
     Args:
         sandbox_id (str):
@@ -167,9 +168,10 @@ def sync(
     take priority over existing rules with the same target and replace
     them in place; within one patch payload, the first rule for a target
     wins; existing rules for other targets and the current defaultAction
-    are preserved. Fsb commits the merged binding through FastPath with
-    UID/generation conflict protection. Other backends proxy the
-    sandbox-side egress service.
+    are preserved. Fsb composes the merge server-side (relay GET → merge
+    → relay PUT carrying the read revision) — a concurrent writer wins
+    and the stale merge is a 409. Other backends proxy the sandbox-side
+    egress service.
 
     Args:
         sandbox_id (str):
@@ -203,9 +205,10 @@ async def asyncio_detailed(
     take priority over existing rules with the same target and replace
     them in place; within one patch payload, the first rule for a target
     wins; existing rules for other targets and the current defaultAction
-    are preserved. Fsb commits the merged binding through FastPath with
-    UID/generation conflict protection. Other backends proxy the
-    sandbox-side egress service.
+    are preserved. Fsb composes the merge server-side (relay GET → merge
+    → relay PUT carrying the read revision) — a concurrent writer wins
+    and the stale merge is a 409. Other backends proxy the sandbox-side
+    egress service.
 
     Args:
         sandbox_id (str):
@@ -242,9 +245,10 @@ async def asyncio(
     take priority over existing rules with the same target and replace
     them in place; within one patch payload, the first rule for a target
     wins; existing rules for other targets and the current defaultAction
-    are preserved. Fsb commits the merged binding through FastPath with
-    UID/generation conflict protection. Other backends proxy the
-    sandbox-side egress service.
+    are preserved. Fsb composes the merge server-side (relay GET → merge
+    → relay PUT carrying the read revision) — a concurrent writer wins
+    and the stale merge is a 409. Other backends proxy the sandbox-side
+    egress service.
 
     Args:
         sandbox_id (str):
